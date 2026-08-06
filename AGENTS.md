@@ -22,6 +22,12 @@ inside the `NeteaseKit` SPM module.
 - Deployment target macOS 15. SwiftUI first, AppKit as an escape hatch.
 - AVPlayer with a temporary-directory cache. GRDB for persistence.
 
+## Implementation constraints
+
+- Keep implementations minimal, concise, and efficient.
+- Add only correctness and security checks supported by current evidence. Do not add
+  speculative fallbacks, redundant compatibility layers, or "just in case" branches.
+
 ## Research tools
 
 MCP-first is mandatory for WebSearch and WebFetch.

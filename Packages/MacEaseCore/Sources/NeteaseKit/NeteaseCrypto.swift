@@ -9,6 +9,8 @@ public struct WeAPIParameters: Equatable, Sendable {
 }
 
 public enum NeteaseCrypto {
+  private static let base62 = Array(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
   private static let iv = Data("0102030405060708".utf8)
   private static let presetKey = Data("0CoJUm6Qyw8W8jud".utf8)
   private static let eapiKey = Data("e82ckenh8dichen8".utf8)
@@ -16,6 +18,14 @@ public enum NeteaseCrypto {
     base64Encoded:
       "MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDgtQn2JZ34ZC28NWYpAUd98iZ37BUrX/aKzmFbt7clFSs6sXqHauqKWqdtLkF2KexO40H1YTX8z2lSgBBOAxLsvaklV8k4cBFK9snQXE9/DDaFt6Rr7iVZMldczhC0JNgTz+SHXT6CBHuX3e9SdB1Ua44oncaTWz7OBGLbCiK45wIDAQAB"
   )!
+
+  public static func weapi(json: String) -> WeAPIParameters {
+    var generator = SystemRandomNumberGenerator()
+    let secretKey = String(
+      (0..<kCCKeySizeAES128).map { _ in base62.randomElement(using: &generator)! }
+    )
+    return weapi(json: json, secretKey: secretKey)
+  }
 
   public static func weapi(json: String, secretKey: String) -> WeAPIParameters {
     precondition(secretKey.utf8.count == kCCKeySizeAES128)
