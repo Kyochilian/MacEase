@@ -83,3 +83,33 @@ import Testing
   )
   #expect(parameters.r == "MS2tK79o3GW1nNBiSHA6Vw==")
 }
+
+@Test func xeapiSessionReuseGoldenVector() {
+  let parameters = NeteaseCrypto.xeapi(
+    formBody: Data("ids=%5B347230%5D&level=standard&encodeType=flac".utf8),
+    publicKey: Data(
+      base64Encoded: "YFpyXSpK3+6xop4X7dYhwbdZPujNvESsbEq24vgF0jw="
+    )!,
+    version: "42",
+    sk: "test-sk",
+    os: "android",
+    dynamicKey: Data("session-key-0001".utf8),
+    transform: Data([
+      0x0f, 0x0e, 0x0d, 0x0c, 0x0b, 0x0a, 0x09, 0x08,
+      0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01, 0x00,
+    ]),
+    ephemeralPrivateKey: Data((32..<64).map { UInt8($0) }),
+    nonce: Data((16..<28).map { UInt8($0) }),
+    sessionID: "ssid-test-42"
+  )
+
+  #expect(
+    parameters.b
+      == "zqdQYZk+gzBbfcHaxGhkesCQ7N3JLpxYucLtF3VMjlyw/77Y3Xa+Ou01SKF1APcCVxOlmkJm7EJr2vZ/IFZpk25FlqmCLrCE8DFox6zaCJ/lvfeURTCwyGP9UCBu48AMzFQzJkaaaiTsVcQpzEjI5fsO1FLS9L2sohI32sFZvM9WIobzK1NLq0DYrFaqB7P4lYQkHEqnDN5Y75DphTzBvaWl9jEpgcP4sZ6o82WZJ9I="
+  )
+  #expect(
+    parameters.s
+      == "NYBy1jZYgNGu6jKa35EhODhR7SGijjt16WXQ0s0WYlQQERITFBUWFxgZGhs2An43hEiDrAfdERfHGwI7boc2oJ2ebovOnGI5w58/2NdhKujCbauJVryuC6qvj0adDmakGruqaQ=="
+  )
+  #expect(parameters.r == "FFQImDvaR6cq8m+upjxY1Q==")
+}

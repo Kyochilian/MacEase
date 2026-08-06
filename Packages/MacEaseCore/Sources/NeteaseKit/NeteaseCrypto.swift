@@ -92,7 +92,8 @@ public enum NeteaseCrypto {
     dynamicKey: Data,
     transform: Data,
     ephemeralPrivateKey: Data,
-    nonce: Data
+    nonce: Data,
+    sessionID: String = ""
   ) -> XeAPIParameters {
     precondition(
       publicKey.count == 32 && dynamicKey.count == 16 && transform.count == 16
@@ -141,7 +142,7 @@ public enum NeteaseCrypto {
     s.append(sealed.tag)
 
     let r = aes(
-      Data("\(version)|".utf8),
+      Data("\(version)|\(sessionID)".utf8),
       key: xeapiStaticKey,
       iv: nil,
       options: CCOptions(kCCOptionPKCS7Padding | kCCOptionECBMode)
