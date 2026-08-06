@@ -113,3 +113,28 @@ import Testing
   )
   #expect(parameters.r == "FFQImDvaR6cq8m+upjxY1Q==")
 }
+
+@Test func xeapiKeySignatureGoldenVector() {
+  #expect(
+    NeteaseCrypto.xeapiKeySignature(
+      timestamp: "1722945678123",
+      nonce: "0123456789012345"
+    ) == "9OL4vPcD4GHBd1JVhu9RcB37HlCfZ1Zc2ltR5o8r6H8="
+  )
+}
+
+@Test func xeapiPublicKeyStateGoldenVector() {
+  let state = NeteaseCrypto.decodeXeAPIPublicKeyState(
+    Data(
+      base64Encoded:
+        "GhuOQkj9H8Qa6IXvAf/36MDK6hIpjJgvdZpYr/xQwcKGBtl8KwDC/h+VmkACqd+fN8lKKBP98O6/K3861uVw52zAsj9wmkoUKA7yK8So2K1aM0ZJAJf7T7vl/ndevWBF"
+    )!
+  )
+
+  #expect(
+    state.publicKey
+      == Data(base64Encoded: "YFpyXSpK3+6xop4X7dYhwbdZPujNvESsbEq24vgF0jw=")!
+  )
+  #expect(state.version == "42")
+  #expect(state.sk == "test-sk")
+}

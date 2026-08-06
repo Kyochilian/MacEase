@@ -15,6 +15,12 @@ struct XeAPIParameters: Equatable, Sendable {
   let r: String
 }
 
+struct XeAPIPublicKeyState: Decodable, Equatable, Sendable {
+  let publicKey: Data
+  let version: String
+  let sk: String
+}
+
 public enum NeteaseCrypto {
   private static let base62 = Array(
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
@@ -24,6 +30,12 @@ public enum NeteaseCrypto {
   private static let xeapiStaticKey = Data(
     base64Encoded: "qx1aQw9rsEo/Aegd3XK9kW1c5ZEkisEocUgG1/j7G4Q="
   )!
+  private static let xeapiSignKey = SymmetricKey(
+    data: Data(
+      "mUHCwVNWJbunMqAHf5MImuirT6plvs6VSFW62MGHstFQxhBGdEoIhLItH3djc4+FB/OKty3+lL2rGeoFBpVe5g=="
+        .utf8
+    )
+  )
   private static let publicKeyDER = Data(
     base64Encoded:
       "MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDgtQn2JZ34ZC28NWYpAUd98iZ37BUrX/aKzmFbt7clFSs6sXqHauqKWqdtLkF2KexO40H1YTX8z2lSgBBOAxLsvaklV8k4cBFK9snQXE9/DDaFt6Rr7iVZMldczhC0JNgTz+SHXT6CBHuX3e9SdB1Ua44oncaTWz7OBGLbCiK45wIDAQAB"
@@ -153,6 +165,26 @@ public enum NeteaseCrypto {
       s: s.base64EncodedString(),
       r: r.base64EncodedString()
     )
+  }
+
+  static func xeapiKeySignature(timestamp: String, nonce: String) -> String {
+    Data(
+      HMAC<SHA256>.authenticationCode(
+        for: Data("\(timestamp)\(nonce)".utf8),
+        using: xeapiSignKey
+      )
+    ).base64EncodedString()
+  }
+
+  static func decodeXeAPIPublicKeyState(_ encrypted: Data) -> XeAPIPublicKeyState {
+    let decrypted = aes(
+      encrypted,
+      key: xeapiStaticKey,
+      iv: nil,
+      options: CCOptions(kCCOptionPKCS7Padding | kCCOptionECBMode),
+      operation: CCOperation(kCCDecrypt)
+    )
+    return try! JSONDecoder().decode(XeAPIPublicKeyState.self, from: decrypted)
   }
 
   private static func aes(
