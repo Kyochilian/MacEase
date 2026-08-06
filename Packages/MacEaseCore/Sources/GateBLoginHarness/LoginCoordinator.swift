@@ -154,21 +154,42 @@ final class LoginCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
       case .authenticated:
         status = "Account status authenticated"
       case .signedOut:
-        do {
-          try await vault.delete()
-        } catch {
-          status = keychainErrorMessage(error)
-          return
-        }
-        hasStoredSession = false
-        status = "Stored session expired; sign in again"
-        load(Self.loginURL)
+        _ = await deleteStoredSession(
+          matching: credential,
+          message: "Stored session expired; sign in again"
+        )
       }
     } catch let error as NeteaseServiceError {
       status = "Account status service error \(error.statusCode)"
     } catch {
       status = "Account status network or response error"
     }
+  }
+
+  func invalidateStoredSession(
+    matching credential: NeteaseCredential,
+    message: String
+  ) async -> Bool {
+    guard beginOperation() else { return false }
+    defer { endOperation() }
+    return await deleteStoredSession(matching: credential, message: message)
+  }
+
+  private func deleteStoredSession(
+    matching credential: NeteaseCredential,
+    message: String
+  ) async -> Bool {
+    do {
+      guard try await vault.load() == credential else { return false }
+      try await vault.delete()
+    } catch {
+      status = keychainErrorMessage(error)
+      return false
+    }
+    hasStoredSession = false
+    status = message
+    load(Self.loginURL)
+    return true
   }
 
   func webView(

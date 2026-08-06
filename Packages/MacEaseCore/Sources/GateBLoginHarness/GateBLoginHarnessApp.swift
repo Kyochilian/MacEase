@@ -5,21 +5,27 @@ import WebKit
 @MainActor
 struct GateBLoginHarnessApp: App {
   @State private var coordinator = LoginCoordinator()
+  @State private var playback = PlaybackProbeCoordinator()
   @State private var probes = SandboxProbeCoordinator()
 
   var body: some Scene {
-    Window("MacEase Phase 0 / Gate B", id: "login") {
-      LoginHarnessView(coordinator: coordinator, probes: probes)
+    Window("MacEase Gate B / Gate C Harness", id: "login") {
+      LoginHarnessView(
+        coordinator: coordinator,
+        playback: playback,
+        probes: probes
+      )
         .task {
           await coordinator.start()
         }
     }
-    .defaultSize(width: 960, height: 720)
+    .defaultSize(width: 960, height: 780)
   }
 }
 
 private struct LoginHarnessView: View {
   @Bindable var coordinator: LoginCoordinator
+  @Bindable var playback: PlaybackProbeCoordinator
   let probes: SandboxProbeCoordinator
 
   var body: some View {
@@ -33,9 +39,15 @@ private struct LoginHarnessView: View {
             Task { await coordinator.saveSession() }
           }
           Button("Validate Session") {
-            Task { await coordinator.validateSession() }
+            Task {
+              await coordinator.validateSession()
+              if !coordinator.hasStoredSession {
+                playback.stop()
+              }
+            }
           }
           Button("Clear Session") {
+            playback.stop()
             Task { await coordinator.clearSession() }
           }
 
@@ -72,6 +84,28 @@ private struct LoginHarnessView: View {
 
       VStack(alignment: .leading, spacing: 8) {
         HStack {
+          TextField("Song ID", text: $playback.songID)
+            .frame(width: 140)
+          Button("Play eapi Song") {
+            playback.play(loginCoordinator: coordinator)
+          }
+          .disabled(playback.isBusy)
+          Button("Probe eapi CDN") {
+            playback.probeCDN(loginCoordinator: coordinator)
+          }
+          .disabled(playback.isBusy)
+          Button("Stop eapi Song") {
+            playback.stop()
+          }
+        }
+        Text(playback.status)
+      }
+      .padding(12)
+
+      Divider()
+
+      VStack(alignment: .leading, spacing: 8) {
+        HStack {
           Text(probes.sandboxStatus)
           Spacer()
           Button("Probe AVPlayer") {
@@ -98,6 +132,7 @@ private struct LoginHarnessView: View {
     }
     .frame(minWidth: 760, minHeight: 560)
     .onDisappear {
+      playback.stop()
       probes.stopAVPlayer()
       probes.stopCoreAudio()
     }
