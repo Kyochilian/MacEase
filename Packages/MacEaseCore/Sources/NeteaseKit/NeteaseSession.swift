@@ -13,13 +13,38 @@ public struct NeteaseServiceError: Error, Equatable, Sendable {
   }
 }
 
+package enum LyricsProbeStatus: Equatable, Sendable {
+  case content
+  case noLyrics
+  case http(Int)
+  case service(Int)
+  case invalidResponse
+  case network
+}
+
+package struct LyricsProbeOutcome: Equatable, Sendable {
+  package let status: LyricsProbeStatus
+  package let setsCookie: Bool
+}
+
 public actor NeteaseSession {
+  private struct EndpointDescriptor: Sendable {
+    let path: String
+    let url: URL
+  }
+
+  private static let lyricsEndpoint = EndpointDescriptor(
+    path: "/api/song/lyric/v1",
+    url: URL(string: "https://interfacepc.music.163.com/eapi/song/lyric/v1")!
+  )
+
   private let redirectBlocker: RedirectBlocker
   private let urlSession: URLSession
 
   public init() {
     let configuration = URLSessionConfiguration.ephemeral
     configuration.httpCookieStorage = nil
+    configuration.httpShouldSetCookies = false
     configuration.urlCache = nil
     let redirectBlocker = RedirectBlocker()
     self.redirectBlocker = redirectBlocker
@@ -68,6 +93,55 @@ public actor NeteaseSession {
       throw NeteaseServiceError(statusCode: payload.code)
     }
     return payload.profile == nil ? .signedOut : .authenticated
+  }
+
+  package static func lyricsProbeRequest(songID: Int64) -> URLRequest {
+    let json =
+      #"{"id":"\#(songID)","cp":false,"tv":0,"lv":0,"rv":0,"kv":0,"yv":0,"ytv":0,"yrv":0,"e_r":false,"header":{}}"#
+    let params = NeteaseCrypto.eapi(path: lyricsEndpoint.path, json: json)
+    var request = URLRequest(url: lyricsEndpoint.url)
+    request.httpMethod = "POST"
+    request.httpBody = FormURLEncoder.encode([("params", params)])
+    request.httpShouldHandleCookies = false
+    request.setValue(
+      "application/x-www-form-urlencoded",
+      forHTTPHeaderField: "Content-Type"
+    )
+    request.setValue("MacEasePhase0/0.1 (macOS 15)", forHTTPHeaderField: "User-Agent")
+    return request
+  }
+
+  package func probeLyrics(songID: Int64) async -> LyricsProbeOutcome {
+    do {
+      let (data, response) = try await urlSession.data(
+        for: Self.lyricsProbeRequest(songID: songID)
+      )
+      return Self.classifyLyricsProbe(data: data, response: response as! HTTPURLResponse)
+    } catch {
+      return LyricsProbeOutcome(status: .network, setsCookie: false)
+    }
+  }
+
+  package static func classifyLyricsProbe(
+    data: Data,
+    response: HTTPURLResponse
+  ) -> LyricsProbeOutcome {
+    let setsCookie = response.value(forHTTPHeaderField: "Set-Cookie") != nil
+    guard (200..<300).contains(response.statusCode) else {
+      return LyricsProbeOutcome(status: .http(response.statusCode), setsCookie: setsCookie)
+    }
+    guard let payload = try? JSONDecoder().decode(LyricsProbePayload.self, from: data) else {
+      return LyricsProbeOutcome(status: .invalidResponse, setsCookie: setsCookie)
+    }
+    guard payload.code == 200 else {
+      return LyricsProbeOutcome(status: .service(payload.code), setsCookie: setsCookie)
+    }
+    let status: LyricsProbeStatus =
+      payload.lrc != nil || payload.yrc != nil
+      ? .content
+      : payload.nolyric == true || payload.uncollected == true
+        ? .noLyrics : .invalidResponse
+    return LyricsProbeOutcome(status: status, setsCookie: setsCookie)
   }
 
   private func cookieHeader(_ credential: NeteaseCredential) -> String {
@@ -120,6 +194,16 @@ private struct AccountStatusPayload: Decodable {
   let profile: Profile?
 
   struct Profile: Decodable {}
+}
+
+private struct LyricsProbePayload: Decodable {
+  let code: Int
+  let lrc: LyricsMarker?
+  let yrc: LyricsMarker?
+  let nolyric: Bool?
+  let uncollected: Bool?
+
+  struct LyricsMarker: Decodable {}
 }
 
 private final class RedirectBlocker: NSObject, URLSessionTaskDelegate {

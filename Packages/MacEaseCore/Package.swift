@@ -7,10 +7,15 @@ let package = Package(
   platforms: [.macOS(.v15)],
   products: [
     .library(name: "NeteaseKit", targets: ["NeteaseKit"]),
+    .executable(name: "GateALyricsProbe", targets: ["GateALyricsProbe"]),
     .executable(name: "GateBLoginHarness", targets: ["GateBLoginHarness"]),
   ],
   targets: [
     .target(name: "NeteaseKit"),
+    .executableTarget(
+      name: "GateALyricsProbe",
+      dependencies: ["NeteaseKit"]
+    ),
     .executableTarget(
       name: "GateBLoginHarness",
       dependencies: ["NeteaseKit"]

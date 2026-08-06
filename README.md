@@ -2,7 +2,7 @@
 
 MacEase（Mac + Ease）是一个面向 macOS 的非官方网易云音乐第三方客户端，使用 Swift、SwiftUI 和 Apple 原生框架开发。本项目独立于 NetEase, Inc. 与网易云音乐，未获其关联、授权或背书。
 
-项目当前处于可行性验证阶段，尚无产品 UI 或公开二进制版本；仓库包含协议测试和 Gate B 登录技术 harness。完整研究、架构和风险依据见 [init.md](init.md)。
+项目当前处于可行性验证阶段，尚无产品 UI 或公开二进制版本；仓库包含协议测试、Gate A 单请求读取 probe 和 Gate B 登录技术 harness。完整研究、架构和风险依据见 [init.md](init.md)。
 
 ## 当前范围
 
@@ -38,6 +38,13 @@ swift test -c release
 ```sh
 cd Packages/MacEaseCore
 swift run GateBLoginHarness
+```
+
+运行 Gate A 无 Cookie、无重试歌词 probe：
+
+```sh
+cd Packages/MacEaseCore
+swift run GateALyricsProbe
 ```
 
 组装并运行 Phase 0 App Sandbox harness：
