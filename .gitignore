@@ -1,0 +1,28 @@
+# macOS
+.DS_Store
+
+# Swift / Xcode
+.build/
+.swiftpm/
+DerivedData/
+*.xcarchive
+*.dSYM
+xcuserdata/
+*.xcuserstate
+
+# Local tooling
+.venv/
+__pycache__/
+.pytest_cache/
+.claude/
+.cursor/
+.env
+.env.*
+!.env.example
+
+# Local secrets
+Secrets/
+secrets/
+*.p12
+*.mobileprovision
+*.provisionprofile
