@@ -15,6 +15,28 @@ public struct NeteaseCredential: Codable, Equatable, Sendable {
     }
     return [musicU]
   }
+
+  package init?(cookieHeader: String) {
+    var values: [NeteaseCookie.Name: String] = [:]
+
+    for field in cookieHeader.split(separator: ";") {
+      let pair = field.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+      guard pair.count == 2 else { continue }
+
+      let name = pair[0].trimmingCharacters(in: .whitespaces)
+      guard let name = NeteaseCookie.Name(rawValue: name) else { continue }
+
+      let value = pair[1].trimmingCharacters(in: .whitespaces)
+      guard !value.isEmpty, values[name] == nil else { return nil }
+      values[name] = value
+    }
+
+    guard let musicU = values[.musicU] else { return nil }
+    self.init(
+      musicU: NeteaseCookie(name: .musicU, value: musicU),
+      csrf: values[.csrf].map { NeteaseCookie(name: .csrf, value: $0) }
+    )
+  }
 }
 
 public struct NeteaseCookie: Codable, Equatable, Sendable {

@@ -17,6 +17,7 @@ final class LoginCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
   var status = "Ready"
   var hasStoredSession = false
   var isBusy = false
+  var manualCookieHeader = ""
 
   override init() {
     let dataStore = WKWebsiteDataStore.nonPersistent()
@@ -103,6 +104,42 @@ final class LoginCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
     load(Self.loginURL)
   }
 
+  func importSession() async {
+    guard beginOperation() else { return }
+    defer { endOperation() }
+
+    let header = manualCookieHeader
+    manualCookieHeader = ""
+    guard let credential = NeteaseCredential(cookieHeader: header) else {
+      status = "Manual Cookie header must include one nonempty MUSIC_U"
+      return
+    }
+
+    let state: AccountSessionState
+    do {
+      state = try await session.accountStatus(credential: credential)
+    } catch let error as NeteaseServiceError {
+      status = "Manual Cookie validation service error \(error.statusCode)"
+      return
+    } catch {
+      status = "Manual Cookie validation network or response error"
+      return
+    }
+
+    guard case .authenticated = state else {
+      status = "Manual Cookie session invalid; not saved"
+      return
+    }
+
+    do {
+      try await vault.save(credential)
+      hasStoredSession = true
+      status = "Manual Cookie session authenticated and saved"
+    } catch {
+      status = keychainErrorMessage(error)
+    }
+  }
+
   func validateSession() async {
     guard beginOperation() else { return }
     defer { endOperation() }
@@ -117,7 +154,15 @@ final class LoginCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
       case .authenticated:
         status = "Account status authenticated"
       case .signedOut:
-        status = "Stored session is invalid or expired"
+        do {
+          try await vault.delete()
+        } catch {
+          status = keychainErrorMessage(error)
+          return
+        }
+        hasStoredSession = false
+        status = "Stored session expired; sign in again"
+        load(Self.loginURL)
       }
     } catch let error as NeteaseServiceError {
       status = "Account status service error \(error.statusCode)"

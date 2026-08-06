@@ -19,29 +19,41 @@ struct GateBLoginHarnessApp: App {
 }
 
 private struct LoginHarnessView: View {
-  let coordinator: LoginCoordinator
+  @Bindable var coordinator: LoginCoordinator
   let probes: SandboxProbeCoordinator
 
   var body: some View {
     VStack(spacing: 0) {
-      HStack {
-        Button("Open Login") {
-          coordinator.loadLoginPage()
-        }
-        Button("Save Session") {
-          Task { await coordinator.saveSession() }
-        }
-        Button("Validate Session") {
-          Task { await coordinator.validateSession() }
-        }
-        Button("Clear Session") {
-          Task { await coordinator.clearSession() }
+      VStack(spacing: 8) {
+        HStack {
+          Button("Open Login") {
+            coordinator.loadLoginPage()
+          }
+          Button("Save Session") {
+            Task { await coordinator.saveSession() }
+          }
+          Button("Validate Session") {
+            Task { await coordinator.validateSession() }
+          }
+          Button("Clear Session") {
+            Task { await coordinator.clearSession() }
+          }
+
+          Spacer()
+
+          Text(coordinator.hasStoredSession ? "Stored" : "Not stored")
+            .foregroundStyle(coordinator.hasStoredSession ? .green : .secondary)
         }
 
-        Spacer()
-
-        Text(coordinator.hasStoredSession ? "Stored" : "Not stored")
-          .foregroundStyle(coordinator.hasStoredSession ? .green : .secondary)
+        HStack {
+          SecureField(
+            "MUSIC_U=…; __csrf=…",
+            text: $coordinator.manualCookieHeader
+          )
+          Button("Import Session") {
+            Task { await coordinator.importSession() }
+          }
+        }
       }
       .padding(12)
       .disabled(coordinator.isBusy)

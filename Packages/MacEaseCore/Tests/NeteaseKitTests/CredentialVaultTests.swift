@@ -33,6 +33,21 @@ import Testing
   #expect(try await vault.load() == nil)
 }
 
+@Test func manualCookieHeaderParsesWhitelistedValues() {
+  let credential = NeteaseCredential(
+    cookieHeader: "ignored=x; MUSIC_U=value==; __csrf=csrf"
+  )
+
+  #expect(credential?.musicU.value == "value==")
+  #expect(credential?.csrf?.value == "csrf")
+}
+
+@Test func manualCookieHeaderRequiresUnambiguousMusicU() {
+  #expect(NeteaseCredential(cookieHeader: "__csrf=csrf") == nil)
+  #expect(NeteaseCredential(cookieHeader: "MUSIC_U=") == nil)
+  #expect(NeteaseCredential(cookieHeader: "MUSIC_U=one; MUSIC_U=two") == nil)
+}
+
 @Test func formEncodingEscapesReservedCharacters() {
   let body = FormURLEncoder.encode([
     ("params", "a+b/c=&"),
