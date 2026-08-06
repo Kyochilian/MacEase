@@ -40,14 +40,19 @@ cd Packages/MacEaseCore
 swift run GateBLoginHarness
 ```
 
-当前 Phase 0 文档：
+组装并运行 Phase 0 App Sandbox harness：
 
+```sh
+./scripts/package_phase0_harness.sh
+open -n .build/MacEasePhase0Harness.app
+```
+
+当前验证文档：
+
+- [Phase 0 baseline](docs/phase0/README.md)
 - [Endpoint policy](docs/phase0/endpoint-policy.md)
-- [Clean-room rules](docs/phase0/clean-room.md)
-- [Test matrix](docs/phase0/test-matrix.md)
-- [Account-risk protocol](docs/phase0/account-risk.md)
-- [Go / No-Go gates](docs/phase0/go-no-go.md)
-- [Crypto vectors](docs/phase0/crypto-vectors.md)
+- [Phase 0 validation](docs/phase0/validation.md)
+- [Gate A protocol evidence](docs/gatea/README.md)
 - [Gate B login harness](docs/gateb/README.md)
 
 ## 发布与许可

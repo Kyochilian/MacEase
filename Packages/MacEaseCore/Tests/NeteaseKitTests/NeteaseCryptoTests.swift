@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 
 @testable import NeteaseKit
@@ -27,4 +28,58 @@ import Testing
     NeteaseCrypto.eapi(path: path, json: json)
       == "FA90B329E9614F79E79598F37DC2EDB487F00D1BC4C9B24CD57E6C318B9073569338432CD7D98D1A3626E997A2C53121C461EE0E88D3D1BF3F42E78643807A29B83D00D24CECA2C01F229A64E4D80CBB43B3579770BB9A18CB701D3B0BC6D06534152C48015A10B37D65EAF37AA55CDB865AFA2367A1328A406C1D0BFDFE0C5AE4BE39397EDC48F19815DE0CB86E1B30E15AEF43036BA0683F3F57B81CB4B5EE"
   )
+}
+
+@Test func eapiResponseVectors() {
+  let plain = Data(
+    base64Encoded: "yZRj59wuKJ/1c341BcjpjuTshRqno5xD/aCanv/ZfBo="
+  )!
+  #expect(
+    String(
+      decoding: NeteaseCrypto.decodeEAPIResponse(plain, gzipped: false),
+      as: UTF8.self
+    )
+      == #"{"code":200,"profile":null}"#
+  )
+
+  let gzipped = Data(
+    base64Encoded:
+      "dXY/63Tzn9uSjnPxpGi/Pj5UlZPCzL8cO2ATIj+hkcGecJNNO0nZtDfDymN62s6baqOxAvvnKWqw256lxGrRKw=="
+  )!
+  #expect(
+    String(
+      decoding: NeteaseCrypto.decodeEAPIResponse(gzipped, gzipped: true),
+      as: UTF8.self
+    )
+      == #"{"code":200,"data":["gzip"]}"#
+  )
+}
+
+@Test func xeapiInitialRequestGoldenVector() {
+  let parameters = NeteaseCrypto.xeapi(
+    formBody: Data("ids=%5B347230%5D&level=standard&encodeType=flac".utf8),
+    publicKey: Data(
+      base64Encoded: "YFpyXSpK3+6xop4X7dYhwbdZPujNvESsbEq24vgF0jw="
+    )!,
+    version: "42",
+    sk: "test-sk",
+    os: "android",
+    dynamicKey: Data("0123456789abcdef".utf8),
+    transform: Data([
+      0x0f, 0x0e, 0x0d, 0x0c, 0x0b, 0x0a, 0x09, 0x08,
+      0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01, 0x00,
+    ]),
+    ephemeralPrivateKey: Data((0..<32).map { UInt8($0) }),
+    nonce: Data((0..<12).map { UInt8($0) })
+  )
+
+  #expect(
+    parameters.b
+      == "d+IML8fW1RctiSw3Kf8qiJWmkiqd7ZUZG9z47EDIv2EjE7qpIy5okDyluMqo1aX5v5s6DZqVb51mRz/Ac85MndBI6+8n+vCaM2/4Mz3uUwq71Nnwv74vSrHOMFkRZJWpq7KHfrx94GgqCPwHa+CpOl9XV9nLi00ijfFNwhxMpSGVCOIq+wNXper+u+qyyuzou1F4mS8kfc0q2soQrd5FcbynmR9oNp1uBKVzSxfR4iQ="
+  )
+  #expect(
+    parameters.s
+      == "j0DFrbaPJWJK5bIU6nZ6bslNgp09e14a0bpvPiE4KF8AAQIDBAUGBwgJCguBbAubYU1YcRpJWMnkSsU5LmfHllfdwgGTd9U+vBhIA9g/ZlTuG/IoR299VCw/g7BylQZ7l0qrpQ=="
+  )
+  #expect(parameters.r == "MS2tK79o3GW1nNBiSHA6Vw==")
 }
