@@ -3,6 +3,12 @@ import Testing
 
 @testable import NeteaseKit
 
+private let xeapiFormBody = FormURLEncoder.encode([
+  ("ids", "[347230]"),
+  ("level", "standard"),
+  ("encodeType", "flac"),
+])
+
 @Test func weapiGoldenVector() {
   let json = #"{"ids":"[347230]","level":"standard","encodeType":"aac"}"#
   let parameters = NeteaseCrypto.weapi(
@@ -57,7 +63,7 @@ import Testing
 
 @Test func xeapiInitialRequestGoldenVector() {
   let parameters = NeteaseCrypto.xeapi(
-    formBody: Data("ids=%5B347230%5D&level=standard&encodeType=flac".utf8),
+    formBody: xeapiFormBody,
     publicKey: Data(
       base64Encoded: "YFpyXSpK3+6xop4X7dYhwbdZPujNvESsbEq24vgF0jw="
     )!,
@@ -86,7 +92,7 @@ import Testing
 
 @Test func xeapiSessionReuseGoldenVector() {
   let parameters = NeteaseCrypto.xeapi(
-    formBody: Data("ids=%5B347230%5D&level=standard&encodeType=flac".utf8),
+    formBody: xeapiFormBody,
     publicKey: Data(
       base64Encoded: "YFpyXSpK3+6xop4X7dYhwbdZPujNvESsbEq24vgF0jw="
     )!,

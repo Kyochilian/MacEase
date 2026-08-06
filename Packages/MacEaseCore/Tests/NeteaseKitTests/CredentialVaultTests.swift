@@ -41,3 +41,18 @@ import Testing
 
   #expect(String(decoding: body, as: UTF8.self) == "params=a%2Bb%2Fc%3D%26&encSecKey=00ff")
 }
+
+@Test func formEncodingMatchesURLSearchParams() {
+  let body = FormURLEncoder.encode([
+    ("space", "a b"),
+    ("tilde", "~"),
+    ("star", "*"),
+    ("unicode", "中"),
+    ("reserved", "+/=&[]"),
+  ])
+
+  #expect(
+    String(decoding: body, as: UTF8.self)
+      == "space=a+b&tilde=%7E&star=*&unicode=%E4%B8%AD&reserved=%2B%2F%3D%26%5B%5D"
+  )
+}

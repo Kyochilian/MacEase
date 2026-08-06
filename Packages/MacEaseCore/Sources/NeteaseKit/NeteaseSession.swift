@@ -78,20 +78,32 @@ public actor NeteaseSession {
 }
 
 struct FormURLEncoder {
-  private static let allowedCharacters = CharacterSet.alphanumerics.union(
-    CharacterSet(charactersIn: "-._~")
-  )
+  private static let hex = Array("0123456789ABCDEF".utf8)
 
   static func encode(_ fields: [(String, String)]) -> Data {
-    let form =
-      fields
-      .map { "\(escape($0.0))=\(escape($0.1))" }
-      .joined(separator: "&")
-    return Data(form.utf8)
+    var output = Data()
+    for (index, field) in fields.enumerated() {
+      if index > 0 { output.append(0x26) }
+      append(field.0, to: &output)
+      output.append(0x3d)
+      append(field.1, to: &output)
+    }
+    return output
   }
 
-  private static func escape(_ value: String) -> String {
-    value.addingPercentEncoding(withAllowedCharacters: allowedCharacters)!
+  private static func append(_ value: String, to output: inout Data) {
+    for byte in value.utf8 {
+      switch byte {
+      case 0x30...0x39, 0x41...0x5a, 0x61...0x7a, 0x2a, 0x2d, 0x2e, 0x5f:
+        output.append(byte)
+      case 0x20:
+        output.append(0x2b)
+      default:
+        output.append(0x25)
+        output.append(hex[Int(byte >> 4)])
+        output.append(hex[Int(byte & 0x0f)])
+      }
+    }
   }
 }
 
