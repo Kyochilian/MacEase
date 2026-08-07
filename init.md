@@ -2,9 +2,12 @@
 
 > 状态：设计阶段结论汇总；开发可行性复核完成
 > 创建日期：2026-08-04
-> 最近复核：2026-08-06
+> 最近复核：2026-08-07
 > 本文档记录调研结论、已确认决策、实现边界、技术架构、验证关卡、路线图与风险登记册。
 > **调研结论具有时效性**：网易云的接口、协议与风控策略可能随时变化。涉及私有接口的结论在实现前必须按本文的证据规则重新验证。
+
+> 当前实现状态和下一次执行顺序以 [`docs/next-session.md`](docs/next-session.md) 为准；
+> 本文保留设计依据，不重复维护每次 live probe 的明细。
 
 ---
 
@@ -613,6 +616,11 @@ Developer ID 分发不强制 App Sandbox，但它会影响本地文件、Sparkle
 - 实际 CDN host、ATS、redirect 与 Range 行为。
 
 停止条件：核心播放只能通过不稳定设备伪装、受保护 token 或不可接受的账号风险完成。
+
+当前执行状态：VIP eapi 五档质量、FLAC Range/play-stop 和显式 URL 恢复已形成最小
+证据；当前 Android-identity xeapi 路径为 No-Go，live xeapi 整体 Hold。免费账号、
+错误样本和网络/生命周期人工矩阵仍由 [`docs/next-session.md`](docs/next-session.md)
+推进，未完成前不进入产品 UI。
 
 #### Gate D：发布工程
 

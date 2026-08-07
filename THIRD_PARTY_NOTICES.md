@@ -2,8 +2,7 @@
 
 当前最小验证包尚未分发第三方源码或二进制依赖。Apple 系统框架由目标操作系统提供，不在本文件重复列出。
 
-下表是截至 2026-08-06 的研究来源，不表示其代码已被复制或随 MacEase 分发：
-
+下表是 2026-08-06 的研究快照，不表示其代码已被复制或随 MacEase 分发：
 
 | Project | Snapshot / license observation | MacEase usage |
 |---|---|---|
@@ -14,8 +13,6 @@
 | [`AMLL`](https://github.com/amll-dev/applemusic-like-lyrics) | AGPL-3.0, observed 2026-08-06 | 只研究视觉与数据模型，独立实现 |
 | [`LyricsX`](https://github.com/ddddxxx/LyricsX) | MPL-2.0, observed 2026-08-06 | 默认仅行为参考；代码复用需逐文件评估 |
 | [`Sparkle 2`](https://github.com/sparkle-project/Sparkle) | `303db889480f`, MIT, 2026-08-06 | 计划用于更新；加入依赖时记录准确版本与许可证 |
-
-
 ## Provenance rules
 
 - Lock source URL, commit/date, and license before merging protocol-critical work.
