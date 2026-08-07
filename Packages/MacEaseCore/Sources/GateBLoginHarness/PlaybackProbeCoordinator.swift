@@ -11,9 +11,11 @@ final class PlaybackProbeCoordinator {
   @ObservationIgnored private var player: AVPlayer?
   @ObservationIgnored private var playTask: Task<Void, Never>?
   @ObservationIgnored private var intentGate = PlaybackIntentGate()
+  @ObservationIgnored private var playbackContext: PlaybackRecoverySnapshot?
 
   var songID = "347230"
   var quality: PlaybackQuality = .standard
+  var seekPosition = "0"
   var status = "Not run"
 
   func play(loginCoordinator: LoginCoordinator) {
@@ -64,15 +66,99 @@ final class PlaybackProbeCoordinator {
     intentGate.cancel()
     playTask?.cancel()
     playTask = nil
+    playbackContext = nil
     releasePlayback()
     status = "eapi AVPlayer stopped"
+  }
+
+  func seek() {
+    guard let seconds = Double(seekPosition), seconds.isFinite, seconds >= 0,
+      let player
+    else {
+      status = "Enter a non-negative seek position"
+      return
+    }
+
+    let token = intentGate.begin()
+    let time = CMTime(seconds: seconds, preferredTimescale: 600)
+    Task { [weak self, weak player] in
+      guard let self, let player else { return }
+      player.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
+        Task { @MainActor [weak self] in
+          guard let self, self.intentGate.accepts(token) else { return }
+          self.playbackContext = self.playbackContext.map {
+            PlaybackRecoverySnapshot(
+              songID: $0.songID,
+              quality: $0.quality,
+              position: seconds,
+              shouldResume: $0.shouldResume
+            )
+          }
+          self.status = "eapi AVPlayer seek requested: position=\(seconds)"
+        }
+      }
+    }
+  }
+
+  func refreshCurrentAsset(loginCoordinator: LoginCoordinator) {
+    guard let context = playbackContext else {
+      status = "eapi refresh: result=noActiveTrack"
+      return
+    }
+
+    let position = currentPosition()
+    let snapshot = PlaybackRecoverySnapshot(
+      songID: context.songID,
+      quality: context.quality,
+      position: position,
+      shouldResume: context.shouldResume
+    )
+    let token = beginRequest(
+      operation: "refresh",
+      quality: snapshot.quality,
+      preserveContext: true
+    )
+    playTask = Task { [weak self, weak loginCoordinator] in
+      guard let self, let loginCoordinator else { return }
+      await resolveAndPlay(
+        songID: snapshot.songID,
+        quality: snapshot.quality,
+        loginCoordinator: loginCoordinator,
+        token: token,
+        operation: "refresh",
+        recovery: snapshot
+      )
+    }
+  }
+
+  func handleSleep() {
+    guard let context = playbackContext else { return }
+    intentGate.cancel()
+    playTask?.cancel()
+    playTask = nil
+    playbackContext = PlaybackRecoverySnapshot(
+      songID: context.songID,
+      quality: context.quality,
+      position: currentPosition(),
+      shouldResume: false
+    )
+    player?.pause()
+    status = "eapi AVPlayer paused for system sleep"
+  }
+
+  func handleWake() {
+    guard playbackContext != nil else { return }
+    player?.pause()
+    status = "eapi AVPlayer paused after wake; refresh or play to revalidate URL"
   }
 
   private func resolveAndPlay(
     songID: Int64,
     quality: PlaybackQuality,
     loginCoordinator: LoginCoordinator,
-    token: PlaybackIntentGate.Token
+    token: PlaybackIntentGate.Token,
+    operation: String = "play",
+    recovery: PlaybackRecoverySnapshot? = nil
   ) async {
     defer {
       if intentGate.accepts(token) {
@@ -86,7 +172,7 @@ final class PlaybackProbeCoordinator {
       try checkCurrent(token)
       guard let credential else {
         status = failureStatus(
-          operation: "play",
+          operation: operation,
           result: "noStoredSession",
           quality: quality
         )
@@ -104,7 +190,7 @@ final class PlaybackProbeCoordinator {
       switch resolution {
       case .unavailable(let itemCode, let fee):
         status = unavailableStatus(
-          operation: "play",
+          operation: operation,
           quality: quality,
           itemCode: itemCode,
           fee: fee
@@ -118,7 +204,7 @@ final class PlaybackProbeCoordinator {
         try checkCurrent(token)
         guard isPlayable else {
           status = resolvedStatus(
-            operation: "play",
+            operation: operation,
             result: "assetNotPlayable",
             asset: resolved
           )
@@ -127,10 +213,24 @@ final class PlaybackProbeCoordinator {
 
         let player = AVPlayer(playerItem: AVPlayerItem(asset: asset))
         self.player = player
-        player.play()
+        let resumePosition = recovery?.position ?? 0
+        self.playbackContext = PlaybackRecoverySnapshot(
+          songID: songID,
+          quality: quality,
+          position: resumePosition,
+          shouldResume: recovery?.shouldResume ?? true
+        )
+        if resumePosition > 0 {
+          await seek(player, to: resumePosition)
+          try checkCurrent(token)
+        }
+        if recovery?.shouldResume ?? true {
+          player.play()
+        }
         status = resolvedStatus(
-          operation: "play",
-          result: "playRequested",
+          operation: operation,
+          result: recovery == nil || recovery?.shouldResume == true
+            ? "playRequested" : "refreshedPaused",
           asset: resolved
         )
       }
@@ -139,7 +239,7 @@ final class PlaybackProbeCoordinator {
       await handle(
         error,
         credential: requestCredential,
-        operation: "play",
+        operation: operation,
         quality: quality,
         loginCoordinator: loginCoordinator,
         token: token
@@ -227,6 +327,7 @@ final class PlaybackProbeCoordinator {
     switch error {
     case let error as NeteaseServiceError where error.statusCode == 301:
       guard let credential else { return }
+      playbackContext = nil
       releasePlayback()
       let invalidated = await loginCoordinator.invalidateStoredSession(
         matching: credential,
@@ -290,6 +391,22 @@ final class PlaybackProbeCoordinator {
     player = nil
   }
 
+  private func currentPosition() -> Double {
+    guard let seconds = player?.currentTime().seconds, seconds.isFinite, seconds >= 0 else {
+      return playbackContext?.position ?? 0
+    }
+    return seconds
+  }
+
+  private func seek(_ player: AVPlayer, to seconds: Double) async {
+    let time = CMTime(seconds: seconds, preferredTimescale: 600)
+    await withCheckedContinuation { continuation in
+      player.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero) { _ in
+        continuation.resume()
+      }
+    }
+  }
+
   private func checkCurrent(_ token: PlaybackIntentGate.Token) throws {
     try Task.checkCancellation()
     guard intentGate.accepts(token) else { throw CancellationError() }
@@ -297,11 +414,15 @@ final class PlaybackProbeCoordinator {
 
   private func beginRequest(
     operation: String,
-    quality: PlaybackQuality
+    quality: PlaybackQuality,
+    preserveContext: Bool = false
   ) -> PlaybackIntentGate.Token {
     let token = intentGate.begin()
     playTask?.cancel()
     playTask = nil
+    if !preserveContext {
+      playbackContext = nil
+    }
     releasePlayback()
     status = "eapi \(operation) resolving: requestedQuality=\(quality.rawValue)"
     return token

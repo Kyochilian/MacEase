@@ -1,3 +1,4 @@
+import AppKit
 import NeteaseKit
 import SwiftUI
 import WebKit
@@ -103,6 +104,16 @@ private struct LoginHarnessView: View {
             playback.stop()
           }
         }
+        HStack {
+          TextField("Seek seconds", text: $playback.seekPosition)
+            .frame(width: 140)
+          Button("Seek") {
+            playback.seek()
+          }
+          Button("Refresh Current URL") {
+            playback.refreshCurrentAsset(loginCoordinator: coordinator)
+          }
+        }
         Text(playback.status)
       }
       .padding(12)
@@ -140,6 +151,20 @@ private struct LoginHarnessView: View {
       playback.stop()
       probes.stopAVPlayer()
       probes.stopCoreAudio()
+    }
+    .onReceive(
+      NSWorkspace.shared.notificationCenter.publisher(
+        for: NSWorkspace.willSleepNotification
+      )
+    ) { _ in
+      playback.handleSleep()
+    }
+    .onReceive(
+      NSWorkspace.shared.notificationCenter.publisher(
+        for: NSWorkspace.didWakeNotification
+      )
+    ) { _ in
+      playback.handleWake()
     }
   }
 }
