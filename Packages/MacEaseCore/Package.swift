@@ -9,6 +9,7 @@ let package = Package(
     .library(name: "NeteaseKit", targets: ["NeteaseKit"]),
     .executable(name: "GateALyricsProbe", targets: ["GateALyricsProbe"]),
     .executable(name: "GateBLoginHarness", targets: ["GateBLoginHarness"]),
+    .executable(name: "GateCPlaybackProbe", targets: ["GateCPlaybackProbe"]),
   ],
   targets: [
     .target(name: "NeteaseKit"),
@@ -18,6 +19,10 @@ let package = Package(
     ),
     .executableTarget(
       name: "GateBLoginHarness",
+      dependencies: ["NeteaseKit"]
+    ),
+    .executableTarget(
+      name: "GateCPlaybackProbe",
       dependencies: ["NeteaseKit"]
     ),
     .testTarget(
