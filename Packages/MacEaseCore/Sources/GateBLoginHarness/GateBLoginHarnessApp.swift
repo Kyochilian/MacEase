@@ -1,3 +1,4 @@
+import NeteaseKit
 import SwiftUI
 import WebKit
 
@@ -86,14 +87,18 @@ private struct LoginHarnessView: View {
         HStack {
           TextField("Song ID", text: $playback.songID)
             .frame(width: 140)
+          Picker("Quality", selection: $playback.quality) {
+            ForEach(PlaybackQuality.allCases, id: \.self) { quality in
+              Text(quality.rawValue).tag(quality)
+            }
+          }
+          .frame(width: 120)
           Button("Play eapi Song") {
             playback.play(loginCoordinator: coordinator)
           }
-          .disabled(playback.isBusy)
           Button("Probe eapi CDN") {
             playback.probeCDN(loginCoordinator: coordinator)
           }
-          .disabled(playback.isBusy)
           Button("Stop eapi Song") {
             playback.stop()
           }

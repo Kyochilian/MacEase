@@ -54,6 +54,43 @@ private let playbackCredential = NeteaseCredential(
   #expect(request.value(forHTTPHeaderField: "Cookie")?.contains("; __csrf=; ") == true)
 }
 
+@Test func songURLRequestUsesSelectedQualityLevel() throws {
+  let levels: [(quality: PlaybackQuality, expected: String)] = [
+    (.standard, "standard"),
+    (.higher, "higher"),
+    (.exhigh, "exhigh"),
+    (.lossless, "lossless"),
+    (.hires, "hires"),
+  ]
+  let header =
+    #"{"osver":"15.5","os":"osx","appver":"0.1","buildver":"1722945678","#
+    + #""__csrf":"csrf-test","channel":"github","#
+    + #""requestId":"1722945678123_0042","MUSIC_U":"music-u-test"}"#
+
+  #expect(PlaybackQuality.allCases == levels.map(\.quality))
+  for (quality, expectedLevel) in levels {
+    let request = try NeteaseSession.songURLRequest(
+      songID: 347230,
+      quality: quality,
+      credential: playbackCredential,
+      osVersion: "15.5",
+      buildVersion: "1722945678",
+      requestID: "1722945678123_0042"
+    )
+    let json =
+      #"{"ids":"[347230]","level":"\#(expectedLevel)","encodeType":"flac","e_r":false,"header":\#(header)}"#
+    let expectedParams = NeteaseCrypto.eapi(
+      path: "/api/song/enhance/player/url/v1",
+      json: json
+    )
+
+    #expect(quality.rawValue == expectedLevel)
+    #expect(
+      String(decoding: request.httpBody!, as: UTF8.self) == "params=\(expectedParams)"
+    )
+  }
+}
+
 @Test func songURLClassifiesResolvedAndUnavailable() throws {
   let response = HTTPURLResponse(
     url: URL(string: "https://interfacepc.music.163.com")!,
@@ -97,6 +134,40 @@ private let playbackCredential = NeteaseCredential(
       )
   )
   #expect(unavailable == .unavailable(itemCode: 404, fee: 1))
+}
+
+@Test func songURLPreservesQualityFormatAndTrialMetadata() throws {
+  let response = HTTPURLResponse(
+    url: URL(string: "https://interfacepc.music.163.com")!,
+    statusCode: 200,
+    httpVersion: nil,
+    headerFields: nil
+  )!
+  let payload =
+    #"{"code":200,"data":[{"id":347230,"#
+    + #""url":"https://m10.music.126.net/audio.flac","code":200,"#
+    + #""level":"lossless","type":null,"encodeType":"flac","br":999000,"#
+    + #""size":45678901,"expi":1800,"fee":1,"#
+    + #""freeTrialInfo":{"start":0,"end":30}}]}"#
+  let resolution = try NeteaseSession.classifySongURL(
+    data: Data(payload.utf8),
+    response: response,
+    songID: 347230,
+    requestedQuality: .hires
+  )
+
+  guard case .resolved(let asset) = resolution else {
+    Issue.record("Expected a resolved FLAC asset")
+    return
+  }
+  #expect(asset.requestedQuality == .hires)
+  #expect(asset.actualQuality == "lossless")
+  #expect(asset.format == "flac")
+  #expect(asset.bitRate == 999000)
+  #expect(asset.byteCount == 45_678_901)
+  #expect(asset.expiresIn == 1800)
+  #expect(asset.fee == 1)
+  #expect(asset.trial)
 }
 
 @Test func songURLRejectsInvalidAndNonHTTPSResponses() {
@@ -143,6 +214,16 @@ private let playbackCredential = NeteaseCredential(
     try NeteaseSession.classifySongURL(
       data: Data(
         #"{"code":200,"data":[{"id":347230,"url":"https://cdn.example.com/audio.mp3","code":200}]}"#.utf8
+      ),
+      response: response,
+      songID: 347230,
+      requestedQuality: .standard
+    )
+  }
+  #expect(throws: NeteasePlaybackError.unapprovedHost("music.126.net.attacker")) {
+    try NeteaseSession.classifySongURL(
+      data: Data(
+        #"{"code":200,"data":[{"id":347230,"url":"https://music.126.net.attacker/audio.mp3","code":200}]}"#.utf8
       ),
       response: response,
       songID: 347230,
