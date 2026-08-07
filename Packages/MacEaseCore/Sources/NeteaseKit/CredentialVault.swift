@@ -37,6 +37,8 @@ public actor CredentialVault {
 
     var item = query
     item[kSecValueData] = data
+    // Requires kSecUseDataProtectionKeychain in baseQuery so this ACL is honored.
+    // Items saved before that flag was added are invisible here; re-save once.
     item[kSecAttrAccessible] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
 
     let status = SecItemAdd(item as CFDictionary, nil)
@@ -75,6 +77,7 @@ public actor CredentialVault {
       kSecAttrService: service,
       kSecAttrAccount: account,
       kSecAttrSynchronizable: false,
+      kSecUseDataProtectionKeychain: true,
     ]
   }
 }
