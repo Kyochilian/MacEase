@@ -6,9 +6,9 @@ MacEase（Mac + Ease）是一个面向 macOS 的非官方网易云音乐第三�
 
 ## 当前范围
 
-- macOS 15+，SwiftUI 优先，必要时使用 AppKit。
+- macOS 15+，当前发行目标为 Apple Silicon（arm64）；SwiftUI 优先，必要时使用 AppKit。
 - 所有网易网络请求集中在 `NeteaseKit`。
-- 原生 Swift 实现 weapi/eapi；live xeapi 仍处于身份策略 Hold。
+- 原生 Swift 实现 weapi/eapi；当前 Android-identity xeapi 路径 No-Go，整体 live xeapi 仍为 Hold。
 - 官方登录页 `WKWebView`、Keychain 会话、AVPlayer 播放。
 - GitHub Releases + Developer ID + notarization + Sparkle 2；不进入 Mac App Store。
 
@@ -62,6 +62,8 @@ open -n .build/MacEasePhase0Harness.app
 - [Gate A protocol evidence](docs/gatea/README.md)
 - [Gate B login harness](docs/gateb/README.md)
 - [Gate C eapi playback evidence](docs/gatec/README.md)
+- [Gate D release engineering](docs/gated/README.md)
+- [Gate E account-risk observation](docs/gatee/README.md)
 
 ## 发布与许可
 
