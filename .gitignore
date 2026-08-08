@@ -26,3 +26,6 @@ secrets/
 *.p12
 *.mobileprovision
 *.provisionprofile
+
+# Local working notes (not tracked)
+docs/
