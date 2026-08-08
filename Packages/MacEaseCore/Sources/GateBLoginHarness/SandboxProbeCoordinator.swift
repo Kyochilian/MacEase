@@ -2,6 +2,7 @@ import AVFoundation
 import AppKit
 import CoreAudio
 import Foundation
+import NeteaseKit
 import Observation
 import Security
 import UniformTypeIdentifiers
@@ -14,6 +15,7 @@ final class SandboxProbeCoordinator {
   @ObservationIgnored private var outputListener: AudioObjectPropertyListenerBlock?
   @ObservationIgnored private var player: AVPlayer?
   @ObservationIgnored private var scopedURL: URL?
+  @ObservationIgnored private var playbackIntentGate = PlaybackIntentGate()
 
   let sandboxStatus: String
   var audioStatus = "Not run"
@@ -34,6 +36,7 @@ final class SandboxProbeCoordinator {
   }
 
   func probeAVPlayer() async {
+    let token = playbackIntentGate.begin()
     releasePlayback()
 
     do {
@@ -49,26 +52,35 @@ final class SandboxProbeCoordinator {
         audioStatus = "Security-scoped audio access denied"
         return
       }
-      scopedURL = bookmark.url
+      var ownsScopedAccess = true
+      defer {
+        if ownsScopedAccess {
+          bookmark.url.stopAccessingSecurityScopedResource()
+        }
+      }
 
       let asset = AVURLAsset(url: bookmark.url)
-      guard try await asset.load(.isPlayable) else {
-        releasePlayback()
+      let isPlayable = try await asset.load(.isPlayable)
+      guard playbackIntentGate.accepts(token), !Task.isCancelled else { return }
+      guard isPlayable else {
         audioStatus = "AVPlayer asset is not playable"
         return
       }
 
       let player = AVPlayer(playerItem: AVPlayerItem(asset: asset))
       self.player = player
+      scopedURL = bookmark.url
+      ownsScopedAccess = false
       player.play()
       audioStatus = "AVPlayer play requested"
     } catch {
-      releasePlayback()
+      guard playbackIntentGate.accepts(token), !Task.isCancelled else { return }
       audioStatus = "AVPlayer probe failed: \(errorCode(error))"
     }
   }
 
   func stopAVPlayer() {
+    playbackIntentGate.cancel()
     releasePlayback()
     audioStatus = "AVPlayer stopped"
   }

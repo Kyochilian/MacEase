@@ -1,5 +1,6 @@
 import Foundation
 import Security
+import Synchronization
 
 public struct CredentialVaultError: Error, Equatable, Sendable {
   public let status: OSStatus
@@ -10,6 +11,8 @@ public struct CredentialVaultError: Error, Equatable, Sendable {
 }
 
 public actor CredentialVault {
+  private static let keychainLock = Mutex(())
+
   private let service: String
   private let account: String
 
@@ -22,6 +25,32 @@ public actor CredentialVault {
   }
 
   public func save(_ credential: NeteaseCredential) throws {
+    try Self.keychainLock.withLock { _ in
+      try saveUnlocked(credential)
+    }
+  }
+
+  public func load() throws -> NeteaseCredential? {
+    try Self.keychainLock.withLock { _ in
+      try loadUnlocked()
+    }
+  }
+
+  public func delete() throws {
+    try Self.keychainLock.withLock { _ in
+      try deleteUnlocked()
+    }
+  }
+
+  package func delete(matching credential: NeteaseCredential) throws -> Bool {
+    try Self.keychainLock.withLock { _ in
+      guard try loadUnlocked() == credential else { return false }
+      try deleteUnlocked()
+      return true
+    }
+  }
+
+  private func saveUnlocked(_ credential: NeteaseCredential) throws {
     let data = try JSONEncoder().encode(credential)
     let query = baseQuery
     let updateStatus = SecItemUpdate(
@@ -45,7 +74,7 @@ public actor CredentialVault {
     }
   }
 
-  public func load() throws -> NeteaseCredential? {
+  private func loadUnlocked() throws -> NeteaseCredential? {
     var query = baseQuery
     query[kSecReturnData] = true
     query[kSecMatchLimit] = kSecMatchLimitOne
@@ -62,17 +91,11 @@ public actor CredentialVault {
     return try JSONDecoder().decode(NeteaseCredential.self, from: result as! Data)
   }
 
-  public func delete() throws {
+  private func deleteUnlocked() throws {
     let status = SecItemDelete(baseQuery as CFDictionary)
     if status != errSecSuccess && status != errSecItemNotFound {
       throw CredentialVaultError(status: status)
     }
-  }
-
-  package func delete(matching credential: NeteaseCredential) throws -> Bool {
-    guard try load() == credential else { return false }
-    try delete()
-    return true
   }
 
   private var baseQuery: [CFString: Any] {

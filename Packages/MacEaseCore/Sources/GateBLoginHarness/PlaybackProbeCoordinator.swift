@@ -347,15 +347,28 @@ final class PlaybackProbeCoordinator {
       guard let credential else { return }
       playbackContext = nil
       releasePlayback()
-      let invalidated = await loginCoordinator.invalidateStoredSession(
+      let invalidation = await loginCoordinator.invalidateStoredSession(
         matching: credential,
         message: "eapi session expired; sign in again"
       )
       guard intentGate.accepts(token), !Task.isCancelled else { return }
-      if invalidated {
+      switch invalidation {
+      case .deleted:
         status = failureStatus(
           operation: operation,
           result: "sessionExpired",
+          quality: quality
+        )
+      case .notCurrent:
+        status = failureStatus(
+          operation: operation,
+          result: "sessionNotCurrent",
+          quality: quality
+        )
+      case .failed:
+        status = failureStatus(
+          operation: operation,
+          result: "sessionInvalidationFailed",
           quality: quality
         )
       }

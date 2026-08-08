@@ -54,6 +54,38 @@ import Testing
   #expect(try await vault.load() == nil)
 }
 
+@Test func conditionalCredentialDeleteSerializesAcrossVaultInstances() async throws {
+  let service = "com.macease.tests.\(UUID().uuidString)"
+  let deletingVault = CredentialVault(
+    service: service,
+    account: "concurrent-conditional-delete"
+  )
+  let replacingVault = CredentialVault(
+    service: service,
+    account: "concurrent-conditional-delete"
+  )
+
+  for iteration in 0..<50 {
+    let original = NeteaseCredential(
+      musicU: NeteaseCookie(name: .musicU, value: "original-\(iteration)"),
+      csrf: nil
+    )
+    let replacement = NeteaseCredential(
+      musicU: NeteaseCookie(name: .musicU, value: "replacement-\(iteration)"),
+      csrf: nil
+    )
+
+    try await deletingVault.save(original)
+    async let deletion = deletingVault.delete(matching: original)
+    async let replacementSave: Void = replacingVault.save(replacement)
+    _ = try await (deletion, replacementSave)
+
+    #expect(try await deletingVault.load() == replacement)
+  }
+
+  try await deletingVault.delete()
+}
+
 @Test func manualCookieHeaderParsesWhitelistedValues() {
   let credential = NeteaseCredential(
     cookieHeader: "ignored=x; MUSIC_U=value==; __csrf=csrf"

@@ -4,6 +4,12 @@ import NeteaseKit
 import Observation
 import WebKit
 
+enum SessionInvalidationResult {
+  case deleted
+  case notCurrent
+  case failed
+}
+
 @MainActor
 @Observable
 final class LoginCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
@@ -175,26 +181,26 @@ final class LoginCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
   func invalidateStoredSession(
     matching credential: NeteaseCredential,
     message: String
-  ) async -> Bool {
+  ) async -> SessionInvalidationResult {
     return await deleteStoredSession(matching: credential, message: message)
   }
 
   private func deleteStoredSession(
     matching credential: NeteaseCredential,
     message: String
-  ) async -> Bool {
+  ) async -> SessionInvalidationResult {
     do {
       guard try await vault.delete(matching: credential) else {
-        return false
+        return .notCurrent
       }
     } catch {
       status = keychainErrorMessage(error)
-      return false
+      return .failed
     }
     hasStoredSession = false
     status = message
     load(Self.loginURL)
-    return true
+    return .deleted
   }
 
   func webView(
