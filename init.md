@@ -617,9 +617,9 @@ Developer ID 分发不强制 App Sandbox，但它会影响本地文件、Sparkle
 
 停止条件：核心播放只能通过不稳定设备伪装、受保护 token 或不可接受的账号风险完成。
 
-当前执行状态：eapi 聚合切片已有 VIP/free 五档、VIP Range/play-stop、显式刷新以及
-free 快速切档、网络恢复和睡眠/唤醒证据。完整 eapi Gate C 仍缺快速切歌、受控 URL
-失效恢复、安全错误样本和独立 FLAC 可听确认；未完成前不进入产品 UI。当前
+当前执行状态：eapi 聚合切片已有 VIP/free 五档、VIP Range/play-stop、显式刷新、
+free 快速切档、网络恢复和睡眠/唤醒，以及 VIP 快速切歌证据。完整 eapi Gate C 仍缺
+受控 URL 失效恢复、安全错误样本和独立 FLAC 可听确认；未完成前不进入产品 UI。当前
 Android-identity xeapi 路径为 No-Go，live xeapi 独立保持 Hold。实时状态与执行顺序以
 [`docs/next-session.md`](docs/next-session.md) 为准。
 
