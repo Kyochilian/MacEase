@@ -62,16 +62,21 @@ final class LoginCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
 
     let cookies = await dataStore.httpCookieStore.allCookies()
     let allowed = cookies.compactMap(NeteaseCookie.init)
+    let musicU = allowed.filter { $0.name == .musicU }
+    let csrf = allowed.filter { $0.name == .csrf }
 
-    guard let musicU = allowed.first(where: { $0.name == .musicU }) else {
-      status = musicUCookieDiagnostic(cookies)
+    guard musicU.count == 1 else {
+      status = musicU.isEmpty
+        ? musicUCookieDiagnostic(cookies)
+        : "Duplicate MUSIC_U cookies rejected"
+      return
+    }
+    guard csrf.count <= 1 else {
+      status = "Duplicate __csrf cookies rejected"
       return
     }
 
-    let credential = NeteaseCredential(
-      musicU: musicU,
-      csrf: allowed.first(where: { $0.name == .csrf })
-    )
+    let credential = NeteaseCredential(musicU: musicU[0], csrf: csrf.first)
 
     do {
       try await vault.save(credential)
@@ -152,6 +157,7 @@ final class LoginCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
 
       switch try await session.accountStatus(credential: credential) {
       case .authenticated:
+        guard try await vault.load() == credential else { return }
         status = "Account status authenticated"
       case .signedOut:
         _ = await deleteStoredSession(
@@ -170,8 +176,6 @@ final class LoginCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
     matching credential: NeteaseCredential,
     message: String
   ) async -> Bool {
-    guard beginOperation() else { return false }
-    defer { endOperation() }
     return await deleteStoredSession(matching: credential, message: message)
   }
 
@@ -180,8 +184,9 @@ final class LoginCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
     message: String
   ) async -> Bool {
     do {
-      guard try await vault.load() == credential else { return false }
-      try await vault.delete()
+      guard try await vault.delete(matching: credential) else {
+        return false
+      }
     } catch {
       status = keychainErrorMessage(error)
       return false
@@ -199,18 +204,17 @@ final class LoginCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
     guard let url = navigationAction.request.url else {
       return .cancel
     }
-    guard url.scheme == "https" else {
-      return .cancel
-    }
-
-    if navigationAction.targetFrame?.isMainFrame == false {
-      return url.host == "music.163.com" ? .allow : .cancel
-    }
-    if url.host == "music.163.com" {
+    let decision = LoginNavigationPolicy.decision(
+      for: url,
+      userActivated: navigationAction.navigationType == .linkActivated
+    )
+    switch decision {
+    case .allowInWebView:
       return .allow
-    }
-    if navigationAction.navigationType == .linkActivated {
+    case .openExternalBrowser:
       NSWorkspace.shared.open(url)
+    case .cancel:
+      break
     }
     return .cancel
   }
@@ -221,11 +225,19 @@ final class LoginCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
     for navigationAction: WKNavigationAction,
     windowFeatures: WKWindowFeatures
   ) -> WKWebView? {
-    if navigationAction.navigationType == .linkActivated,
-      let url = navigationAction.request.url,
-      url.scheme == "https"
-    {
-      NSWorkspace.shared.open(url)
+    if let url = navigationAction.request.url {
+      let decision = LoginNavigationPolicy.decision(
+        for: url,
+        userActivated: navigationAction.navigationType == .linkActivated
+      )
+      switch decision {
+      case .allowInWebView:
+        webView.load(navigationAction.request)
+      case .openExternalBrowser:
+        NSWorkspace.shared.open(url)
+      case .cancel:
+        break
+      }
     }
     return nil
   }

@@ -80,21 +80,29 @@ final class PlaybackProbeCoordinator {
     }
 
     let token = intentGate.begin()
+    playTask?.cancel()
+    playTask = nil
     let time = CMTime(seconds: seconds, preferredTimescale: 600)
     Task { [weak self, weak player] in
       guard let self, let player else { return }
-      player.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
+      player.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero) {
+        [weak self] finished in
         Task { @MainActor [weak self] in
           guard let self, self.intentGate.accepts(token) else { return }
+          guard finished else {
+            self.status = "eapi AVPlayer seek interrupted"
+            return
+          }
+          let position = self.currentPosition()
           self.playbackContext = self.playbackContext.map {
             PlaybackRecoverySnapshot(
               songID: $0.songID,
               quality: $0.quality,
-              position: seconds,
+              position: position,
               shouldResume: $0.shouldResume
             )
           }
-          self.status = "eapi AVPlayer seek requested: position=\(seconds)"
+          self.status = "eapi AVPlayer seek completed: position=\(position)"
         }
       }
     }
@@ -113,6 +121,7 @@ final class PlaybackProbeCoordinator {
       position: position,
       shouldResume: context.shouldResume
     )
+    playbackContext = snapshot
     let token = beginRequest(
       operation: "refresh",
       quality: snapshot.quality,
@@ -132,18 +141,27 @@ final class PlaybackProbeCoordinator {
   }
 
   func handleSleep() {
-    guard let context = playbackContext else { return }
+    let interruptedRequest = playTask != nil
+    let interruptedPlayback = playbackContext != nil || player != nil
     intentGate.cancel()
     playTask?.cancel()
     playTask = nil
-    playbackContext = PlaybackRecoverySnapshot(
-      songID: context.songID,
-      quality: context.quality,
-      position: currentPosition(),
-      shouldResume: false
-    )
-    player?.pause()
-    status = "eapi AVPlayer paused for system sleep"
+    let position = currentPosition()
+    let context = playbackContext
+    releasePlayback()
+    if let context {
+      playbackContext = PlaybackRecoverySnapshot(
+        songID: context.songID,
+        quality: context.quality,
+        position: position,
+        shouldResume: false
+      )
+    }
+    if interruptedPlayback {
+      status = "eapi AVPlayer paused for system sleep"
+    } else if interruptedRequest {
+      status = "eapi request canceled for system sleep"
+    }
   }
 
   func handleWake() {
@@ -221,7 +239,7 @@ final class PlaybackProbeCoordinator {
           shouldResume: recovery?.shouldResume ?? true
         )
         if resumePosition > 0 {
-          await seek(player, to: resumePosition)
+          try await seek(player, to: resumePosition)
           try checkCurrent(token)
         }
         if recovery?.shouldResume ?? true {
@@ -387,6 +405,7 @@ final class PlaybackProbeCoordinator {
   }
 
   private func releasePlayback() {
+    player?.currentItem?.cancelPendingSeeks()
     player?.pause()
     player = nil
   }
@@ -398,13 +417,14 @@ final class PlaybackProbeCoordinator {
     return seconds
   }
 
-  private func seek(_ player: AVPlayer, to seconds: Double) async {
+  private func seek(_ player: AVPlayer, to seconds: Double) async throws {
     let time = CMTime(seconds: seconds, preferredTimescale: 600)
-    await withCheckedContinuation { continuation in
-      player.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero) { _ in
-        continuation.resume()
+    let finished = await withCheckedContinuation { continuation in
+      player.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero) { finished in
+        continuation.resume(returning: finished)
       }
     }
+    guard finished else { throw CancellationError() }
   }
 
   private func checkCurrent(_ token: PlaybackIntentGate.Token) throws {

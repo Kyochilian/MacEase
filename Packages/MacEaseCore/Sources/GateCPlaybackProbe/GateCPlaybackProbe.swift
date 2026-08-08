@@ -16,13 +16,33 @@ struct GateCPlaybackProbe {
       exit(2)
     }
 
-    let shouldExercise = arguments.contains("--exercise-first-non-mp3")
-    let shouldRecover = arguments.contains("--exercise-recovery")
-    let qualities = arguments.dropFirst().filter { !$0.hasPrefix("--") }.compactMap(
-      PlaybackQuality.init(rawValue:)
-    )
+    let options = Array(arguments.dropFirst())
+    let flags = options.filter { $0.hasPrefix("--") }
+    let allowedFlags = ["--exercise-first-non-mp3", "--exercise-recovery"]
+    guard flags.allSatisfy(allowedFlags.contains) else {
+      print("result=invalidArguments detail=unknownFlag")
+      exit(2)
+    }
+
+    let qualityArguments = options.filter { !$0.hasPrefix("--") }
+    let qualities = qualityArguments.compactMap(PlaybackQuality.init(rawValue:))
+    guard qualities.count == qualityArguments.count else {
+      print("result=invalidArguments detail=unknownQuality")
+      exit(2)
+    }
+    guard Set(qualityArguments).count == qualityArguments.count else {
+      print("result=invalidArguments detail=duplicateQuality")
+      exit(2)
+    }
     guard !qualities.isEmpty else {
       print("result=invalidArguments detail=noQuality")
+      exit(2)
+    }
+
+    let shouldExercise = flags.contains("--exercise-first-non-mp3")
+    let shouldRecover = flags.contains("--exercise-recovery")
+    guard !(shouldExercise && shouldRecover) else {
+      print("result=invalidArguments detail=conflictingExerciseModes")
       exit(2)
     }
     if shouldRecover, qualities.count != 1 {
@@ -58,35 +78,43 @@ struct GateCPlaybackProbe {
           case .resolved(let asset):
             print(resolvedLine(asset))
             firstResolvedAsset = firstResolvedAsset ?? asset
-            if exerciseAsset == nil, asset.format?.lowercased() != "mp3" {
+            if exerciseAsset == nil,
+              let format = asset.format?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !format.isEmpty,
+              format.lowercased() != "mp3"
+            {
               exerciseAsset = asset
             }
           }
         } catch {
           print(failureLine(error, quality: quality))
-          return
+          exit(1)
         }
       }
 
       if shouldRecover {
         guard let firstResolvedAsset else {
           print("recovery=notRun reason=initialAssetUnavailable")
-          return
+          exit(1)
         }
-        await exerciseRecovery(
+        if !(await exerciseRecovery(
           firstResolvedAsset,
           session: session,
           credential: credential
-        )
+        )) {
+          exit(1)
+        }
         return
       }
 
       guard shouldExercise else { return }
       guard let exerciseAsset else {
         print("exercise=notRun reason=noNewFormat")
-        return
+        exit(1)
       }
-      await exercise(exerciseAsset, session: session)
+      if !(await exercise(exerciseAsset, session: session)) {
+        exit(1)
+      }
     } catch let error as CredentialVaultError {
       print("result=keychainError status=\(error.status)")
       exit(3)
@@ -131,7 +159,7 @@ struct GateCPlaybackProbe {
   private static func exercise(
     _ resolved: ResolvedAudioAsset,
     session: NeteaseSession
-  ) async {
+  ) async -> Bool {
     do {
       let probe = try await session.probeAudioURL(resolved)
       print(
@@ -142,7 +170,7 @@ struct GateCPlaybackProbe {
       )
       guard probe.rangeResponse else {
         print("exercise=playNotRun reason=rangeProbeFailed")
-        return
+        return false
       }
 
       let asset = AVURLAsset(
@@ -151,7 +179,7 @@ struct GateCPlaybackProbe {
       )
       guard try await asset.load(.isPlayable) else {
         print("exercise=playNotRun reason=assetNotPlayable")
-        return
+        return false
       }
 
       let player = AVPlayer(playerItem: AVPlayerItem(asset: asset))
@@ -159,10 +187,13 @@ struct GateCPlaybackProbe {
       try await Task.sleep(for: .seconds(8))
       player.pause()
       print("exercise=playStopped durationSeconds=8")
+      return true
     } catch let error as URLError {
       print("exercise=failed class=network code=\(error.errorCode)")
+      return false
     } catch {
       print("exercise=failed class=playbackOrResponse")
+      return false
     }
   }
 
@@ -170,7 +201,7 @@ struct GateCPlaybackProbe {
     _ initial: ResolvedAudioAsset,
     session: NeteaseSession,
     credential: NeteaseCredential
-  ) async {
+  ) async -> Bool {
     do {
       let initialPlayer = try await makePlayer(initial)
       initialPlayer.play()
@@ -180,7 +211,7 @@ struct GateCPlaybackProbe {
       guard await seek(initialPlayer, to: targetPosition) else {
         print("recovery=failed stage=initialSeek")
         initialPlayer.pause()
-        return
+        return false
       }
       let savedPosition = position(of: initialPlayer)
       initialPlayer.pause()
@@ -192,14 +223,14 @@ struct GateCPlaybackProbe {
       )
       guard case .resolved(let refreshedAsset) = refreshed else {
         print("recovery=failed stage=refresh result=unavailable")
-        return
+        return false
       }
 
       let refreshedPlayer = try await makePlayer(refreshedAsset)
       guard await seek(refreshedPlayer, to: savedPosition) else {
         print("recovery=failed stage=refreshedSeek")
         refreshedPlayer.pause()
-        return
+        return false
       }
       let resumedPosition = position(of: refreshedPlayer)
       refreshedPlayer.play()
@@ -210,12 +241,16 @@ struct GateCPlaybackProbe {
         "recovery=playbackResumed initialPosition=\(format(savedPosition)) "
           + "refreshedPosition=\(format(resumedPosition)) durationSeconds=4"
       )
+      return true
     } catch let error as NeteaseServiceError {
       print("recovery=failed stage=refresh class=service status=\(error.statusCode)")
+      return false
     } catch let error as URLError {
       print("recovery=failed class=network code=\(error.errorCode)")
+      return false
     } catch {
       print("recovery=failed class=playbackOrResponse")
+      return false
     }
   }
 

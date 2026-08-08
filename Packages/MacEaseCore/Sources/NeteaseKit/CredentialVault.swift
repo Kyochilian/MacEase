@@ -37,8 +37,6 @@ public actor CredentialVault {
 
     var item = query
     item[kSecValueData] = data
-    // Requires kSecUseDataProtectionKeychain in baseQuery so this ACL is honored.
-    // Items saved before that flag was added are invisible here; re-save once.
     item[kSecAttrAccessible] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
 
     let status = SecItemAdd(item as CFDictionary, nil)
@@ -71,13 +69,18 @@ public actor CredentialVault {
     }
   }
 
+  package func delete(matching credential: NeteaseCredential) throws -> Bool {
+    guard try load() == credential else { return false }
+    try delete()
+    return true
+  }
+
   private var baseQuery: [CFString: Any] {
     [
       kSecClass: kSecClassGenericPassword,
       kSecAttrService: service,
       kSecAttrAccount: account,
       kSecAttrSynchronizable: false,
-      kSecUseDataProtectionKeychain: true,
     ]
   }
 }

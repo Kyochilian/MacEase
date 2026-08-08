@@ -33,6 +33,27 @@ import Testing
   #expect(try await vault.load() == nil)
 }
 
+@Test func conditionalCredentialDeletePreservesReplacement() async throws {
+  let vault = CredentialVault(
+    service: "com.macease.tests.\(UUID().uuidString)",
+    account: "conditional-delete"
+  )
+  let original = NeteaseCredential(
+    musicU: NeteaseCookie(name: .musicU, value: "original"),
+    csrf: nil
+  )
+  let replacement = NeteaseCredential(
+    musicU: NeteaseCookie(name: .musicU, value: "replacement"),
+    csrf: nil
+  )
+
+  try await vault.save(replacement)
+  #expect(try await vault.delete(matching: original) == false)
+  #expect(try await vault.load() == replacement)
+  #expect(try await vault.delete(matching: replacement))
+  #expect(try await vault.load() == nil)
+}
+
 @Test func manualCookieHeaderParsesWhitelistedValues() {
   let credential = NeteaseCredential(
     cookieHeader: "ignored=x; MUSIC_U=value==; __csrf=csrf"

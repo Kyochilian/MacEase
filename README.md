@@ -12,7 +12,7 @@ Gate A 无账号读取 probe，以及 Gate B 登录与 Gate C eapi 播放技术 
 - 所有网易网络请求集中在 `NeteaseKit`。
 - 原生 Swift 实现 weapi/eapi；当前 Android-identity xeapi 路径 No-Go，整体 live xeapi 仍为 Hold。
 - 官方登录页 `WKWebView`、Keychain 会话、AVPlayer 播放。
-- 当前本地基线为 Debug/Release 各 29 项测试通过；VIP eapi 播放切片 Go，完整 Gate C 仍 Hold。
+- 当前未提交候选为 Debug/Release 各 33 项测试通过；eapi 已执行切片 Go，完整 eapi Gate C 仍 Hold。
 - GitHub Releases + Developer ID + notarization + Sparkle 2；不进入 Mac App Store。
 
 ## 永久边界
