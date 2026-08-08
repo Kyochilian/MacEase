@@ -11,14 +11,16 @@ struct GateCPlaybackProbe {
     guard let first = arguments.first, let songID = Int64(first), songID > 0 else {
       print(
         "usage: GateCPlaybackProbe SONG_ID QUALITY... "
-          + "[--exercise-first-non-mp3|--exercise-recovery]"
+          + "[--exercise-first-non-mp3|--exercise-recovery|--exercise-expiry-recovery]"
       )
       exit(2)
     }
 
     let options = Array(arguments.dropFirst())
     let flags = options.filter { $0.hasPrefix("--") }
-    let allowedFlags = ["--exercise-first-non-mp3", "--exercise-recovery"]
+    let allowedFlags = [
+      "--exercise-first-non-mp3", "--exercise-recovery", "--exercise-expiry-recovery",
+    ]
     guard flags.allSatisfy(allowedFlags.contains) else {
       print("result=invalidArguments detail=unknownFlag")
       exit(2)
@@ -41,11 +43,12 @@ struct GateCPlaybackProbe {
 
     let shouldExercise = flags.contains("--exercise-first-non-mp3")
     let shouldRecover = flags.contains("--exercise-recovery")
-    guard !(shouldExercise && shouldRecover) else {
+    let shouldExpire = flags.contains("--exercise-expiry-recovery")
+    guard [shouldExercise, shouldRecover, shouldExpire].filter({ $0 }).count <= 1 else {
       print("result=invalidArguments detail=conflictingExerciseModes")
       exit(2)
     }
-    if shouldRecover, qualities.count != 1 {
+    if shouldRecover || shouldExpire, qualities.count != 1 {
       print("result=invalidArguments detail=recoveryRequiresOneQuality")
       exit(2)
     }
@@ -92,16 +95,24 @@ struct GateCPlaybackProbe {
         }
       }
 
-      if shouldRecover {
+      if shouldRecover || shouldExpire {
         guard let firstResolvedAsset else {
           print("recovery=notRun reason=initialAssetUnavailable")
           exit(1)
         }
-        if !(await exerciseRecovery(
-          firstResolvedAsset,
-          session: session,
-          credential: credential
-        )) {
+        let succeeded =
+          shouldExpire
+          ? await exerciseExpiryRecovery(
+            firstResolvedAsset,
+            session: session,
+            credential: credential
+          )
+          : await exerciseRecovery(
+            firstResolvedAsset,
+            session: session,
+            credential: credential
+          )
+        if !succeeded {
           exit(1)
         }
         return
@@ -250,6 +261,84 @@ struct GateCPlaybackProbe {
       return false
     } catch {
       print("recovery=failed class=playbackOrResponse")
+      return false
+    }
+  }
+
+  private static func exerciseExpiryRecovery(
+    _ initial: ResolvedAudioAsset,
+    session: NeteaseSession,
+    credential: NeteaseCredential
+  ) async -> Bool {
+    guard let waitSeconds = PlaybackExpiryPolicy.waitSeconds(expiresIn: initial.expiresIn)
+    else {
+      print(
+        "expiry=notRun reason=expiryOutOfRange "
+          + "expiresIn=\(initial.expiresIn.map(String.init) ?? "none")"
+      )
+      return false
+    }
+    do {
+      let initialPlayer = try await makePlayer(initial)
+      initialPlayer.play()
+      try await Task.sleep(for: .seconds(2))
+
+      guard await seek(initialPlayer, to: 2.0) else {
+        print("expiry=failed stage=initialSeek")
+        initialPlayer.pause()
+        return false
+      }
+      let savedPosition = position(of: initialPlayer)
+      initialPlayer.pause()
+      initialPlayer.replaceCurrentItem(with: nil)
+
+      print("expiry=waiting expiresIn=\(initial.expiresIn ?? 0) waitSeconds=\(waitSeconds)")
+      try await Task.sleep(for: .seconds(waitSeconds))
+
+      let probe = try await session.probeAudioURL(initial)
+      print(
+        "expiry=staleProbe httpStatus=\(probe.statusCode) range=\(probe.rangeResponse) "
+          + "contentType=\(probe.contentType ?? "none")"
+      )
+      guard !probe.rangeResponse else {
+        print("expiry=notObserved reason=staleURLStillValid")
+        return false
+      }
+
+      let refreshed = try await session.resolveSongURL(
+        songID: initial.songID,
+        quality: initial.requestedQuality,
+        credential: credential
+      )
+      guard case .resolved(let refreshedAsset) = refreshed else {
+        print("expiry=failed stage=refresh result=unavailable")
+        return false
+      }
+
+      let refreshedPlayer = try await makePlayer(refreshedAsset)
+      guard await seek(refreshedPlayer, to: savedPosition) else {
+        print("expiry=failed stage=refreshedSeek")
+        refreshedPlayer.pause()
+        return false
+      }
+      let resumedPosition = position(of: refreshedPlayer)
+      refreshedPlayer.play()
+      try await Task.sleep(for: .seconds(4))
+      refreshedPlayer.pause()
+
+      print(
+        "expiry=recovered initialPosition=\(format(savedPosition)) "
+          + "refreshedPosition=\(format(resumedPosition)) durationSeconds=4"
+      )
+      return true
+    } catch let error as NeteaseServiceError {
+      print("expiry=failed stage=refresh class=service status=\(error.statusCode)")
+      return false
+    } catch let error as URLError {
+      print("expiry=failed class=network code=\(error.errorCode)")
+      return false
+    } catch {
+      print("expiry=failed class=playbackOrResponse")
       return false
     }
   }

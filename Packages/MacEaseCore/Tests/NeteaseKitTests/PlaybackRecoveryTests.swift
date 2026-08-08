@@ -2,6 +2,19 @@ import Testing
 
 @testable import NeteaseKit
 
+@Test func playbackExpiryPolicyAddsMarginToReportedTTL() {
+  #expect(PlaybackExpiryPolicy.waitSeconds(expiresIn: 1200) == 1260)
+  #expect(PlaybackExpiryPolicy.waitSeconds(expiresIn: 1) == 61)
+  #expect(PlaybackExpiryPolicy.waitSeconds(expiresIn: 7200) == 7260)
+}
+
+@Test func playbackExpiryPolicyRejectsMissingOrOutOfRangeTTL() {
+  #expect(PlaybackExpiryPolicy.waitSeconds(expiresIn: nil) == nil)
+  #expect(PlaybackExpiryPolicy.waitSeconds(expiresIn: 0) == nil)
+  #expect(PlaybackExpiryPolicy.waitSeconds(expiresIn: -1200) == nil)
+  #expect(PlaybackExpiryPolicy.waitSeconds(expiresIn: 7201) == nil)
+}
+
 @Test func playbackRecoverySnapshotClampsNegativePosition() {
   let snapshot = PlaybackRecoverySnapshot(
     songID: 347230,

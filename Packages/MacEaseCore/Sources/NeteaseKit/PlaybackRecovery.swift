@@ -1,5 +1,20 @@
 import Foundation
 
+/// Bounds a controlled URL-expiry wait derived from the server-reported TTL.
+package enum PlaybackExpiryPolicy {
+  package static let marginSeconds = 60
+  package static let maximumExpirySeconds = 7200
+
+  /// Seconds to wait before probing the stale URL, or nil when the reported
+  /// TTL cannot support a bounded controlled wait.
+  package static func waitSeconds(expiresIn: Int?) -> Int? {
+    guard let expiresIn, (1...maximumExpirySeconds).contains(expiresIn) else {
+      return nil
+    }
+    return expiresIn + marginSeconds
+  }
+}
+
 /// The minimum state needed to rebuild a short-lived playback asset.
 package struct PlaybackRecoverySnapshot: Equatable, Sendable {
   package let songID: Int64
