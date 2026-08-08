@@ -50,11 +50,12 @@ cd Packages/MacEaseCore
 swift run GateALyricsProbe
 ```
 
-组装并运行 Phase 0 App Sandbox harness：
+组装 Phase 0 验证包（Sandbox Gate B GUI 与签名 Gate C CLI）：
 
 ```sh
 ./scripts/package_phase0_harness.sh
 open -n .build/MacEasePhase0Harness.app
+.build/MacEasePhase0Harness.app/Contents/MacOS/GateCPlaybackProbe
 ```
 
 当前验证文档：

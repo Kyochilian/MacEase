@@ -47,14 +47,17 @@ if [[ "$arch" == arm64 ]]; then
 else
   app_path="$repo_root/.build/MacEasePhase0Harness-$arch.app"
 fi
-executable_path="$app_path/Contents/MacOS/GateBLoginHarness"
+login_executable_path="$app_path/Contents/MacOS/GateBLoginHarness"
+playback_executable_path="$app_path/Contents/MacOS/GateCPlaybackProbe"
 
 swift build --package-path "$package_root" -c release --arch "$arch" --product GateBLoginHarness
+swift build --package-path "$package_root" -c release --arch "$arch" --product GateCPlaybackProbe
 bin_path=$(swift build --package-path "$package_root" -c release --arch "$arch" --show-bin-path)
 
 rm -rf "$app_path"
 mkdir -p "$app_path/Contents/MacOS"
-cp "$bin_path/GateBLoginHarness" "$executable_path"
+cp "$bin_path/GateBLoginHarness" "$login_executable_path"
+cp "$bin_path/GateCPlaybackProbe" "$playback_executable_path"
 cp "$repo_root/Support/Phase0Harness-Info.plist" "$app_path/Contents/Info.plist"
 plutil -replace CFBundleShortVersionString -string "$short_version" "$app_path/Contents/Info.plist"
 plutil -replace CFBundleVersion -string "$build_number" "$app_path/Contents/Info.plist"
@@ -66,13 +69,23 @@ codesign_args=(
   --options runtime
   --entitlements "$repo_root/Support/Phase0Harness.entitlements"
 )
+playback_codesign_args=(
+  --force
+  --sign "$signing_identity"
+  --options runtime
+)
 if [[ "$signing_identity" != - ]]; then
   codesign_args+=(--timestamp)
+  playback_codesign_args+=(--timestamp)
 fi
+codesign "${playback_codesign_args[@]}" "$playback_executable_path"
+codesign --verify --strict --verbose=2 "$playback_executable_path"
 codesign "${codesign_args[@]}" "$app_path"
 codesign --verify --deep --strict --verbose=2 "$app_path"
 codesign --display --verbose=4 "$app_path" 2>&1 | sed -n '1,24p'
-file "$executable_path"
-lipo -info "$executable_path"
+for executable_path in "$login_executable_path" "$playback_executable_path"; do
+  file "$executable_path"
+  lipo -info "$executable_path"
+done
 
 print -r -- "$app_path"
