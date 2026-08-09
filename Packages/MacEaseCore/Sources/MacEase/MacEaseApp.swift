@@ -97,12 +97,12 @@ private struct PlaylistLibraryView: View {
         Text("Your Playlists")
           .font(.headline)
         Spacer()
-        Button("Load Playlists", systemImage: "arrow.clockwise") {
+        Button("Load Playlists · 1 request", systemImage: "arrow.clockwise") {
           library.load(reset: true, loginCoordinator: session)
         }
         .disabled(session.account == nil || session.isBusy || library.isLoading)
         if library.hasMore {
-          Button("Load More", systemImage: "plus") {
+          Button("Load More · 1 request", systemImage: "plus") {
             library.load(reset: false, loginCoordinator: session)
           }
           .disabled(session.isBusy || library.isLoading)
@@ -117,17 +117,85 @@ private struct PlaylistLibraryView: View {
           .foregroundStyle(.secondary)
           .frame(maxWidth: .infinity, maxHeight: .infinity)
       } else {
-        List(library.playlists, id: \.id) { playlist in
-          VStack(alignment: .leading, spacing: 3) {
-            Text(playlist.name)
-            Text(
-              "\(playlist.trackCount) tracks · "
-                + (playlist.owned ? "Created" : "Saved")
-            )
-            .font(.caption)
-            .foregroundStyle(.secondary)
+        HSplitView {
+          List(library.playlists, id: \.id) { playlist in
+            Button {
+              library.loadTracks(for: playlist, loginCoordinator: session)
+            } label: {
+              HStack {
+                VStack(alignment: .leading, spacing: 3) {
+                  Text(playlist.name)
+                  Text(
+                    "\(playlist.trackCount) tracks · "
+                      + (playlist.owned ? "Created" : "Saved")
+                  )
+                  .font(.caption)
+                  .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Text("Load Tracks · up to 2 requests")
+                  .font(.caption)
+                  .foregroundStyle(.secondary)
+              }
+              .padding(.vertical, 3)
+            }
+            .buttonStyle(.plain)
+            .disabled(session.isBusy || library.isLoading)
           }
-          .padding(.vertical, 3)
+          .frame(minWidth: 340)
+
+          VStack(spacing: 0) {
+            if let playlist = library.selectedPlaylist {
+              HStack {
+                VStack(alignment: .leading, spacing: 3) {
+                  Text(playlist.name)
+                    .font(.headline)
+                  Text("\(playlist.trackCount) tracks")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+                Spacer()
+                if library.hasMoreTracks {
+                  Button("Load More Tracks · 1 request", systemImage: "plus") {
+                    library.loadMoreTracks(loginCoordinator: session)
+                  }
+                  .disabled(session.isBusy || library.isLoading)
+                }
+              }
+              .padding(12)
+
+              Divider()
+
+              if library.tracks.isEmpty {
+                Text(library.status)
+                  .foregroundStyle(.secondary)
+                  .frame(maxWidth: .infinity, maxHeight: .infinity)
+              } else {
+                List(library.tracks.indices, id: \.self) { index in
+                  let track = library.tracks[index]
+                  VStack(alignment: .leading, spacing: 3) {
+                    Text(track.name)
+                    if !track.artists.isEmpty {
+                      Text(track.artists.joined(separator: ", "))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    }
+                  }
+                  .padding(.vertical, 3)
+                }
+              }
+            } else {
+              Text(
+                "Choose Load Tracks. The first batch uses one playlist-detail request "
+                  + "and, for a nonempty playlist, one song-detail request."
+              )
+              .foregroundStyle(.secondary)
+              .multilineTextAlignment(.center)
+              .padding(24)
+              .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+          }
+          .frame(minWidth: 340)
         }
       }
 

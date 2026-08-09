@@ -18,6 +18,7 @@ package final class LoginCoordinator: NSObject, WKNavigationDelegate, WKUIDelega
   @ObservationIgnored private let dataStore: WKWebsiteDataStore
   @ObservationIgnored private let session: NeteaseSession
   @ObservationIgnored private let vault: CredentialVault
+  @ObservationIgnored private var validatedCredential: NeteaseCredential?
   @ObservationIgnored package let webView: WKWebView
 
   package var status = "Ready"
@@ -90,6 +91,7 @@ package final class LoginCoordinator: NSObject, WKNavigationDelegate, WKUIDelega
       try await vault.save(credential)
       hasStoredSession = true
       account = nil
+      validatedCredential = nil
       status = "Saved \(credential.cookies.count) whitelisted cookie names"
     } catch {
       status = keychainErrorMessage(error)
@@ -102,6 +104,7 @@ package final class LoginCoordinator: NSObject, WKNavigationDelegate, WKUIDelega
 
     webView.stopLoading()
     account = nil
+    validatedCredential = nil
 
     var keychainError: String?
     do {
@@ -150,6 +153,7 @@ package final class LoginCoordinator: NSObject, WKNavigationDelegate, WKUIDelega
       try await vault.save(credential)
       hasStoredSession = true
       self.account = account
+      validatedCredential = credential
       status = "Manual Cookie session authenticated and saved"
     } catch {
       status = keychainErrorMessage(error)
@@ -161,6 +165,7 @@ package final class LoginCoordinator: NSObject, WKNavigationDelegate, WKUIDelega
     defer { endOperation() }
 
     account = nil
+    validatedCredential = nil
     do {
       guard let credential = try await vault.load() else {
         hasStoredSession = false
@@ -178,6 +183,7 @@ package final class LoginCoordinator: NSObject, WKNavigationDelegate, WKUIDelega
           return
         }
         self.account = account
+        validatedCredential = credential
         status = "Account status authenticated"
       case .signedOut:
         _ = await deleteStoredSession(
@@ -203,6 +209,13 @@ package final class LoginCoordinator: NSObject, WKNavigationDelegate, WKUIDelega
     return await deleteStoredSession(matching: credential, message: message)
   }
 
+  package func matchesValidatedSession(
+    _ credential: NeteaseCredential,
+    account: NeteaseAccount
+  ) -> Bool {
+    self.account == account && validatedCredential == credential
+  }
+
   private func deleteStoredSession(
     matching credential: NeteaseCredential,
     message: String
@@ -211,16 +224,19 @@ package final class LoginCoordinator: NSObject, WKNavigationDelegate, WKUIDelega
       guard try await vault.delete(matching: credential) else {
         hasStoredSession = try await vault.load() != nil
         account = nil
+        validatedCredential = nil
         status = "Stored session changed; validate again"
         return .notCurrent
       }
     } catch {
       status = keychainErrorMessage(error)
       account = nil
+      validatedCredential = nil
       return .failed
     }
     hasStoredSession = false
     account = nil
+    validatedCredential = nil
     status = message
     load(Self.loginURL)
     return .deleted

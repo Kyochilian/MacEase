@@ -271,7 +271,8 @@ MacEase.app
 
 ### 3.2 Endpoint 目录与风险白名单
 
-每个允许的接口必须通过统一 descriptor 声明：
+每个允许的接口都必须记录下列合同字段。它们是审查清单，不要求为了少量 endpoint
+建立通用运行时 descriptor、repository 或 provider 框架；固定常量和专用请求函数即可：
 
 ```swift
 struct EndpointDescriptor<Response: Decodable & Sendable>: Sendable {
@@ -528,9 +529,10 @@ Developer ID 分发不强制 App Sandbox，但它会影响本地文件、Sparkle
 - AVPlayer。
 - CoreAudio 只读设备监听。
 - 用户选择本地文件 + security-scoped bookmark。
-- Sparkle 2 sandbox/XPC 配置。
 
 若全部通过，优先启用 App Sandbox；若不启用，必须在文档中记录具体阻塞和额外安全措施，不能仅因配置麻烦而跳过。
+Sparkle 2 sandbox/XPC、更新签名与安装升级链路属于 Gate D1 发布验证，不以本地
+ad-hoc P0 构建替代。
 
 #### 更新与签名
 
@@ -613,7 +615,7 @@ Developer ID 分发不强制 App Sandbox，但它会影响本地文件、Sparkle
 - MP3、FLAC 和实际返回的其他格式。
 - standard/higher/exhigh/lossless/hires 的权限与降级。
 - 拖动、连续切歌、网络切换、睡眠/唤醒。
-- 强制模拟 URL 过期后的重新解析和进度恢复。
+- 自然观察到旧 URL 返回 403/404 后的显式重新解析和进度恢复；不构造风险样本。
 - 试听片段、灰色歌曲、无权限和 Cookie 失效错误分类。
 - 实际 CDN host、ATS、redirect 与 Range 行为。
 
@@ -660,6 +662,11 @@ Gate E 的 alpha 检查点和对应发布前置条件满足后，才能把构建
 - 逐行歌词。
 - Now Playing、基础媒体键。
 - GRDB 缓存、设置、错误与脱敏诊断。
+
+当前已完成原生 app 会话、我的歌单分页，以及显式的歌单详情两阶段离线切片：首批最多
+执行一次 `playlistDetail` 和一次 `songDetail`，超过 1000 首只允许用户手动加载下一批。
+该进度不等于 internal alpha；新详情 endpoint 尚无 live 批准，完整 Gate C、Gate D1 和
+Gate E 仍按各自退出条件保持 Hold。
 
 不做：高级歌词动画、自定义音频缓存、本地自动匹配、菜单栏播放器、推荐/私人 FM、评论与下载。
 

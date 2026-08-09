@@ -185,3 +185,224 @@ private let accountCredential = NeteaseCredential(
     )
   }
 }
+
+@Test func playlistDetailRequestUsesFixedEAPIContract() throws {
+  let request = try NeteaseSession.playlistDetailRequest(
+    playlistID: 24_381_616,
+    credential: accountCredential,
+    osVersion: "15.5",
+    buildVersion: "1722945678",
+    requestID: "1722945678123_0042"
+  )
+  let header =
+    #"{"osver":"15.5","os":"osx","appver":"0.1","buildver":"1722945678","#
+    + #""__csrf":"csrf-test","channel":"github","#
+    + #""requestId":"1722945678123_0042","MUSIC_U":"music-u-test"}"#
+  let json =
+    #"{"id":24381616,"n":100000,"s":8,"e_r":false,"header":\#(header)}"#
+
+  #expect(
+    request.url?.absoluteString
+      == "https://interfacepc.music.163.com/eapi/v6/playlist/detail"
+  )
+  #expect(request.httpMethod == "POST")
+  #expect(request.httpShouldHandleCookies == false)
+  #expect(request.value(forHTTPHeaderField: "Referer") == nil)
+  #expect(
+    request.value(forHTTPHeaderField: "Cookie")
+      == "osver=15.5; os=osx; appver=0.1; buildver=1722945678; __csrf=csrf-test; channel=github; requestId=1722945678123_0042; MUSIC_U=music-u-test"
+  )
+  #expect(
+    String(decoding: request.httpBody!, as: UTF8.self)
+      == "params="
+      + NeteaseCrypto.eapi(path: "/api/v6/playlist/detail", json: json)
+  )
+}
+
+@Test func playlistDetailUsesTrackIDsAsCompleteOrder() throws {
+  let response = HTTPURLResponse(
+    url: URL(string: "https://interfacepc.music.163.com")!,
+    statusCode: 200,
+    httpVersion: nil,
+    headerFields: nil
+  )!
+  let detail = try NeteaseSession.classifyPlaylistDetail(
+    data: Data(
+      #"{"code":200,"playlist":{"id":24381616,"name":"Mix","trackIds":[{"id":3},{"id":1},{"id":2}],"tracks":[{"id":3}]}}"#
+        .utf8
+    ),
+    response: response,
+    playlistID: 24_381_616
+  )
+
+  #expect(
+    detail
+      == PlaylistDetail(
+        id: 24_381_616,
+        name: "Mix",
+        trackIDs: [3, 1, 2]
+      )
+  )
+}
+
+@Test func songDetailsRequestUsesOneExplicitBoundedBatch() throws {
+  let request = try NeteaseSession.songDetailsRequest(
+    songIDs: [3, 1, 2],
+    credential: accountCredential,
+    secretKey: "0123456789abcdef"
+  )
+  let json =
+    #"{"c":"[{\"id\":3},{\"id\":1},{\"id\":2}]","e_r":false,"csrf_token":"csrf-test"}"#
+  let parameters = NeteaseCrypto.weapi(
+    json: json,
+    secretKey: "0123456789abcdef"
+  )
+
+  #expect(request.url?.absoluteString == "https://music.163.com/weapi/v3/song/detail")
+  #expect(request.httpMethod == "POST")
+  #expect(request.httpShouldHandleCookies == false)
+  #expect(request.value(forHTTPHeaderField: "Referer") == "https://music.163.com/")
+  #expect(request.value(forHTTPHeaderField: "Cookie") == "MUSIC_U=music-u-test; __csrf=csrf-test")
+  #expect(
+    String(decoding: request.httpBody!, as: UTF8.self)
+      == String(
+        decoding: FormURLEncoder.encode([
+          ("params", parameters.params),
+          ("encSecKey", parameters.encSecKey),
+        ]),
+        as: UTF8.self
+      )
+  )
+
+  #expect(
+    throws: NeteaseCatalogError.invalidSongDetailRequestCount(0)
+  ) {
+    try NeteaseSession.songDetailsRequest(
+      songIDs: [],
+      credential: accountCredential,
+      secretKey: "0123456789abcdef"
+    )
+  }
+  let maximumRequest = try NeteaseSession.songDetailsRequest(
+    songIDs: Array(0..<NeteaseSession.songDetailRequestLimit).map(Int64.init),
+    credential: accountCredential,
+    secretKey: "0123456789abcdef"
+  )
+  #expect(maximumRequest.httpMethod == "POST")
+
+  #expect(
+    throws: NeteaseCatalogError.invalidSongDetailRequestCount(1001)
+  ) {
+    try NeteaseSession.songDetailsRequest(
+      songIDs: Array(0...NeteaseSession.songDetailRequestLimit).map(Int64.init),
+      credential: accountCredential,
+      secretKey: "0123456789abcdef"
+    )
+  }
+}
+
+@Test func songDetailsDecodesMinimalTrackMetadata() throws {
+  let response = HTTPURLResponse(
+    url: URL(string: "https://music.163.com")!,
+    statusCode: 200,
+    httpVersion: nil,
+    headerFields: nil
+  )!
+  let tracks = try NeteaseSession.classifySongDetails(
+    data: Data(
+      #"{"code":200,"songs":[{"id":1,"name":"First","ar":[]},{"id":3,"name":"Third","ar":[{"name":"A"},{"name":"B"}]},{"id":99,"name":"Extra","ar":[]}]}"#
+        .utf8
+    ),
+    response: response,
+    songIDs: [3, 1, 3]
+  )
+
+  #expect(
+    tracks == [
+      PlaylistTrack(id: 3, name: "Third", artists: ["A", "B"]),
+      PlaylistTrack(id: 1, name: "First", artists: []),
+      PlaylistTrack(id: 3, name: "Third", artists: ["A", "B"]),
+    ]
+  )
+}
+
+@Test func playlistDetailRejectsMismatchedIdentity() {
+  let response = HTTPURLResponse(
+    url: URL(string: "https://music.163.com")!,
+    statusCode: 200,
+    httpVersion: nil,
+    headerFields: nil
+  )!
+
+  #expect(throws: NeteaseCatalogError.invalidResponse) {
+    try NeteaseSession.classifyPlaylistDetail(
+      data: Data(
+        #"{"code":200,"playlist":{"id":2,"name":"Other","trackIds":[]}}"#.utf8
+      ),
+      response: response,
+      playlistID: 1
+    )
+  }
+}
+
+@Test func songDetailsReturnsOnlyRequestedIDsPresentInTheResponse() throws {
+  let response = HTTPURLResponse(
+    url: URL(string: "https://music.163.com")!,
+    statusCode: 200,
+    httpVersion: nil,
+    headerFields: nil
+  )!
+  let tracks = try NeteaseSession.classifySongDetails(
+    data: Data(
+      #"{"code":200,"songs":[{"id":3,"name":"Third","ar":[]}]}"#.utf8
+    ),
+    response: response,
+    songIDs: [3, 1]
+  )
+
+  #expect(tracks == [PlaylistTrack(id: 3, name: "Third", artists: [])])
+}
+
+@Test func playlistAndSongDetailsDistinguishHTTPAndServiceErrors() {
+  let failedHTTPResponse = HTTPURLResponse(
+    url: URL(string: "https://music.163.com")!,
+    statusCode: 503,
+    httpVersion: nil,
+    headerFields: nil
+  )!
+  let successfulHTTPResponse = HTTPURLResponse(
+    url: URL(string: "https://music.163.com")!,
+    statusCode: 200,
+    httpVersion: nil,
+    headerFields: nil
+  )!
+
+  #expect(throws: NeteaseServiceError(source: .http, statusCode: 503)) {
+    try NeteaseSession.classifyPlaylistDetail(
+      data: Data(),
+      response: failedHTTPResponse,
+      playlistID: 1
+    )
+  }
+  #expect(throws: NeteaseServiceError(source: .service, statusCode: 301)) {
+    try NeteaseSession.classifyPlaylistDetail(
+      data: Data(#"{"code":301}"#.utf8),
+      response: successfulHTTPResponse,
+      playlistID: 1
+    )
+  }
+  #expect(throws: NeteaseServiceError(source: .http, statusCode: 503)) {
+    try NeteaseSession.classifySongDetails(
+      data: Data(),
+      response: failedHTTPResponse,
+      songIDs: [1]
+    )
+  }
+  #expect(throws: NeteaseServiceError(source: .service, statusCode: 301)) {
+    try NeteaseSession.classifySongDetails(
+      data: Data(#"{"code":301}"#.utf8),
+      response: successfulHTTPResponse,
+      songIDs: [1]
+    )
+  }
+}
