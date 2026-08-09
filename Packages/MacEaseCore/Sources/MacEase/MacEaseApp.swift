@@ -51,12 +51,8 @@ private struct SessionView: View {
           Task { await session.saveSession() }
         }
         Button("Validate Session", systemImage: "checkmark.shield") {
-          Task {
-            await session.validateSession()
-            if session.account == nil {
-              library.reset()
-            }
-          }
+          library.reset()
+          Task { await session.validateSession() }
         }
         Button("Clear Session", systemImage: "trash") {
           library.reset()

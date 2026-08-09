@@ -74,6 +74,8 @@ final class PlaylistLibraryCoordinator {
         loginCoordinator.hasStoredSession = false
         loginCoordinator.account = nil
         loginCoordinator.status = "No stored session to validate"
+        playlists = []
+        hasMore = false
         status = "No stored session to load playlists"
         return
       }
