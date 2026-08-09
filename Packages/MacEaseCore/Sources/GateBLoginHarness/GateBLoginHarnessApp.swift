@@ -1,4 +1,5 @@
 import AppKit
+import MacEaseSession
 import NeteaseKit
 import SwiftUI
 import WebKit
@@ -17,9 +18,9 @@ struct GateBLoginHarnessApp: App {
         playback: playback,
         probes: probes
       )
-        .task {
-          await coordinator.start()
-        }
+      .task {
+        await coordinator.start()
+      }
     }
     .defaultSize(width: 960, height: 780)
   }

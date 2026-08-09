@@ -4,7 +4,7 @@ import NeteaseKit
 import Observation
 import WebKit
 
-enum SessionInvalidationResult {
+package enum SessionInvalidationResult {
   case deleted
   case notCurrent
   case failed
@@ -12,20 +12,21 @@ enum SessionInvalidationResult {
 
 @MainActor
 @Observable
-final class LoginCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
+package final class LoginCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
   private static let loginURL = URL(string: "https://music.163.com/login")!
 
   @ObservationIgnored private let dataStore: WKWebsiteDataStore
   @ObservationIgnored private let session: NeteaseSession
   @ObservationIgnored private let vault: CredentialVault
-  @ObservationIgnored let webView: WKWebView
+  @ObservationIgnored package let webView: WKWebView
 
-  var status = "Ready"
-  var hasStoredSession = false
-  var isBusy = false
-  var manualCookieHeader = ""
+  package var status = "Ready"
+  package var hasStoredSession = false
+  package var isBusy = false
+  package var manualCookieHeader = ""
+  package var account: NeteaseAccount?
 
-  override init() {
+  package override init() {
     let dataStore = WKWebsiteDataStore.nonPersistent()
     let configuration = WKWebViewConfiguration()
     configuration.websiteDataStore = dataStore
@@ -40,7 +41,7 @@ final class LoginCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
     webView.uiDelegate = self
   }
 
-  func start() async {
+  package func start() async {
     guard beginOperation() else { return }
     defer { endOperation() }
 
@@ -56,13 +57,13 @@ final class LoginCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
     load(Self.loginURL)
   }
 
-  func loadLoginPage() {
+  package func loadLoginPage() {
     guard !isBusy else { return }
     status = "Loading official login page"
     load(Self.loginURL)
   }
 
-  func saveSession() async {
+  package func saveSession() async {
     guard beginOperation() else { return }
     defer { endOperation() }
 
@@ -72,7 +73,8 @@ final class LoginCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
     let csrf = allowed.filter { $0.name == .csrf }
 
     guard musicU.count == 1 else {
-      status = musicU.isEmpty
+      status =
+        musicU.isEmpty
         ? musicUCookieDiagnostic(cookies)
         : "Duplicate MUSIC_U cookies rejected"
       return
@@ -87,17 +89,19 @@ final class LoginCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
     do {
       try await vault.save(credential)
       hasStoredSession = true
+      account = nil
       status = "Saved \(credential.cookies.count) whitelisted cookie names"
     } catch {
       status = keychainErrorMessage(error)
     }
   }
 
-  func clearSession() async {
+  package func clearSession() async {
     guard beginOperation() else { return }
     defer { endOperation() }
 
     webView.stopLoading()
+    account = nil
 
     var keychainError: String?
     do {
@@ -115,7 +119,7 @@ final class LoginCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
     load(Self.loginURL)
   }
 
-  func importSession() async {
+  package func importSession() async {
     guard beginOperation() else { return }
     defer { endOperation() }
 
@@ -130,14 +134,14 @@ final class LoginCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
     do {
       state = try await session.accountStatus(credential: credential)
     } catch let error as NeteaseServiceError {
-      status = "Manual Cookie validation service error \(error.statusCode)"
+      status = "Manual Cookie validation \(error.source.rawValue) error \(error.statusCode)"
       return
     } catch {
       status = "Manual Cookie validation network or response error"
       return
     }
 
-    guard case .authenticated = state else {
+    guard case .authenticated(let account) = state else {
       status = "Manual Cookie session invalid; not saved"
       return
     }
@@ -145,25 +149,35 @@ final class LoginCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
     do {
       try await vault.save(credential)
       hasStoredSession = true
+      self.account = account
       status = "Manual Cookie session authenticated and saved"
     } catch {
       status = keychainErrorMessage(error)
     }
   }
 
-  func validateSession() async {
+  package func validateSession() async {
     guard beginOperation() else { return }
     defer { endOperation() }
 
+    account = nil
     do {
       guard let credential = try await vault.load() else {
+        hasStoredSession = false
         status = "No stored session to validate"
         return
       }
+      hasStoredSession = true
 
       switch try await session.accountStatus(credential: credential) {
-      case .authenticated:
-        guard try await vault.load() == credential else { return }
+      case .authenticated(let account):
+        let currentCredential = try await vault.load()
+        guard currentCredential == credential else {
+          hasStoredSession = currentCredential != nil
+          status = "Stored session changed; validate again"
+          return
+        }
+        self.account = account
         status = "Account status authenticated"
       case .signedOut:
         _ = await deleteStoredSession(
@@ -172,16 +186,20 @@ final class LoginCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
         )
       }
     } catch let error as NeteaseServiceError {
-      status = "Account status service error \(error.statusCode)"
+      status = "Account status \(error.source.rawValue) error \(error.statusCode)"
+    } catch let error as CredentialVaultError {
+      status = keychainErrorMessage(error)
     } catch {
       status = "Account status network or response error"
     }
   }
 
-  func invalidateStoredSession(
+  package func invalidateStoredSession(
     matching credential: NeteaseCredential,
     message: String
   ) async -> SessionInvalidationResult {
+    guard beginOperation() else { return .notCurrent }
+    defer { endOperation() }
     return await deleteStoredSession(matching: credential, message: message)
   }
 
@@ -191,19 +209,24 @@ final class LoginCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
   ) async -> SessionInvalidationResult {
     do {
       guard try await vault.delete(matching: credential) else {
+        hasStoredSession = try await vault.load() != nil
+        account = nil
+        status = "Stored session changed; validate again"
         return .notCurrent
       }
     } catch {
       status = keychainErrorMessage(error)
+      account = nil
       return .failed
     }
     hasStoredSession = false
+    account = nil
     status = message
     load(Self.loginURL)
     return .deleted
   }
 
-  func webView(
+  package func webView(
     _ webView: WKWebView,
     decidePolicyFor navigationAction: WKNavigationAction
   ) async -> WKNavigationActionPolicy {
@@ -225,7 +248,7 @@ final class LoginCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
     return .cancel
   }
 
-  func webView(
+  package func webView(
     _ webView: WKWebView,
     createWebViewWith configuration: WKWebViewConfiguration,
     for navigationAction: WKNavigationAction,
@@ -248,7 +271,7 @@ final class LoginCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
     return nil
   }
 
-  func webView(
+  package func webView(
     _ webView: WKWebView,
     didFailProvisionalNavigation navigation: WKNavigation!,
     withError error: Error

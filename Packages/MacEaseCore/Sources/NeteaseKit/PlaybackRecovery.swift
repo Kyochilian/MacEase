@@ -13,6 +13,10 @@ package enum PlaybackExpiryPolicy {
     }
     return expiresIn + marginSeconds
   }
+
+  package static func confirmsInvalidURL(statusCode: Int) -> Bool {
+    statusCode == 403 || statusCode == 404
+  }
 }
 
 /// The minimum state needed to rebuild a short-lived playback asset.

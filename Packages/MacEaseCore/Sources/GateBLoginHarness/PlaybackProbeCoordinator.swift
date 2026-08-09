@@ -1,5 +1,6 @@
 import AVFoundation
 import Foundation
+import MacEaseSession
 import NeteaseKit
 import Observation
 
@@ -343,7 +344,8 @@ final class PlaybackProbeCoordinator {
     guard intentGate.accepts(token), !Task.isCancelled else { return }
 
     switch error {
-    case let error as NeteaseServiceError where error.statusCode == 301:
+    case let error as NeteaseServiceError
+    where error.source == .service && error.statusCode == 301:
       guard let credential else { return }
       playbackContext = nil
       releasePlayback()
@@ -375,7 +377,7 @@ final class PlaybackProbeCoordinator {
     case let error as NeteaseServiceError:
       status = failureStatus(
         operation: operation,
-        result: "serviceError",
+        result: "\(error.source.rawValue)Error",
         quality: quality,
         detail: "status=\(error.statusCode)"
       )

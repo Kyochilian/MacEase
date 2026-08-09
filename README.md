@@ -2,17 +2,21 @@
 
 MacEase（Mac + Ease）是一个面向 macOS 的非官方网易云音乐第三方客户端，使用 Swift、SwiftUI 和 Apple 原生框架开发。本项目独立于 NetEase, Inc. 与网易云音乐，未获其关联、授权或背书。
 
-项目当前处于可行性验证阶段，尚无产品 UI 或公开二进制版本；仓库包含协议测试、
-Gate A 无账号读取 probe，以及 Gate B 登录与 Gate C eapi 播放技术 harness。当前
-关卡和下一次执行顺序见 [docs/next-session.md](docs/next-session.md)，研究与架构依据见 [init.md](init.md)。
+项目已完成可行性验证并开始最小 Phase 2 app foundation，尚无公开二进制版本；仓库
+同时保留 Gate A 无账号读取 probe、Gate B 登录和 Gate C eapi 播放技术 harness。
+完整 Gate C、Gate E 与发行关卡仍为 Hold；研究、边界和路线图依据见 [init.md](init.md)。
 
 ## 当前范围
 
 - macOS 15+，当前发行目标为 Apple Silicon（arm64）；SwiftUI 优先，必要时使用 AppKit。
-- 所有网易网络请求集中在 `NeteaseKit`。
+- 所有程序化网易 API 请求集中在 `NeteaseKit`；官方登录页和媒体传输分别由
+  `WKWebView`、`AVPlayer` 直接完成。
 - 原生 Swift 实现 weapi/eapi；当前 Android-identity xeapi 路径 No-Go，整体 live xeapi 仍为 Hold。
 - 官方登录页 `WKWebView`、Keychain 会话、AVPlayer 播放。
-- 固定源提交 `c2ea0e7` 的 arm64 Debug/Release 测试各 36 项通过；eapi 已执行切片 Go，完整 eapi Gate C 仍 Hold。
+- 最小 `MacEase.app` 已复用验证过的登录/会话实现，并加入只读、手动分页的我的歌单
+  foundation；不自动请求、不重试。
+- Gate E 固定源提交 `c2ea0e7` 的 arm64 Debug/Release 测试各 36 项通过；当前开发
+  工作树的 Debug/Release 测试各 43 项通过。完整 eapi Gate C 仍 Hold。
 - GitHub Releases + Developer ID + notarization + Sparkle 2；不进入 Mac App Store。
 
 ## 永久边界
@@ -58,17 +62,14 @@ open -n .build/MacEasePhase0Harness.app
 .build/MacEasePhase0Harness.app/Contents/MacOS/GateCPlaybackProbe
 ```
 
-当前验证文档：
+组装当前最小 app（ad-hoc Hardened Runtime，仅用于本地开发验证）：
 
-- [Phase 0 baseline](docs/phase0/README.md)
-- [Endpoint policy](docs/phase0/endpoint-policy.md)
-- [Phase 0 validation](docs/phase0/validation.md)
-- [Gate A protocol evidence](docs/gatea/README.md)
-- [Gate B login harness](docs/gateb/README.md)
-- [Gate C eapi playback evidence](docs/gatec/README.md)
-- [Gate D release engineering](docs/gated/README.md)
-- [Gate E account-risk observation](docs/gatee/README.md)
-- [Next-session handoff](docs/next-session.md)
+```sh
+./scripts/package_macease_app.sh --arch arm64 --build 1
+open -n .build/MacEase.app
+```
+
+Gate 台账与交接记录保存在本地工作区的 `docs/`，不属于公开源码发布内容。
 
 ## 发布与许可
 

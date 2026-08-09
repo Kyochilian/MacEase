@@ -100,7 +100,8 @@ private let playbackCredential = NeteaseCredential(
   )!
   let resolved = try NeteaseSession.classifySongURL(
     data: Data(
-      #"{"code":200,"data":[{"id":347230,"url":"https://m10.music.126.net/audio.mp3","code":200,"level":"standard","type":"mp3","br":128000,"size":1000,"expi":1200,"fee":0,"freeTrialInfo":null}]}"#.utf8
+      #"{"code":200,"data":[{"id":347230,"url":"https://m10.music.126.net/audio.mp3","code":200,"level":"standard","type":"mp3","br":128000,"size":1000,"expi":1200,"fee":0,"freeTrialInfo":null}]}"#
+        .utf8
     ),
     response: response,
     songID: 347230,
@@ -188,7 +189,8 @@ private let playbackCredential = NeteaseCredential(
   }
   let httpResolved = try? NeteaseSession.classifySongURL(
     data: Data(
-      #"{"code":200,"data":[{"id":347230,"url":"http://m10.music.126.net/audio.mp3","code":200}]}"#.utf8
+      #"{"code":200,"data":[{"id":347230,"url":"http://m10.music.126.net/audio.mp3","code":200}]}"#
+        .utf8
     ),
     response: response,
     songID: 347230,
@@ -203,7 +205,8 @@ private let playbackCredential = NeteaseCredential(
   #expect(throws: NeteasePlaybackError.nonHTTPSURL("music.163.com")) {
     try NeteaseSession.classifySongURL(
       data: Data(
-        #"{"code":200,"data":[{"id":347230,"url":"http://music.163.com/audio.mp3","code":200}]}"#.utf8
+        #"{"code":200,"data":[{"id":347230,"url":"http://music.163.com/audio.mp3","code":200}]}"#
+          .utf8
       ),
       response: response,
       songID: 347230,
@@ -213,7 +216,8 @@ private let playbackCredential = NeteaseCredential(
   #expect(throws: NeteasePlaybackError.unapprovedHost("cdn.example.com")) {
     try NeteaseSession.classifySongURL(
       data: Data(
-        #"{"code":200,"data":[{"id":347230,"url":"https://cdn.example.com/audio.mp3","code":200}]}"#.utf8
+        #"{"code":200,"data":[{"id":347230,"url":"https://cdn.example.com/audio.mp3","code":200}]}"#
+          .utf8
       ),
       response: response,
       songID: 347230,
@@ -223,7 +227,8 @@ private let playbackCredential = NeteaseCredential(
   #expect(throws: NeteasePlaybackError.unapprovedHost("music.126.net.attacker")) {
     try NeteaseSession.classifySongURL(
       data: Data(
-        #"{"code":200,"data":[{"id":347230,"url":"https://music.126.net.attacker/audio.mp3","code":200}]}"#.utf8
+        #"{"code":200,"data":[{"id":347230,"url":"https://music.126.net.attacker/audio.mp3","code":200}]}"#
+          .utf8
       ),
       response: response,
       songID: 347230,
@@ -240,7 +245,7 @@ private let playbackCredential = NeteaseCredential(
     headerFields: nil
   )!
 
-  #expect(throws: NeteaseServiceError(statusCode: 503)) {
+  #expect(throws: NeteaseServiceError(source: .http, statusCode: 503)) {
     try NeteaseSession.classifySongURL(
       data: Data(),
       response: failedHTTPResponse,
@@ -255,7 +260,7 @@ private let playbackCredential = NeteaseCredential(
     httpVersion: nil,
     headerFields: nil
   )!
-  #expect(throws: NeteaseServiceError(statusCode: 301)) {
+  #expect(throws: NeteaseServiceError(source: .service, statusCode: 301)) {
     try NeteaseSession.classifySongURL(
       data: Data(#"{"code":301}"#.utf8),
       response: successfulHTTPResponse,

@@ -15,6 +15,13 @@ import Testing
   #expect(PlaybackExpiryPolicy.waitSeconds(expiresIn: 7201) == nil)
 }
 
+@Test func playbackExpiryPolicyRequiresAnInvalidURLStatus() {
+  #expect(PlaybackExpiryPolicy.confirmsInvalidURL(statusCode: 403))
+  #expect(PlaybackExpiryPolicy.confirmsInvalidURL(statusCode: 404))
+  #expect(!PlaybackExpiryPolicy.confirmsInvalidURL(statusCode: 302))
+  #expect(!PlaybackExpiryPolicy.confirmsInvalidURL(statusCode: 500))
+}
+
 @Test func playbackRecoverySnapshotClampsNegativePosition() {
   let snapshot = PlaybackRecoverySnapshot(
     songID: 347230,

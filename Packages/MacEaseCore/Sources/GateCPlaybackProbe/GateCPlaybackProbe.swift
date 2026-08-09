@@ -153,7 +153,7 @@ struct GateCPlaybackProbe {
     let prefix = "result=failed requestedQuality=\(quality.rawValue)"
     switch error {
     case let error as NeteaseServiceError:
-      return "\(prefix) class=service status=\(error.statusCode)"
+      return "\(prefix) class=\(error.source.rawValue) status=\(error.statusCode)"
     case NeteasePlaybackError.invalidResponse:
       return "\(prefix) class=invalidResponse"
     case NeteasePlaybackError.nonHTTPSURL(let host):
@@ -254,7 +254,10 @@ struct GateCPlaybackProbe {
       )
       return true
     } catch let error as NeteaseServiceError {
-      print("recovery=failed stage=refresh class=service status=\(error.statusCode)")
+      print(
+        "recovery=failed stage=refresh class=\(error.source.rawValue) "
+          + "status=\(error.statusCode)"
+      )
       return false
     } catch let error as URLError {
       print("recovery=failed class=network code=\(error.errorCode)")
@@ -270,7 +273,9 @@ struct GateCPlaybackProbe {
     session: NeteaseSession,
     credential: NeteaseCredential
   ) async -> Bool {
-    guard let waitSeconds = PlaybackExpiryPolicy.waitSeconds(expiresIn: initial.expiresIn)
+    guard
+      let expiresIn = initial.expiresIn,
+      let waitSeconds = PlaybackExpiryPolicy.waitSeconds(expiresIn: expiresIn)
     else {
       print(
         "expiry=notRun reason=expiryOutOfRange "
@@ -292,7 +297,7 @@ struct GateCPlaybackProbe {
       initialPlayer.pause()
       initialPlayer.replaceCurrentItem(with: nil)
 
-      print("expiry=waiting expiresIn=\(initial.expiresIn ?? 0) waitSeconds=\(waitSeconds)")
+      print("expiry=waiting expiresIn=\(expiresIn) waitSeconds=\(waitSeconds)")
       try await Task.sleep(for: .seconds(waitSeconds))
 
       let probe = try await session.probeAudioURL(initial)
@@ -302,6 +307,10 @@ struct GateCPlaybackProbe {
       )
       guard !probe.rangeResponse else {
         print("expiry=notObserved reason=staleURLStillValid")
+        return false
+      }
+      guard PlaybackExpiryPolicy.confirmsInvalidURL(statusCode: probe.statusCode) else {
+        print("expiry=notObserved reason=staleURLResponseInconclusive")
         return false
       }
 
@@ -332,7 +341,10 @@ struct GateCPlaybackProbe {
       )
       return true
     } catch let error as NeteaseServiceError {
-      print("expiry=failed stage=refresh class=service status=\(error.statusCode)")
+      print(
+        "expiry=failed stage=refresh class=\(error.source.rawValue) "
+          + "status=\(error.statusCode)"
+      )
       return false
     } catch let error as URLError {
       print("expiry=failed class=network code=\(error.errorCode)")

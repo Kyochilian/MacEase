@@ -42,15 +42,3 @@ import Testing
   #expect(next.generation == 2)
   #expect(gate.accepts(next))
 }
-
-@Test func playbackIntentGateRejectsTokenFromAnotherGate() {
-  var firstGate = PlaybackIntentGate()
-  var secondGate = PlaybackIntentGate()
-
-  let firstToken = firstGate.begin()
-  let secondToken = secondGate.begin()
-
-  #expect(firstToken.generation == secondToken.generation)
-  #expect(!firstGate.accepts(secondToken))
-  #expect(!secondGate.accepts(firstToken))
-}

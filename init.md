@@ -2,12 +2,12 @@
 
 > 状态：设计阶段结论汇总；开发可行性复核完成
 > 创建日期：2026-08-04
-> 最近复核：2026-08-07
+> 最近复核：2026-08-09
 > 本文档记录调研结论、已确认决策、实现边界、技术架构、验证关卡、路线图与风险登记册。
 > **调研结论具有时效性**：网易云的接口、协议与风控策略可能随时变化。涉及私有接口的结论在实现前必须按本文的证据规则重新验证。
 
-> 当前实现状态和下一次执行顺序以 [`docs/next-session.md`](docs/next-session.md) 为准；
-> 本文保留设计依据，不重复维护每次 live probe 的明细。
+> 当前实现状态和下一次执行顺序保存在本地 `docs/next-session.md`；本文保留设计依据，
+> 不重复维护每次 live probe 的明细。
 
 ---
 
@@ -261,8 +261,10 @@ MacEase.app
 
 边界规则：
 
-- 所有网易网络请求只能由 `NeteaseKit` 发出。
-- `LoginFeature` 的 WKWebView 留在 app target；它只把结构化凭证交给 `NeteaseKit`。
+- 所有程序化网易 API 请求只能由 `NeteaseKit` 发出；官方登录页和媒体传输分别由
+  `WKWebView`、`AVPlayer` 直接完成。
+- WKWebView 登录实现位于最小 `MacEaseSession` target，由真实 app 与 Gate B harness
+  共同复用；UI 仍留在各 executable target，它只把结构化凭证交给 `NeteaseKit`。
 - AVPlayer 留在 app 侧 `@MainActor PlaybackController`；`PlaybackKit` 提供可测试的解析、恢复和缓存逻辑。
 - `SystemIntegration` 初期留在 app target，避免为少量生命周期代码过早增加 package。
 - 只有出现第二个 app target 或明确复用需求时，才拆独立 DesignSystem/SystemIntegration package。
@@ -293,7 +295,7 @@ enum EndpointEffect: Sendable {
 
 - shipping target 只编译允许接口；scrobble、签到、解灰、下载绕过等 endpoint **根本不定义**，而不是定义成 `.prohibited` 后运行时拒绝。
 - 每个 endpoint 显式选择 weapi/eapi/xeapi，禁止 HTTP client 隐式猜测。
-- 自动重试只用于幂等读取；用户写操作不得无条件重试。
+- v0.1 不做自动重试；失败后只允许用户显式重试。
 - 新增 endpoint 的 PR 必须说明用户价值、账号副作用、认证要求、最后验证日期和测试账号结果。
 - v0.1 endpoint 集合保持最小：登录状态、用户歌单读取、歌单详情、搜索、歌曲 URL、歌词；专辑/艺人详情按 UI 需要再加。
 - 每日推荐、私人 FM 和收藏写操作不进入 v0.1。
@@ -361,7 +363,7 @@ CredentialVault actor
     └── Keychain CRUD / account namespace / redacted snapshot
 
 NeteaseSession actor
-    └── immutable credential snapshot / refresh serialization / auth state
+    └── immutable credential snapshot / request serialization / auth state
 ```
 
 会话威胁模型：
@@ -372,7 +374,7 @@ NeteaseSession actor
 | Cookie 泄露到普通存储、日志、诊断或 crash 上下文 | Keychain 白名单存储；集中脱敏；针对日志和诊断包做回归测试 |
 | 向无关 endpoint 或 host 发送过量 Cookie | descriptor 声明认证需求；按 endpoint 构造最小 header；host 白名单 |
 | 多账号数据、Cookie 或缓存串号 | Keychain account namespace、数据库逻辑命名空间、切换账号时清空内存 snapshot |
-| 过期凭证被无限重试并触发风控 | 刷新串行化、幂等读取有限重试、明确转入重新登录状态 |
+| 过期凭证被重复请求并触发风控 | 零自动重试、条件删除匹配凭证、明确转入重新登录状态 |
 | 登出后仍残留可恢复会话 | 删除 Keychain、WebKit 数据、账号缓存与内存状态，并用登录状态 endpoint 验证 |
 
 约束：
@@ -400,7 +402,7 @@ Xcode 16.4 SDK 将 `AVPlayer` 标为 UI actor，因此播放器本体不放进�
 PlaybackAssetResolver actor
 ├── track ID -> short-lived asset
 ├── actual quality / format / trial range
-└── refresh credentials and retry classification
+└── explicit URL refresh and failure classification
 
 PlaybackRecoveryPolicy (pure Sendable reducer)
 └── resolving / preparing / playing / paused / stalled / recovering / failed
@@ -620,9 +622,11 @@ Developer ID 分发不强制 App Sandbox，但它会影响本地文件、Sparkle
 当前执行状态：eapi 聚合切片已有 VIP/free 五档、VIP Range/play-stop、显式刷新、
 free 快速切档、网络恢复和睡眠/唤醒，以及 VIP 快速切歌证据；FLAC 可听确认与已知灰色
 样本分类也已完成。一次完整 TTL+余量等待后旧 URL 仍返回有效 Range，因此完整 eapi
-Gate C 仍缺实际失效恢复及安全 trial/permission-denied 样本；未完成前不进入产品 UI。
-当前 Android-identity xeapi 路径为 No-Go，live xeapi 独立保持 Hold。实时状态与执行
-顺序以 [`docs/next-session.md`](docs/next-session.md) 为准。
+Gate C 仍缺实际失效恢复及安全 trial/permission-denied 样本。允许并行开发不增加
+live 风险的 Phase 2 foundation 与 Gate D app bootstrap，但这不构成 internal alpha：
+播放可靠性宣称仍由完整 Gate C 阻塞，internal alpha 仍由 Gate C/Gate E 阻塞，发行仍由
+Gate D 阻塞。当前 Android-identity xeapi 路径为 No-Go，live xeapi 独立保持 Hold。
+实时状态与执行顺序保存在本地 `docs/next-session.md`。
 
 #### Gate D：发布工程
 
@@ -644,6 +648,9 @@ Gate C 仍缺实际失效恢复及安全 trial/permission-denied 样本；未完
 测试无异常不能证明绝对安全，但能发现高概率问题。若同一最小读取/播放集合反复触发处罚且无法消除，停止公开发布。
 
 ### Phase 2 — 内部 alpha（4–8 周）
+
+Phase 2 的离线和低风险 foundation 可与未完成的证据关卡并行实现；只有完整 Gate C、
+Gate E 的 alpha 检查点和对应发布前置条件满足后，才能把构建称为 internal alpha。
 
 范围：
 
