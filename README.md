@@ -16,9 +16,8 @@ MacEase（Mac + Ease）是一个面向 macOS 的非官方网易云音乐第三�
 - 最小 `MacEase.app` 已复用验证过的登录/会话实现，并加入只读、手动分页的我的歌单
   与歌单曲目详情；详情显式执行 `playlistDetail` + `songDetail`，每批最多 1000 首，后续
   批次只由用户点击触发，不自动请求、不重试。
-- Gate E 固定源提交 `c2ea0e7` 的 arm64 Debug/Release 测试各 36 项通过；当前开发
-  工作树的 Debug 测试 50 项通过，Release 基线在固定下一构建前复验。完整 eapi Gate C
-  仍 Hold。
+- Gate E 固定源提交 `c2ea0e7` 的 arm64 Debug/Release 测试各 36 项通过；当前固定源码
+  `efc0e71` 的 Debug/Release 测试各 50 项通过。完整 eapi Gate C 仍 Hold。
 - GitHub Releases + Developer ID + notarization + Sparkle 2；不进入 Mac App Store。
 
 ## 永久边界
