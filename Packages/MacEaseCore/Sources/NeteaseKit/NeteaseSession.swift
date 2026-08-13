@@ -488,8 +488,8 @@ public actor NeteaseSession {
       return .unavailable(itemCode: item.code, fee: item.fee)
     }
     guard
-      let url = URL(string: value), let host = url.host,
-      let sourceScheme = url.scheme
+      let url = URL(string: value), let host = url.host?.lowercased(),
+      let sourceScheme = url.scheme?.lowercased()
     else {
       throw NeteasePlaybackError.invalidResponse
     }
@@ -498,7 +498,7 @@ public actor NeteaseSession {
     guard isMusic126 || isMusic163 else {
       throw NeteasePlaybackError.unapprovedHost(host)
     }
-    guard url.scheme == "https" || (url.scheme == "http" && isMusic126) else {
+    guard sourceScheme == "https" || (sourceScheme == "http" && isMusic126) else {
       throw NeteasePlaybackError.nonHTTPSURL(host)
     }
 

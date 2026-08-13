@@ -261,12 +261,13 @@ public enum NeteaseCrypto {
   }
 
   private static func xeapiMidTransform(_ input: Data, transform: Data) -> Data {
+    let transformBytes = [UInt8](transform)
     let xored = Data(
       input.enumerated().map { index, byte in
-        byte ^ transform[index & 0x0f]
+        byte ^ transformBytes[index & 0x0f]
       })
     let encoded = Data(xored.base64EncodedString().utf8)
-    let rotation = Int(transform[0] & 0x0f) % encoded.count
+    let rotation = Int(transformBytes[0] & 0x0f) % encoded.count
     var output = transform
     output.append(encoded[rotation...])
     output.append(encoded[..<rotation])

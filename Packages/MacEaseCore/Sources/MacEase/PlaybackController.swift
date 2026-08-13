@@ -240,6 +240,7 @@ final class PlaybackController {
 
   private func handleItemFailure(token: PlaybackIntentGate.Token) {
     guard gate.accepts(token) else { return }
+    gate.cancel()
     let position = currentPosition()
     let detail = player?.currentItem?.error.map(Self.failureDetail) ?? "unknown"
     recoverySnapshot = recoverySnapshot.map {
@@ -257,6 +258,7 @@ final class PlaybackController {
 
   private func handlePlayedToEnd(token: PlaybackIntentGate.Token) {
     guard gate.accepts(token) else { return }
+    gate.cancel()
     recoverySnapshot = nil
     releasePlayback()
     phase = .finished

@@ -97,7 +97,8 @@ struct GateCPlaybackProbe {
 
       if shouldRecover || shouldExpire {
         guard let firstResolvedAsset else {
-          print("recovery=notRun reason=initialAssetUnavailable")
+          let prefix = shouldExpire ? "expiry" : "recovery"
+          print("\(prefix)=notRun reason=initialAssetUnavailable")
           exit(1)
         }
         let succeeded =
@@ -120,7 +121,11 @@ struct GateCPlaybackProbe {
 
       guard shouldExercise else { return }
       guard let exerciseAsset else {
-        print("exercise=notRun reason=noNewFormat")
+        print(
+          firstResolvedAsset == nil
+            ? "exercise=notRun reason=noResolvedTrack"
+            : "exercise=notRun reason=noNewFormat"
+        )
         exit(1)
       }
       if !(await exercise(exerciseAsset, session: session)) {
@@ -128,10 +133,10 @@ struct GateCPlaybackProbe {
       }
     } catch let error as CredentialVaultError {
       print("result=keychainError status=\(error.status)")
-      exit(3)
+      exit(5)
     } catch {
       print("result=credentialDecodeError")
-      exit(3)
+      exit(5)
     }
   }
 
@@ -160,6 +165,8 @@ struct GateCPlaybackProbe {
       return "\(prefix) class=disallowedHTTP host=\(host)"
     case NeteasePlaybackError.unapprovedHost(let host):
       return "\(prefix) class=unapprovedHost host=\(host)"
+    case is DecodingError:
+      return "\(prefix) class=invalidResponse"
     case let error as URLError:
       return "\(prefix) class=network code=\(error.errorCode)"
     default:

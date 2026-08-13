@@ -20,7 +20,19 @@ inside the `NeteaseKit` SPM module.
 - Native Swift implementation of weapi/eapi. No Node.js gateway, no bundled sidecar.
 - Login via WKWebView loading the official NetEase login page, then extracting cookies.
 - Deployment target macOS 15. SwiftUI first, AppKit as an escape hatch.
+- Apple Silicon (arm64) only. No Intel or Universal builds.
 - AVPlayer with a temporary-directory cache. GRDB for persistence.
+- Feature scope and batch order are recorded in `docs/roadmap-features.md`
+  (2026-08-13): playback basics → library read/write → discovery → heartbeat mode.
+  Discovery data is prefetched once at launch; refreshes are user-triggered only,
+  still no auto-retry and no background polling.
+
+## UI style
+
+- Strictly follow the macOS Sequoia 15 system visual style and Apple/macOS design
+  aesthetics. Do not introduce Liquid Glass for now.
+- Use system components, materials, typography, and semantic colors; avoid custom
+  chrome that diverges from native macOS appearance.
 
 ## Implementation constraints
 

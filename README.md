@@ -8,7 +8,10 @@ MacEase（Mac + Ease）是一个面向 macOS 的非官方网易云音乐第三�
 
 ## 当前范围
 
-- macOS 15+，当前发行目标为 Apple Silicon（arm64）；SwiftUI 优先，必要时使用 AppKit。
+- 仅支持 Apple Silicon（arm64）：不构建、不测试、不发布 Intel（x86_64）或 Universal
+  版本，也不支持 Rosetta 场景。macOS 15 Sequoia 及以上。
+- UI 严格遵循 macOS Sequoia 15 的系统视觉风格与 Apple/macOS 设计美学（SwiftUI 优先，
+  必要时使用 AppKit），暂不引入 Liquid Glass 风格。
 - 所有程序化网易 API 请求集中在 `NeteaseKit`；官方登录页和媒体传输分别由
   `WKWebView`、`AVPlayer` 直接完成。
 - 原生 Swift 实现 weapi/eapi；当前 Android-identity xeapi 路径 No-Go，整体 live xeapi 仍为 Hold。
@@ -19,6 +22,18 @@ MacEase（Mac + Ease）是一个面向 macOS 的非官方网易云音乐第三�
 - Gate E 固定源提交 `c2ea0e7` 的 arm64 Debug/Release 测试各 36 项通过；当前固定源码
   `efc0e71` 的 Debug/Release 测试各 50 项通过。完整 eapi Gate C 仍 Hold。
 - GitHub Releases + Developer ID + notarization + Sparkle 2；不进入 Mac App Store。
+
+## 功能路线图
+
+已确认的核心功能范围（详见 `docs/roadmap-features.md`，按批次实现）：
+
+1. 登录与主页：WKWebView 官方登录页（内嵌扫码登录）、个人基本信息展示。
+2. 基础播放：播放、音量调节、播放队列管理、定时播放（播完当前曲目再停）。
+3. 播放模式：顺序、循环、随机、心动模式（仅从红心歌曲切入）。
+4. 歌单与音乐库：我喜欢的音乐、听歌排行、收藏与创建的歌单、歌单编辑
+  （创建/删除/改元信息/增删曲目/收藏）、红心与取消红心。
+5. 推荐与发现：每日推荐、热歌榜、相似歌曲、推荐歌单；启动时一次性预取，
+  之后仅由用户手动刷新，仍不自动重试、不后台轮询。
 
 ## 永久边界
 

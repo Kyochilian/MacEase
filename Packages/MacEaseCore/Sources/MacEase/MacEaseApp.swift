@@ -27,7 +27,7 @@ struct MacEaseApp: App {
             .tabItem { Label("Library", systemImage: "music.note.list") }
         }
         Divider()
-        PlaybackBarView(session: session, playback: playback)
+        PlaybackBarView(session: session, library: library, playback: playback)
       }
       .frame(minWidth: 760, minHeight: 600)
       .task {
@@ -250,7 +250,12 @@ private struct PlaylistLibraryView: View {
 
 private struct PlaybackBarView: View {
   let session: LoginCoordinator
+  let library: PlaylistLibraryCoordinator
   @Bindable var playback: PlaybackController
+
+  private var requestInFlight: Bool {
+    session.isBusy || library.isLoading || playback.isResolving
+  }
 
   var body: some View {
     HStack(spacing: 10) {
@@ -281,7 +286,7 @@ private struct PlaybackBarView: View {
         Button("Play Again · 1 request", systemImage: "arrow.counterclockwise") {
           playback.playAgain(loginCoordinator: session)
         }
-        .disabled(session.account == nil || session.isBusy)
+        .disabled(session.account == nil || requestInFlight)
       }
       if playback.isActive {
         Button("Stop", systemImage: "stop.fill") {

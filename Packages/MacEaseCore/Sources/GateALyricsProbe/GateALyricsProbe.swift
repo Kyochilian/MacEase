@@ -1,3 +1,4 @@
+import Darwin
 import NeteaseKit
 
 @main
@@ -15,5 +16,11 @@ struct GateALyricsProbe {
       case .network: "network"
       }
     print("\(status) \(cookie)")
+    switch outcome.status {
+    case .content, .noLyrics:
+      break
+    case .http, .service, .invalidResponse, .network:
+      exit(1)
+    }
   }
 }

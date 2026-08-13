@@ -130,7 +130,7 @@ package final class LoginCoordinator: NSObject, WKNavigationDelegate, WKUIDelega
     let header = manualCookieHeader
     manualCookieHeader = ""
     guard let credential = NeteaseCredential(cookieHeader: header) else {
-      status = "Manual Cookie header must include one nonempty MUSIC_U"
+      status = "Manual Cookie header needs one MUSIC_U without duplicates or control characters"
       return
     }
 

@@ -237,6 +237,50 @@ private let playbackCredential = NeteaseCredential(
   }
 }
 
+@Test func songURLAllowsRemainingWhitelistBranchesCaseInsensitively() throws {
+  let response = HTTPURLResponse(
+    url: URL(string: "https://interfacepc.music.163.com")!,
+    statusCode: 200,
+    httpVersion: nil,
+    headerFields: nil
+  )!
+
+  func resolve(_ url: String) throws -> SongURLResolution {
+    try NeteaseSession.classifySongURL(
+      data: Data(
+        #"{"code":200,"data":[{"id":347230,"url":"\#(url)","code":200}]}"#.utf8
+      ),
+      response: response,
+      songID: 347230,
+      requestedQuality: .standard
+    )
+  }
+
+  guard case .resolved(let https163) = try resolve("https://music.163.com/audio.mp3") else {
+    Issue.record("Expected music.163.com HTTPS URL to resolve")
+    return
+  }
+  #expect(https163.sourceScheme == "https")
+
+  guard case .resolved(let bare126) = try resolve("http://music.126.net/audio.mp3") else {
+    Issue.record("Expected bare music.126.net HTTP URL to resolve")
+    return
+  }
+  #expect(bare126.sourceScheme == "http")
+
+  guard
+    case .resolved(let uppercase) = try resolve("HTTPS://M10.MUSIC.126.NET/audio.flac")
+  else {
+    Issue.record("Expected uppercase whitelisted URL to resolve")
+    return
+  }
+  #expect(uppercase.sourceScheme == "https")
+
+  #expect(throws: NeteasePlaybackError.nonHTTPSURL("music.163.com")) {
+    try resolve("HTTP://MUSIC.163.COM/audio.mp3")
+  }
+}
+
 @Test func songURLPreservesServiceStatus() {
   let failedHTTPResponse = HTTPURLResponse(
     url: URL(string: "https://interfacepc.music.163.com")!,

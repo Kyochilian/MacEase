@@ -66,7 +66,6 @@ public actor CredentialVault {
 
     var item = query
     item[kSecValueData] = data
-    item[kSecAttrAccessible] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
 
     let status = SecItemAdd(item as CFDictionary, nil)
     if status != errSecSuccess {

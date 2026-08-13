@@ -19,10 +19,10 @@ struct GatePhase2PlaylistProbe {
       }
       credential = stored
     } catch let error as CredentialVaultError {
-      print("result=failed stage=keychain class=keychain status=\(error.status)")
+      print("result=failed stage=keychain class=keychain status=\(error.status) totalRequests=0")
       exit(5)
     } catch {
-      print("result=failed stage=keychain class=invalidResponse")
+      print("result=failed stage=keychain class=invalidResponse totalRequests=0")
       exit(5)
     }
 

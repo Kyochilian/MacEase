@@ -414,6 +414,12 @@ final class PlaybackProbeCoordinator {
         quality: quality,
         detail: "status=\(error.status)"
       )
+    case is DecodingError:
+      status = failureStatus(
+        operation: operation,
+        result: "invalidResponse",
+        quality: quality
+      )
     default:
       let error = error as NSError
       status = failureStatus(

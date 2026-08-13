@@ -99,6 +99,23 @@ import Testing
   #expect(NeteaseCredential(cookieHeader: "__csrf=csrf") == nil)
   #expect(NeteaseCredential(cookieHeader: "MUSIC_U=") == nil)
   #expect(NeteaseCredential(cookieHeader: "MUSIC_U=one; MUSIC_U=two") == nil)
+  #expect(NeteaseCredential(cookieHeader: "MUSIC_U=x; __csrf=a; __csrf=b") == nil)
+}
+
+@Test func manualCookieHeaderTrimsPastedNewlinesAndSkipsEmptyValues() {
+  let trailingNewline = NeteaseCredential(cookieHeader: "MUSIC_U=value; __csrf=csrf\n")
+  #expect(trailingNewline?.musicU.value == "value")
+  #expect(trailingNewline?.csrf?.value == "csrf")
+
+  let emptyCSRF = NeteaseCredential(cookieHeader: "MUSIC_U=value; __csrf=")
+  #expect(emptyCSRF?.musicU.value == "value")
+  #expect(emptyCSRF?.csrf == nil)
+}
+
+@Test func manualCookieHeaderRejectsEmbeddedControlCharacters() {
+  #expect(NeteaseCredential(cookieHeader: "MUSIC_U=abc\n__csrf=def") == nil)
+  #expect(NeteaseCredential(cookieHeader: "MUSIC_U=abc\r\n X-Injected: 1") == nil)
+  #expect(NeteaseCredential(cookieHeader: "MUSIC_U=a\tb") == nil)
 }
 
 @Test func formEncodingEscapesReservedCharacters() {

@@ -34,7 +34,7 @@ package struct PlaybackRecoverySnapshot: Equatable, Sendable {
   ) {
     self.songID = songID
     self.quality = quality
-    self.position = max(0, position)
+    self.position = position.isFinite ? max(0, position) : 0
     self.shouldResume = shouldResume
   }
 }

@@ -36,6 +36,32 @@ import Testing
   #expect(snapshot.shouldResume)
 }
 
+@Test func playbackRecoverySnapshotClampsNonFinitePosition() {
+  let nan = PlaybackRecoverySnapshot(
+    songID: 347230,
+    quality: .standard,
+    position: .nan,
+    shouldResume: true
+  )
+  let positiveInfinity = PlaybackRecoverySnapshot(
+    songID: 347230,
+    quality: .standard,
+    position: .infinity,
+    shouldResume: true
+  )
+  let negativeInfinity = PlaybackRecoverySnapshot(
+    songID: 347230,
+    quality: .standard,
+    position: -.infinity,
+    shouldResume: true
+  )
+
+  #expect(nan.position == 0)
+  #expect(positiveInfinity.position == 0)
+  #expect(negativeInfinity.position == 0)
+  #expect(nan == nan)
+}
+
 @Test func playbackRecoverySnapshotPreservesResumeIntentAndPosition() {
   let snapshot = PlaybackRecoverySnapshot(
     songID: 347230,

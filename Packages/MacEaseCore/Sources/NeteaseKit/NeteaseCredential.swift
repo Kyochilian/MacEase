@@ -23,11 +23,15 @@ public struct NeteaseCredential: Codable, Equatable, Sendable {
       let pair = field.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
       guard pair.count == 2 else { continue }
 
-      let name = pair[0].trimmingCharacters(in: .whitespaces)
+      let name = pair[0].trimmingCharacters(in: .whitespacesAndNewlines)
       guard let name = NeteaseCookie.Name(rawValue: name) else { continue }
 
-      let value = pair[1].trimmingCharacters(in: .whitespaces)
-      guard !value.isEmpty, values[name] == nil else { return nil }
+      let value = pair[1].trimmingCharacters(in: .whitespacesAndNewlines)
+      guard !value.isEmpty else { continue }
+      guard
+        value.rangeOfCharacter(from: .controlCharacters) == nil,
+        values[name] == nil
+      else { return nil }
       values[name] = value
     }
 
