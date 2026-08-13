@@ -8,33 +8,40 @@ import WebKit
 struct MacEaseApp: App {
   @State private var session: LoginCoordinator
   @State private var library: PlaylistLibraryCoordinator
+  @State private var playback: PlaybackController
 
   init() {
     let netease = NeteaseSession()
     _session = State(initialValue: LoginCoordinator(session: netease))
     _library = State(initialValue: PlaylistLibraryCoordinator(session: netease))
+    _playback = State(initialValue: PlaybackController(session: netease))
   }
 
   var body: some Scene {
     Window("MacEase", id: "main") {
-      TabView {
-        SessionView(session: session, library: library)
-          .tabItem { Label("Session", systemImage: "person.crop.circle") }
-        PlaylistLibraryView(session: session, library: library)
-          .tabItem { Label("Library", systemImage: "music.note.list") }
+      VStack(spacing: 0) {
+        TabView {
+          SessionView(session: session, library: library, playback: playback)
+            .tabItem { Label("Session", systemImage: "person.crop.circle") }
+          PlaylistLibraryView(session: session, library: library, playback: playback)
+            .tabItem { Label("Library", systemImage: "music.note.list") }
+        }
+        Divider()
+        PlaybackBarView(session: session, playback: playback)
       }
-      .frame(minWidth: 760, minHeight: 560)
+      .frame(minWidth: 760, minHeight: 600)
       .task {
         await session.start()
       }
     }
-    .defaultSize(width: 980, height: 720)
+    .defaultSize(width: 980, height: 760)
   }
 }
 
 private struct SessionView: View {
   @Bindable var session: LoginCoordinator
   let library: PlaylistLibraryCoordinator
+  let playback: PlaybackController
 
   var body: some View {
     VStack(spacing: 0) {
@@ -90,6 +97,7 @@ private struct SessionView: View {
   }
 
   private func mutateSession(_ operation: @escaping @MainActor () async -> Void) {
+    playback.stop()
     library.reset()
     Task { await operation() }
   }
@@ -98,6 +106,11 @@ private struct SessionView: View {
 private struct PlaylistLibraryView: View {
   let session: LoginCoordinator
   let library: PlaylistLibraryCoordinator
+  let playback: PlaybackController
+
+  private var requestInFlight: Bool {
+    session.isBusy || library.isLoading || playback.isResolving
+  }
 
   var body: some View {
     VStack(spacing: 0) {
@@ -108,12 +121,12 @@ private struct PlaylistLibraryView: View {
         Button("Load Playlists · 1 request", systemImage: "arrow.clockwise") {
           library.load(reset: true, loginCoordinator: session)
         }
-        .disabled(session.account == nil || session.isBusy || library.isLoading)
+        .disabled(session.account == nil || requestInFlight)
         if library.hasMore {
           Button("Load More · 1 request", systemImage: "plus") {
             library.load(reset: false, loginCoordinator: session)
           }
-          .disabled(session.isBusy || library.isLoading)
+          .disabled(requestInFlight)
         }
       }
       .padding(12)
@@ -148,7 +161,7 @@ private struct PlaylistLibraryView: View {
               .padding(.vertical, 3)
             }
             .buttonStyle(.plain)
-            .disabled(session.isBusy || library.isLoading)
+            .disabled(requestInFlight)
           }
           .frame(minWidth: 340)
 
@@ -167,7 +180,7 @@ private struct PlaylistLibraryView: View {
                   Button("Load More Tracks · 1 request", systemImage: "plus") {
                     library.loadMoreTracks(loginCoordinator: session)
                   }
-                  .disabled(session.isBusy || library.isLoading)
+                  .disabled(requestInFlight)
                 }
               }
               .padding(12)
@@ -181,13 +194,25 @@ private struct PlaylistLibraryView: View {
               } else {
                 List(library.tracks.indices, id: \.self) { index in
                   let track = library.tracks[index]
-                  VStack(alignment: .leading, spacing: 3) {
-                    Text(track.name)
-                    if !track.artists.isEmpty {
-                      Text(track.artists.joined(separator: ", "))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                  HStack {
+                    VStack(alignment: .leading, spacing: 3) {
+                      Text(track.name)
+                      if !track.artists.isEmpty {
+                        Text(track.artists.joined(separator: ", "))
+                          .font(.caption)
+                          .foregroundStyle(.secondary)
+                      }
                     }
+                    Spacer()
+                    Button("Play · 1 request", systemImage: "play.fill") {
+                      playback.play(
+                        trackID: track.id,
+                        name: track.name,
+                        loginCoordinator: session
+                      )
+                    }
+                    .buttonStyle(.borderless)
+                    .disabled(session.account == nil || requestInFlight)
                   }
                   .padding(.vertical, 3)
                 }
@@ -220,6 +245,56 @@ private struct PlaylistLibraryView: View {
       }
       .padding(12)
     }
+  }
+}
+
+private struct PlaybackBarView: View {
+  let session: LoginCoordinator
+  @Bindable var playback: PlaybackController
+
+  var body: some View {
+    HStack(spacing: 10) {
+      Image(systemName: "music.note")
+        .foregroundStyle(.secondary)
+      VStack(alignment: .leading, spacing: 2) {
+        Text(playback.trackName ?? "Nothing playing")
+        Text(playback.status)
+          .font(.caption)
+          .foregroundStyle(.secondary)
+          .lineLimit(1)
+      }
+      Spacer()
+      if playback.phase == .playing {
+        Text(timeString(playback.positionSeconds))
+          .font(.caption.monospacedDigit())
+          .foregroundStyle(.secondary)
+      }
+      Picker("Quality", selection: $playback.quality) {
+        ForEach(PlaybackQuality.allCases, id: \.self) { quality in
+          Text(quality.rawValue).tag(quality)
+        }
+      }
+      .fixedSize()
+      .help("Applies to the next explicit Play")
+      .disabled(playback.isResolving)
+      if playback.canPlayAgain {
+        Button("Play Again · 1 request", systemImage: "arrow.counterclockwise") {
+          playback.playAgain(loginCoordinator: session)
+        }
+        .disabled(session.account == nil || session.isBusy)
+      }
+      if playback.isActive {
+        Button("Stop", systemImage: "stop.fill") {
+          playback.stop()
+        }
+      }
+    }
+    .padding(12)
+  }
+
+  private func timeString(_ seconds: Double) -> String {
+    let total = Int(seconds.rounded(.down))
+    return String(format: "%d:%02d", total / 60, total % 60)
   }
 }
 
