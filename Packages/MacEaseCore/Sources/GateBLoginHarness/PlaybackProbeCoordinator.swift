@@ -367,6 +367,12 @@ final class PlaybackProbeCoordinator {
           result: "sessionNotCurrent",
           quality: quality
         )
+      case .busy:
+        status = failureStatus(
+          operation: operation,
+          result: "sessionInvalidationBusy",
+          quality: quality
+        )
       case .failed:
         status = failureStatus(
           operation: operation,

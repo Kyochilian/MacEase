@@ -8,7 +8,7 @@ import Observation
 final class PlaylistLibraryCoordinator {
   private static let playlistPageSize = 30
 
-  @ObservationIgnored private let session = NeteaseSession()
+  @ObservationIgnored private let session: NeteaseSession
   @ObservationIgnored private let vault = CredentialVault()
   @ObservationIgnored private var generation = 0
   @ObservationIgnored private var loadTask: Task<Void, Never>?
@@ -22,6 +22,10 @@ final class PlaylistLibraryCoordinator {
   var hasMoreTracks = false
   var isLoading = false
   var status = "Validate the session before loading playlists"
+
+  init(session: NeteaseSession) {
+    self.session = session
+  }
 
   func load(reset: Bool, loginCoordinator: LoginCoordinator) {
     guard !loginCoordinator.isBusy, !isLoading else { return }
@@ -300,6 +304,8 @@ final class PlaylistLibraryCoordinator {
           status = "Stored session expired; sign in again"
         case .notCurrent:
           status = "Session changed; validate again"
+        case .busy:
+          status = "Session busy; validate again"
         case .failed:
           status = "Session invalidation failed"
         }

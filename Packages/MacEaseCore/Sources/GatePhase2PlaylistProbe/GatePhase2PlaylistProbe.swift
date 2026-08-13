@@ -20,10 +20,10 @@ struct GatePhase2PlaylistProbe {
       credential = stored
     } catch let error as CredentialVaultError {
       print("result=failed stage=keychain class=keychain status=\(error.status)")
-      exit(3)
+      exit(5)
     } catch {
       print("result=failed stage=keychain class=invalidResponse")
-      exit(3)
+      exit(5)
     }
 
     let session = NeteaseSession()

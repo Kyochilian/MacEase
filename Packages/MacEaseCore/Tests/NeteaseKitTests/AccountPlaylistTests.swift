@@ -252,7 +252,7 @@ private let accountCredential = NeteaseCredential(
     secretKey: "0123456789abcdef"
   )
   let json =
-    #"{"c":"[{\"id\":3},{\"id\":1},{\"id\":2}]","e_r":false,"csrf_token":"csrf-test"}"#
+    #"{"c":"[{\"id\":3},{\"id\":1},{\"id\":2}]","csrf_token":"csrf-test"}"#
   let parameters = NeteaseCrypto.weapi(
     json: json,
     secretKey: "0123456789abcdef"

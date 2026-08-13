@@ -266,12 +266,12 @@ public actor NeteaseSession {
 
   package static func accountStatusRequest(
     credential: NeteaseCredential,
-    secretKey: String
+    secretKey: String? = nil
   ) throws -> URLRequest {
     let json = try accountStatusJSON(credential: credential)
     return weapiRequest(
       url: accountStatusURL,
-      parameters: NeteaseCrypto.weapi(json: json, secretKey: secretKey),
+      parameters: weapiParameters(json: json, secretKey: secretKey),
       credential: credential
     )
   }
@@ -300,7 +300,7 @@ public actor NeteaseSession {
     limit: Int,
     offset: Int,
     credential: NeteaseCredential,
-    secretKey: String
+    secretKey: String? = nil
   ) throws -> URLRequest {
     let json = try userPlaylistsJSON(
       userID: userID,
@@ -310,7 +310,7 @@ public actor NeteaseSession {
     )
     return weapiRequest(
       url: userPlaylistsURL,
-      parameters: NeteaseCrypto.weapi(json: json, secretKey: secretKey),
+      parameters: weapiParameters(json: json, secretKey: secretKey),
       credential: credential
     )
   }
@@ -392,12 +392,12 @@ public actor NeteaseSession {
   package static func songDetailsRequest(
     songIDs: [Int64],
     credential: NeteaseCredential,
-    secretKey: String
+    secretKey: String? = nil
   ) throws -> URLRequest {
     let json = try songDetailsJSON(songIDs: songIDs, credential: credential)
     return weapiRequest(
       url: songDetailsURL,
-      parameters: NeteaseCrypto.weapi(json: json, secretKey: secretKey),
+      parameters: weapiParameters(json: json, secretKey: secretKey),
       credential: credential
     )
   }
@@ -574,17 +574,6 @@ public actor NeteaseSession {
       .joined(separator: "; ")
   }
 
-  private static func accountStatusRequest(
-    credential: NeteaseCredential
-  ) throws -> URLRequest {
-    let json = try accountStatusJSON(credential: credential)
-    return weapiRequest(
-      url: accountStatusURL,
-      parameters: NeteaseCrypto.weapi(json: json),
-      credential: credential
-    )
-  }
-
   private static func accountStatusJSON(
     credential: NeteaseCredential
   ) throws -> String {
@@ -593,25 +582,6 @@ public actor NeteaseSession {
         AccountStatusParameters(csrfToken: credential.csrf?.value ?? "")
       ),
       as: UTF8.self
-    )
-  }
-
-  private static func userPlaylistsRequest(
-    userID: Int64,
-    limit: Int,
-    offset: Int,
-    credential: NeteaseCredential
-  ) throws -> URLRequest {
-    let json = try userPlaylistsJSON(
-      userID: userID,
-      limit: limit,
-      offset: offset,
-      credential: credential
-    )
-    return weapiRequest(
-      url: userPlaylistsURL,
-      parameters: NeteaseCrypto.weapi(json: json),
-      credential: credential
     )
   }
 
@@ -627,18 +597,6 @@ public actor NeteaseSession {
     )
     return
       #"{"uid":"\#(userID)","limit":\#(limit),"offset":\#(offset),"includeVideo":true,"csrf_token":\#(csrf)}"#
-  }
-
-  private static func songDetailsRequest(
-    songIDs: [Int64],
-    credential: NeteaseCredential
-  ) throws -> URLRequest {
-    let json = try songDetailsJSON(songIDs: songIDs, credential: credential)
-    return weapiRequest(
-      url: songDetailsURL,
-      parameters: NeteaseCrypto.weapi(json: json),
-      credential: credential
-    )
   }
 
   private static func songDetailsJSON(
@@ -657,7 +615,7 @@ public actor NeteaseSession {
       decoding: try JSONEncoder().encode(credential.csrf?.value ?? ""),
       as: UTF8.self
     )
-    return #"{"c":\#(c),"e_r":false,"csrf_token":\#(csrf)}"#
+    return #"{"c":\#(c),"csrf_token":\#(csrf)}"#
   }
 
   private static func eapiHeaderFields(
@@ -709,6 +667,14 @@ public actor NeteaseSession {
       forHTTPHeaderField: "Cookie"
     )
     return request
+  }
+
+  private static func weapiParameters(
+    json: String,
+    secretKey: String?
+  ) -> WeAPIParameters {
+    secretKey.map { NeteaseCrypto.weapi(json: json, secretKey: $0) }
+      ?? NeteaseCrypto.weapi(json: json)
   }
 
   private static func weapiRequest(

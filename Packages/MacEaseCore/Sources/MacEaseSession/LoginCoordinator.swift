@@ -7,6 +7,7 @@ import WebKit
 package enum SessionInvalidationResult {
   case deleted
   case notCurrent
+  case busy
   case failed
 }
 
@@ -27,13 +28,13 @@ package final class LoginCoordinator: NSObject, WKNavigationDelegate, WKUIDelega
   package var manualCookieHeader = ""
   package var account: NeteaseAccount?
 
-  package override init() {
+  package init(session: NeteaseSession = NeteaseSession()) {
     let dataStore = WKWebsiteDataStore.nonPersistent()
     let configuration = WKWebViewConfiguration()
     configuration.websiteDataStore = dataStore
 
     self.dataStore = dataStore
-    self.session = NeteaseSession()
+    self.session = session
     self.vault = CredentialVault()
     self.webView = WKWebView(frame: .zero, configuration: configuration)
     super.init()
@@ -166,33 +167,42 @@ package final class LoginCoordinator: NSObject, WKNavigationDelegate, WKUIDelega
 
     account = nil
     validatedCredential = nil
+    var credential: NeteaseCredential?
     do {
-      guard let credential = try await vault.load() else {
+      guard let loaded = try await vault.load() else {
         hasStoredSession = false
         status = "No stored session to validate"
         return
       }
+      credential = loaded
       hasStoredSession = true
 
-      switch try await session.accountStatus(credential: credential) {
+      switch try await session.accountStatus(credential: loaded) {
       case .authenticated(let account):
         let currentCredential = try await vault.load()
-        guard currentCredential == credential else {
+        guard currentCredential == loaded else {
           hasStoredSession = currentCredential != nil
           status = "Stored session changed; validate again"
           return
         }
         self.account = account
-        validatedCredential = credential
+        validatedCredential = loaded
         status = "Account status authenticated"
       case .signedOut:
         _ = await deleteStoredSession(
-          matching: credential,
+          matching: loaded,
           message: "Stored session expired; sign in again"
         )
       }
     } catch let error as NeteaseServiceError {
-      status = "Account status \(error.source.rawValue) error \(error.statusCode)"
+      if error.source == .service, error.statusCode == 301, let credential {
+        _ = await deleteStoredSession(
+          matching: credential,
+          message: "Stored session expired; sign in again"
+        )
+      } else {
+        status = "Account status \(error.source.rawValue) error \(error.statusCode)"
+      }
     } catch let error as CredentialVaultError {
       status = keychainErrorMessage(error)
     } catch {
@@ -204,7 +214,7 @@ package final class LoginCoordinator: NSObject, WKNavigationDelegate, WKUIDelega
     matching credential: NeteaseCredential,
     message: String
   ) async -> SessionInvalidationResult {
-    guard beginOperation() else { return .notCurrent }
+    guard beginOperation() else { return .busy }
     defer { endOperation() }
     return await deleteStoredSession(matching: credential, message: message)
   }

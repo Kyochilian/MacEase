@@ -1,12 +1,19 @@
 import MacEaseSession
+import NeteaseKit
 import SwiftUI
 import WebKit
 
 @main
 @MainActor
 struct MacEaseApp: App {
-  @State private var session = LoginCoordinator()
-  @State private var library = PlaylistLibraryCoordinator()
+  @State private var session: LoginCoordinator
+  @State private var library: PlaylistLibraryCoordinator
+
+  init() {
+    let netease = NeteaseSession()
+    _session = State(initialValue: LoginCoordinator(session: netease))
+    _library = State(initialValue: PlaylistLibraryCoordinator(session: netease))
+  }
 
   var body: some Scene {
     Window("MacEase", id: "main") {
@@ -47,16 +54,13 @@ private struct SessionView: View {
           session.loadLoginPage()
         }
         Button("Save Session", systemImage: "key.fill") {
-          library.reset()
-          Task { await session.saveSession() }
+          mutateSession(session.saveSession)
         }
         Button("Validate Session", systemImage: "checkmark.shield") {
-          library.reset()
-          Task { await session.validateSession() }
+          mutateSession(session.validateSession)
         }
         Button("Clear Session", systemImage: "trash") {
-          library.reset()
-          Task { await session.clearSession() }
+          mutateSession(session.clearSession)
         }
       }
       .padding(12)
@@ -71,8 +75,7 @@ private struct SessionView: View {
       HStack(spacing: 8) {
         SecureField("Cookie header", text: $session.manualCookieHeader)
         Button("Import Session", systemImage: "square.and.arrow.down") {
-          library.reset()
-          Task { await session.importSession() }
+          mutateSession(session.importSession)
         }
         .disabled(session.isBusy)
       }
@@ -84,6 +87,11 @@ private struct SessionView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(12)
     }
+  }
+
+  private func mutateSession(_ operation: @escaping @MainActor () async -> Void) {
+    library.reset()
+    Task { await operation() }
   }
 }
 
