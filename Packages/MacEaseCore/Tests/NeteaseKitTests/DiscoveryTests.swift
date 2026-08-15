@@ -1,0 +1,229 @@
+import Foundation
+import Testing
+
+@testable import NeteaseKit
+
+private let discoveryCredential = NeteaseCredential(
+  musicU: NeteaseCookie(name: .musicU, value: "music-u-test"),
+  csrf: NeteaseCookie(name: .csrf, value: "csrf-test")
+)
+
+private let okResponse = HTTPURLResponse(
+  url: URL(string: "https://music.163.com")!,
+  statusCode: 200,
+  httpVersion: nil,
+  headerFields: nil
+)!
+
+private func expectWeAPIBody(
+  _ request: URLRequest,
+  json: String,
+  secretKey: String = "0123456789abcdef"
+) {
+  let parameters = NeteaseCrypto.weapi(json: json, secretKey: secretKey)
+  #expect(
+    String(decoding: request.httpBody!, as: UTF8.self)
+      == String(
+        decoding: FormURLEncoder.encode([
+          ("params", parameters.params),
+          ("encSecKey", parameters.encSecKey),
+        ]),
+        as: UTF8.self
+      )
+  )
+}
+
+@Test func playRecordsRequestUsesExplicitScopeAndSessionContext() throws {
+  let allTime = try NeteaseSession.playRecordsRequest(
+    userID: 987_654_321,
+    scope: .allTime,
+    credential: discoveryCredential,
+    secretKey: "0123456789abcdef"
+  )
+
+  #expect(allTime.url?.absoluteString == "https://music.163.com/weapi/v1/play/record")
+  #expect(allTime.httpMethod == "POST")
+  #expect(allTime.value(forHTTPHeaderField: "Cookie") == "MUSIC_U=music-u-test; __csrf=csrf-test")
+  expectWeAPIBody(
+    allTime,
+    json: #"{"uid":"987654321","type":0,"csrf_token":"csrf-test"}"#
+  )
+
+  let lastWeek = try NeteaseSession.playRecordsRequest(
+    userID: 987_654_321,
+    scope: .lastWeek,
+    credential: discoveryCredential,
+    secretKey: "0123456789abcdef"
+  )
+  expectWeAPIBody(
+    lastWeek,
+    json: #"{"uid":"987654321","type":1,"csrf_token":"csrf-test"}"#
+  )
+}
+
+@Test func playRecordsClassifiesOnlyTheRequestedScope() throws {
+  let allData = Data(
+    #"{"code":200,"allData":[{"playCount":12,"score":100,"song":{"id":7,"name":"Seven","ar":[{"name":"A"}]}}]}"#
+      .utf8
+  )
+
+  let entries = try NeteaseSession.classifyPlayRecords(
+    data: allData,
+    response: okResponse,
+    scope: .allTime
+  )
+  #expect(
+    entries == [
+      PlayRecordEntry(
+        track: PlaylistTrack(id: 7, name: "Seven", artists: ["A"]),
+        playCount: 12
+      )
+    ]
+  )
+
+  #expect(throws: NeteaseCatalogError.invalidResponse) {
+    try NeteaseSession.classifyPlayRecords(
+      data: allData,
+      response: okResponse,
+      scope: .lastWeek
+    )
+  }
+}
+
+@Test func dailyRecommendedSongsRequestSendsOnlySessionContext() throws {
+  let request = try NeteaseSession.dailyRecommendedSongsRequest(
+    credential: discoveryCredential,
+    secretKey: "0123456789abcdef"
+  )
+
+  #expect(
+    request.url?.absoluteString
+      == "https://music.163.com/weapi/v3/discovery/recommend/songs"
+  )
+  expectWeAPIBody(request, json: #"{"csrf_token":"csrf-test"}"#)
+}
+
+@Test func dailyRecommendedSongsDecodeDailySongs() throws {
+  let tracks = try NeteaseSession.classifyDailyRecommendedSongs(
+    data: Data(
+      #"{"code":200,"data":{"dailySongs":[{"id":1,"name":"First","ar":[{"name":"A"},{"name":"B"}]}]}}"#
+        .utf8
+    ),
+    response: okResponse
+  )
+
+  #expect(tracks == [PlaylistTrack(id: 1, name: "First", artists: ["A", "B"])])
+}
+
+@Test func dailyRecommendedPlaylistsRequestAndDecode() throws {
+  let request = try NeteaseSession.dailyRecommendedPlaylistsRequest(
+    credential: discoveryCredential,
+    secretKey: "0123456789abcdef"
+  )
+
+  #expect(
+    request.url?.absoluteString
+      == "https://music.163.com/weapi/v1/discovery/recommend/resource"
+  )
+  expectWeAPIBody(request, json: #"{"csrf_token":"csrf-test"}"#)
+
+  let playlists = try NeteaseSession.classifyDailyRecommendedPlaylists(
+    data: Data(#"{"code":200,"recommend":[{"id":11,"name":"Morning"}]}"#.utf8),
+    response: okResponse
+  )
+  #expect(playlists == [DiscoveredPlaylist(id: 11, name: "Morning")])
+}
+
+@Test func personalizedPlaylistsRequestUsesTheFixedPageContract() throws {
+  let request = try NeteaseSession.personalizedPlaylistsRequest(
+    credential: discoveryCredential,
+    secretKey: "0123456789abcdef"
+  )
+
+  #expect(
+    request.url?.absoluteString == "https://music.163.com/weapi/personalized/playlist"
+  )
+  expectWeAPIBody(
+    request,
+    json: #"{"limit":30,"total":true,"n":1000,"csrf_token":"csrf-test"}"#
+  )
+
+  let playlists = try NeteaseSession.classifyPersonalizedPlaylists(
+    data: Data(#"{"code":200,"result":[{"id":21,"name":"Picked"}]}"#.utf8),
+    response: okResponse
+  )
+  #expect(playlists == [DiscoveredPlaylist(id: 21, name: "Picked")])
+}
+
+@Test func toplistsRequestUsesTheFixedEAPIContract() throws {
+  let request = try NeteaseSession.toplistsRequest(
+    credential: discoveryCredential,
+    osVersion: "15.5",
+    buildVersion: "1722945678",
+    requestID: "1722945678123_0042"
+  )
+  let header =
+    #"{"osver":"15.5","os":"osx","appver":"0.1","buildver":"1722945678","#
+    + #""__csrf":"csrf-test","channel":"github","#
+    + #""requestId":"1722945678123_0042","MUSIC_U":"music-u-test"}"#
+  let json = #"{"e_r":false,"header":\#(header)}"#
+
+  #expect(
+    request.url?.absoluteString == "https://interfacepc.music.163.com/eapi/toplist"
+  )
+  #expect(request.httpMethod == "POST")
+  #expect(
+    request.value(forHTTPHeaderField: "Cookie")
+      == "osver=15.5; os=osx; appver=0.1; buildver=1722945678; __csrf=csrf-test; channel=github; requestId=1722945678123_0042; MUSIC_U=music-u-test"
+  )
+  #expect(
+    String(decoding: request.httpBody!, as: UTF8.self)
+      == "params=" + NeteaseCrypto.eapi(path: "/api/toplist", json: json)
+  )
+}
+
+@Test func toplistsDecodeTheSummaryList() throws {
+  let toplists = try NeteaseSession.classifyToplists(
+    data: Data(
+      #"{"code":200,"list":[{"id":3778678,"name":"热歌榜"},{"id":19723756,"name":"飙升榜"}]}"#
+        .utf8
+    ),
+    response: okResponse
+  )
+
+  #expect(
+    toplists == [
+      DiscoveredPlaylist(id: 3_778_678, name: "热歌榜"),
+      DiscoveredPlaylist(id: 19_723_756, name: "飙升榜"),
+    ]
+  )
+}
+
+@Test func discoveryClassifiersDistinguishServiceAndHTTPErrors() {
+  let failedHTTPResponse = HTTPURLResponse(
+    url: URL(string: "https://music.163.com")!,
+    statusCode: 503,
+    httpVersion: nil,
+    headerFields: nil
+  )!
+
+  #expect(throws: NeteaseServiceError(source: .http, statusCode: 503)) {
+    try NeteaseSession.classifyPlayRecords(
+      data: Data(),
+      response: failedHTTPResponse,
+      scope: .allTime
+    )
+  }
+  #expect(throws: NeteaseServiceError(source: .service, statusCode: 301)) {
+    try NeteaseSession.classifyDailyRecommendedSongs(
+      data: Data(#"{"code":301}"#.utf8),
+      response: okResponse
+    )
+  }
+  #expect(throws: NeteaseServiceError(source: .service, statusCode: 301)) {
+    try NeteaseSession.classifyToplists(
+      data: Data(#"{"code":301}"#.utf8),
+      response: okResponse
+    )
+  }
+}

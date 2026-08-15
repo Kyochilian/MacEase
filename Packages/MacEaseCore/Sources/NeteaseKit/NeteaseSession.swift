@@ -56,6 +56,13 @@ public struct UserPlaylist: Equatable, Sendable {
   public let name: String
   public let trackCount: Int
   public let owned: Bool
+
+  package init(id: Int64, name: String, trackCount: Int, owned: Bool) {
+    self.id = id
+    self.name = name
+    self.trackCount = trackCount
+    self.owned = owned
+  }
 }
 
 public struct UserPlaylistPage: Equatable, Sendable {
@@ -73,6 +80,21 @@ package struct PlaylistTrack: Equatable, Sendable {
   package let id: Int64
   package let name: String
   package let artists: [String]
+}
+
+package enum PlayRecordScope: Int, CaseIterable, Sendable {
+  case allTime = 0
+  case lastWeek = 1
+}
+
+package struct PlayRecordEntry: Equatable, Sendable {
+  package let track: PlaylistTrack
+  package let playCount: Int
+}
+
+package struct DiscoveredPlaylist: Equatable, Sendable {
+  package let id: Int64
+  package let name: String
 }
 
 package enum NeteaseCatalogError: Error, Equatable, Sendable {
@@ -130,6 +152,10 @@ public actor NeteaseSession {
     path: "/api/v6/playlist/detail",
     url: URL(string: "https://interfacepc.music.163.com/eapi/v6/playlist/detail")!
   )
+  private static let toplistsEndpoint = EndpointDescriptor(
+    path: "/api/toplist",
+    url: URL(string: "https://interfacepc.music.163.com/eapi/toplist")!
+  )
   private static let accountStatusURL = URL(
     string: "https://music.163.com/weapi/w/nuser/account/get"
   )!
@@ -141,6 +167,18 @@ public actor NeteaseSession {
   )!
   private static let likedSongIDsURL = URL(
     string: "https://music.163.com/weapi/song/like/get"
+  )!
+  private static let playRecordsURL = URL(
+    string: "https://music.163.com/weapi/v1/play/record"
+  )!
+  private static let dailyRecommendedSongsURL = URL(
+    string: "https://music.163.com/weapi/v3/discovery/recommend/songs"
+  )!
+  private static let dailyRecommendedPlaylistsURL = URL(
+    string: "https://music.163.com/weapi/v1/discovery/recommend/resource"
+  )!
+  private static let personalizedPlaylistsURL = URL(
+    string: "https://music.163.com/weapi/personalized/playlist"
   )!
 
   private let redirectBlocker: RedirectBlocker
@@ -242,6 +280,74 @@ public actor NeteaseSession {
     )
   }
 
+  package func playRecords(
+    userID: Int64,
+    scope: PlayRecordScope,
+    credential: NeteaseCredential
+  ) async throws -> [PlayRecordEntry] {
+    let request = try Self.playRecordsRequest(
+      userID: userID,
+      scope: scope,
+      credential: credential
+    )
+    let (data, response) = try await urlSession.data(for: request)
+    return try Self.classifyPlayRecords(
+      data: data,
+      response: response as! HTTPURLResponse,
+      scope: scope
+    )
+  }
+
+  package func dailyRecommendedSongs(
+    credential: NeteaseCredential
+  ) async throws -> [PlaylistTrack] {
+    let request = try Self.dailyRecommendedSongsRequest(credential: credential)
+    let (data, response) = try await urlSession.data(for: request)
+    return try Self.classifyDailyRecommendedSongs(
+      data: data,
+      response: response as! HTTPURLResponse
+    )
+  }
+
+  package func dailyRecommendedPlaylists(
+    credential: NeteaseCredential
+  ) async throws -> [DiscoveredPlaylist] {
+    let request = try Self.dailyRecommendedPlaylistsRequest(credential: credential)
+    let (data, response) = try await urlSession.data(for: request)
+    return try Self.classifyDailyRecommendedPlaylists(
+      data: data,
+      response: response as! HTTPURLResponse
+    )
+  }
+
+  package func personalizedPlaylists(
+    credential: NeteaseCredential
+  ) async throws -> [DiscoveredPlaylist] {
+    let request = try Self.personalizedPlaylistsRequest(credential: credential)
+    let (data, response) = try await urlSession.data(for: request)
+    return try Self.classifyPersonalizedPlaylists(
+      data: data,
+      response: response as! HTTPURLResponse
+    )
+  }
+
+  package func toplists(
+    credential: NeteaseCredential
+  ) async throws -> [DiscoveredPlaylist] {
+    let timestamp = Date().timeIntervalSince1970
+    let request = try Self.toplistsRequest(
+      credential: credential,
+      osVersion: Self.osVersion,
+      buildVersion: String(Int(timestamp)),
+      requestID: Self.requestID(timestamp: timestamp)
+    )
+    let (data, response) = try await urlSession.data(for: request)
+    return try Self.classifyToplists(
+      data: data,
+      response: response as! HTTPURLResponse
+    )
+  }
+
   public func resolveSongURL(
     songID: Int64,
     quality: PlaybackQuality,
@@ -286,7 +392,7 @@ public actor NeteaseSession {
     credential: NeteaseCredential,
     secretKey: String? = nil
   ) throws -> URLRequest {
-    let json = try accountStatusJSON(credential: credential)
+    let json = try csrfOnlyJSON(credential: credential)
     return weapiRequest(
       url: accountStatusURL,
       parameters: weapiParameters(json: json, secretKey: secretKey),
@@ -473,6 +579,178 @@ public actor NeteaseSession {
     return try JSONDecoder().decode(LikedSongIDsPayload.self, from: data).ids
   }
 
+  package static func playRecordsRequest(
+    userID: Int64,
+    scope: PlayRecordScope,
+    credential: NeteaseCredential,
+    secretKey: String? = nil
+  ) throws -> URLRequest {
+    let json = try playRecordsJSON(userID: userID, scope: scope, credential: credential)
+    return weapiRequest(
+      url: playRecordsURL,
+      parameters: weapiParameters(json: json, secretKey: secretKey),
+      credential: credential
+    )
+  }
+
+  package static func classifyPlayRecords(
+    data: Data,
+    response: HTTPURLResponse,
+    scope: PlayRecordScope
+  ) throws -> [PlayRecordEntry] {
+    guard (200..<300).contains(response.statusCode) else {
+      throw NeteaseServiceError(source: .http, statusCode: response.statusCode)
+    }
+
+    let code = try JSONDecoder().decode(ServiceCodePayload.self, from: data).code
+    guard code == 200 else {
+      throw NeteaseServiceError(source: .service, statusCode: code)
+    }
+    let payload = try JSONDecoder().decode(PlayRecordsPayload.self, from: data)
+    let items: [PlayRecordsPayload.Item]? =
+      switch scope {
+      case .allTime: payload.allData
+      case .lastWeek: payload.weekData
+      }
+    guard let items else {
+      throw NeteaseCatalogError.invalidResponse
+    }
+    return items.map {
+      PlayRecordEntry(
+        track: PlaylistTrack(
+          id: $0.song.id,
+          name: $0.song.name,
+          artists: $0.song.ar.map(\.name)
+        ),
+        playCount: $0.playCount
+      )
+    }
+  }
+
+  package static func dailyRecommendedSongsRequest(
+    credential: NeteaseCredential,
+    secretKey: String? = nil
+  ) throws -> URLRequest {
+    let json = try csrfOnlyJSON(credential: credential)
+    return weapiRequest(
+      url: dailyRecommendedSongsURL,
+      parameters: weapiParameters(json: json, secretKey: secretKey),
+      credential: credential
+    )
+  }
+
+  package static func classifyDailyRecommendedSongs(
+    data: Data,
+    response: HTTPURLResponse
+  ) throws -> [PlaylistTrack] {
+    guard (200..<300).contains(response.statusCode) else {
+      throw NeteaseServiceError(source: .http, statusCode: response.statusCode)
+    }
+
+    let code = try JSONDecoder().decode(ServiceCodePayload.self, from: data).code
+    guard code == 200 else {
+      throw NeteaseServiceError(source: .service, statusCode: code)
+    }
+    let songs = try JSONDecoder().decode(DailyRecommendedSongsPayload.self, from: data)
+      .data.dailySongs
+    return songs.map {
+      PlaylistTrack(id: $0.id, name: $0.name, artists: $0.ar.map(\.name))
+    }
+  }
+
+  package static func dailyRecommendedPlaylistsRequest(
+    credential: NeteaseCredential,
+    secretKey: String? = nil
+  ) throws -> URLRequest {
+    let json = try csrfOnlyJSON(credential: credential)
+    return weapiRequest(
+      url: dailyRecommendedPlaylistsURL,
+      parameters: weapiParameters(json: json, secretKey: secretKey),
+      credential: credential
+    )
+  }
+
+  package static func classifyDailyRecommendedPlaylists(
+    data: Data,
+    response: HTTPURLResponse
+  ) throws -> [DiscoveredPlaylist] {
+    guard (200..<300).contains(response.statusCode) else {
+      throw NeteaseServiceError(source: .http, statusCode: response.statusCode)
+    }
+
+    let code = try JSONDecoder().decode(ServiceCodePayload.self, from: data).code
+    guard code == 200 else {
+      throw NeteaseServiceError(source: .service, statusCode: code)
+    }
+    return try JSONDecoder().decode(DailyRecommendedPlaylistsPayload.self, from: data)
+      .recommend.map { DiscoveredPlaylist(id: $0.id, name: $0.name) }
+  }
+
+  package static func personalizedPlaylistsRequest(
+    credential: NeteaseCredential,
+    secretKey: String? = nil
+  ) throws -> URLRequest {
+    let json = try personalizedPlaylistsJSON(credential: credential)
+    return weapiRequest(
+      url: personalizedPlaylistsURL,
+      parameters: weapiParameters(json: json, secretKey: secretKey),
+      credential: credential
+    )
+  }
+
+  package static func classifyPersonalizedPlaylists(
+    data: Data,
+    response: HTTPURLResponse
+  ) throws -> [DiscoveredPlaylist] {
+    guard (200..<300).contains(response.statusCode) else {
+      throw NeteaseServiceError(source: .http, statusCode: response.statusCode)
+    }
+
+    let code = try JSONDecoder().decode(ServiceCodePayload.self, from: data).code
+    guard code == 200 else {
+      throw NeteaseServiceError(source: .service, statusCode: code)
+    }
+    return try JSONDecoder().decode(PersonalizedPlaylistsPayload.self, from: data)
+      .result.map { DiscoveredPlaylist(id: $0.id, name: $0.name) }
+  }
+
+  package static func toplistsRequest(
+    credential: NeteaseCredential,
+    osVersion: String,
+    buildVersion: String,
+    requestID: String
+  ) throws -> URLRequest {
+    let headerFields = eapiHeaderFields(
+      credential: credential,
+      osVersion: osVersion,
+      buildVersion: buildVersion,
+      requestID: requestID
+    )
+    let header = try eapiHeaderJSON(headerFields)
+    let json = #"{"e_r":false,"header":\#(header)}"#
+    return eapiRequest(
+      endpoint: toplistsEndpoint,
+      json: json,
+      headerFields: headerFields
+    )
+  }
+
+  package static func classifyToplists(
+    data: Data,
+    response: HTTPURLResponse
+  ) throws -> [DiscoveredPlaylist] {
+    guard (200..<300).contains(response.statusCode) else {
+      throw NeteaseServiceError(source: .http, statusCode: response.statusCode)
+    }
+
+    let code = try JSONDecoder().decode(ServiceCodePayload.self, from: data).code
+    guard code == 200 else {
+      throw NeteaseServiceError(source: .service, statusCode: code)
+    }
+    return try JSONDecoder().decode(ToplistsPayload.self, from: data)
+      .list.map { DiscoveredPlaylist(id: $0.id, name: $0.name) }
+  }
+
   package static func classifyAudioProbe(
     response: HTTPURLResponse
   ) -> AudioURLProbeResult {
@@ -620,7 +898,7 @@ public actor NeteaseSession {
       .joined(separator: "; ")
   }
 
-  private static func accountStatusJSON(
+  private static func csrfOnlyJSON(
     credential: NeteaseCredential
   ) throws -> String {
     String(
@@ -673,6 +951,28 @@ public actor NeteaseSession {
       as: UTF8.self
     )
     return #"{"uid":"\#(userID)","csrf_token":\#(csrf)}"#
+  }
+
+  private static func playRecordsJSON(
+    userID: Int64,
+    scope: PlayRecordScope,
+    credential: NeteaseCredential
+  ) throws -> String {
+    let csrf = String(
+      decoding: try JSONEncoder().encode(credential.csrf?.value ?? ""),
+      as: UTF8.self
+    )
+    return #"{"uid":"\#(userID)","type":\#(scope.rawValue),"csrf_token":\#(csrf)}"#
+  }
+
+  private static func personalizedPlaylistsJSON(
+    credential: NeteaseCredential
+  ) throws -> String {
+    let csrf = String(
+      decoding: try JSONEncoder().encode(credential.csrf?.value ?? ""),
+      as: UTF8.self
+    )
+    return #"{"limit":30,"total":true,"n":1000,"csrf_token":\#(csrf)}"#
   }
 
   private static func eapiHeaderFields(
@@ -879,6 +1179,71 @@ private struct SongDetailsPayload: Decodable {
 
 private struct LikedSongIDsPayload: Decodable {
   let ids: [Int64]
+}
+
+private struct PlayRecordsPayload: Decodable {
+  let weekData: [Item]?
+  let allData: [Item]?
+
+  struct Item: Decodable {
+    let playCount: Int
+    let song: Song
+  }
+
+  struct Song: Decodable {
+    let id: Int64
+    let name: String
+    let ar: [Artist]
+  }
+
+  struct Artist: Decodable {
+    let name: String
+  }
+}
+
+private struct DailyRecommendedSongsPayload: Decodable {
+  let data: Inner
+
+  struct Inner: Decodable {
+    let dailySongs: [Song]
+  }
+
+  struct Song: Decodable {
+    let id: Int64
+    let name: String
+    let ar: [Artist]
+  }
+
+  struct Artist: Decodable {
+    let name: String
+  }
+}
+
+private struct DailyRecommendedPlaylistsPayload: Decodable {
+  let recommend: [Item]
+
+  struct Item: Decodable {
+    let id: Int64
+    let name: String
+  }
+}
+
+private struct PersonalizedPlaylistsPayload: Decodable {
+  let result: [Item]
+
+  struct Item: Decodable {
+    let id: Int64
+    let name: String
+  }
+}
+
+private struct ToplistsPayload: Decodable {
+  let list: [Item]
+
+  struct Item: Decodable {
+    let id: Int64
+    let name: String
+  }
 }
 
 private struct LyricsProbePayload: Decodable {

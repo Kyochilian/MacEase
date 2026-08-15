@@ -111,6 +111,12 @@ final class PlaylistLibraryCoordinator {
             loginCoordinator: loginCoordinator
           )
         else { return }
+        self.selectedPlaylist = UserPlaylist(
+          id: playlist.id,
+          name: detail.name,
+          trackCount: detail.trackIDs.count,
+          owned: playlist.owned
+        )
         guard !detail.trackIDs.isEmpty else {
           self.status = "Loaded an empty playlist (1 request)"
           return

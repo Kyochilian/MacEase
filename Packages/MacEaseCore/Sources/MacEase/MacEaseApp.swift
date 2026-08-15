@@ -6,32 +6,90 @@ import WebKit
 @main
 @MainActor
 struct MacEaseApp: App {
+  private enum MainTab: Hashable {
+    case session
+    case library
+    case discover
+    case records
+  }
+
   @State private var session: LoginCoordinator
   @State private var library: PlaylistLibraryCoordinator
+  @State private var discovery: DiscoveryCoordinator
   @State private var playback: PlaybackController
+  @State private var selectedTab: MainTab = .session
 
   init() {
     let netease = NeteaseSession()
     let login = LoginCoordinator(session: netease)
     let library = PlaylistLibraryCoordinator(session: netease)
+    let discovery = DiscoveryCoordinator(session: netease)
     let playback = PlaybackController(session: netease)
-    playback.attach(loginCoordinator: login) { library.isLoading }
+    playback.attach(loginCoordinator: login) {
+      library.isLoading || discovery.isLoading
+    }
     _session = State(initialValue: login)
     _library = State(initialValue: library)
+    _discovery = State(initialValue: discovery)
     _playback = State(initialValue: playback)
   }
 
   var body: some Scene {
     Window("MacEase", id: "main") {
       VStack(spacing: 0) {
-        TabView {
-          SessionView(session: session, library: library, playback: playback)
-            .tabItem { Label("Session", systemImage: "person.crop.circle") }
-          PlaylistLibraryView(session: session, library: library, playback: playback)
-            .tabItem { Label("Library", systemImage: "music.note.list") }
+        TabView(selection: $selectedTab) {
+          SessionView(
+            session: session,
+            library: library,
+            discovery: discovery,
+            playback: playback
+          )
+          .tabItem { Label("Session", systemImage: "person.crop.circle") }
+          .tag(MainTab.session)
+          PlaylistLibraryView(
+            session: session,
+            library: library,
+            discovery: discovery,
+            playback: playback
+          )
+          .tabItem { Label("Library", systemImage: "music.note.list") }
+          .tag(MainTab.library)
+          DiscoverView(
+            session: session,
+            library: library,
+            discovery: discovery,
+            playback: playback,
+            openPlaylist: { playlist in
+              library.loadTracks(
+                for: UserPlaylist(
+                  id: playlist.id,
+                  name: playlist.name,
+                  trackCount: 0,
+                  owned: false
+                ),
+                loginCoordinator: session
+              )
+              selectedTab = .library
+            }
+          )
+          .tabItem { Label("Discover", systemImage: "sparkles") }
+          .tag(MainTab.discover)
+          PlayRecordsView(
+            session: session,
+            library: library,
+            discovery: discovery,
+            playback: playback
+          )
+          .tabItem { Label("Records", systemImage: "chart.bar") }
+          .tag(MainTab.records)
         }
         Divider()
-        PlaybackBarView(session: session, library: library, playback: playback)
+        PlaybackBarView(
+          session: session,
+          library: library,
+          discovery: discovery,
+          playback: playback
+        )
       }
       .frame(minWidth: 760, minHeight: 600)
       .task {
@@ -45,6 +103,7 @@ struct MacEaseApp: App {
 private struct SessionView: View {
   @Bindable var session: LoginCoordinator
   let library: PlaylistLibraryCoordinator
+  let discovery: DiscoveryCoordinator
   let playback: PlaybackController
 
   var body: some View {
@@ -103,6 +162,7 @@ private struct SessionView: View {
   private func mutateSession(_ operation: @escaping @MainActor () async -> Void) {
     playback.stop()
     library.reset()
+    discovery.reset()
     Task { await operation() }
   }
 }
@@ -110,10 +170,12 @@ private struct SessionView: View {
 private struct PlaylistLibraryView: View {
   let session: LoginCoordinator
   let library: PlaylistLibraryCoordinator
+  let discovery: DiscoveryCoordinator
   let playback: PlaybackController
 
   private var requestInFlight: Bool {
-    session.isBusy || library.isLoading || playback.isResolving
+    session.isBusy || library.isLoading || discovery.isLoading
+      || playback.isResolving
   }
 
   var body: some View {
@@ -266,14 +328,209 @@ private struct PlaylistLibraryView: View {
   }
 }
 
+private struct DiscoverView: View {
+  let session: LoginCoordinator
+  let library: PlaylistLibraryCoordinator
+  let discovery: DiscoveryCoordinator
+  let playback: PlaybackController
+  let openPlaylist: (DiscoveredPlaylist) -> Void
+
+  private var requestInFlight: Bool {
+    session.isBusy || library.isLoading || discovery.isLoading
+      || playback.isResolving
+  }
+
+  private var loadDisabled: Bool {
+    session.account == nil || requestInFlight
+  }
+
+  var body: some View {
+    VStack(spacing: 0) {
+      List {
+        Section {
+          ForEach(discovery.dailySongs.indices, id: \.self) { index in
+            let track = discovery.dailySongs[index]
+            HStack {
+              VStack(alignment: .leading, spacing: 3) {
+                Text(track.name)
+                if !track.artists.isEmpty {
+                  Text(track.artists.joined(separator: ", "))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+              }
+              Spacer()
+              Button("Play · 1 request", systemImage: "play.fill") {
+                playback.play(
+                  tracks: discovery.dailySongs,
+                  startIndex: index,
+                  loginCoordinator: session
+                )
+              }
+              .buttonStyle(.borderless)
+              .disabled(loadDisabled)
+            }
+          }
+        } header: {
+          sectionHeader("Daily Songs") {
+            discovery.loadDailySongs(loginCoordinator: session)
+          }
+        }
+
+        Section {
+          playlistRows(discovery.dailyPlaylists)
+        } header: {
+          sectionHeader("Daily Playlists") {
+            discovery.loadDailyPlaylists(loginCoordinator: session)
+          }
+        }
+
+        Section {
+          playlistRows(discovery.personalized)
+        } header: {
+          sectionHeader("Recommended Playlists") {
+            discovery.loadPersonalized(loginCoordinator: session)
+          }
+        }
+
+        Section {
+          playlistRows(discovery.toplists)
+        } header: {
+          sectionHeader("Toplists") {
+            discovery.loadToplists(loginCoordinator: session)
+          }
+        }
+      }
+
+      Divider()
+
+      HStack {
+        if discovery.isLoading {
+          ProgressView()
+            .controlSize(.small)
+        }
+        Text(discovery.status)
+          .foregroundStyle(.secondary)
+        Spacer()
+      }
+      .padding(12)
+    }
+  }
+
+  private func sectionHeader(
+    _ title: String,
+    load: @escaping () -> Void
+  ) -> some View {
+    HStack {
+      Text(title)
+      Spacer()
+      Button("Load · 1 request", systemImage: "arrow.clockwise", action: load)
+        .buttonStyle(.borderless)
+        .disabled(loadDisabled)
+    }
+  }
+
+  private func playlistRows(_ playlists: [DiscoveredPlaylist]) -> some View {
+    ForEach(playlists.indices, id: \.self) { index in
+      let playlist = playlists[index]
+      HStack {
+        Text(playlist.name)
+        Spacer()
+        Button("Open · up to 2 requests", systemImage: "music.note.list") {
+          openPlaylist(playlist)
+        }
+        .buttonStyle(.borderless)
+        .disabled(loadDisabled)
+      }
+    }
+  }
+}
+
+private struct PlayRecordsView: View {
+  let session: LoginCoordinator
+  let library: PlaylistLibraryCoordinator
+  @Bindable var discovery: DiscoveryCoordinator
+  let playback: PlaybackController
+
+  private var requestInFlight: Bool {
+    session.isBusy || library.isLoading || discovery.isLoading
+      || playback.isResolving
+  }
+
+  var body: some View {
+    VStack(spacing: 0) {
+      HStack {
+        Text("Listening Rankings")
+          .font(.headline)
+        Text("Server-side data only; MacEase playback is never scrobbled")
+          .font(.caption)
+          .foregroundStyle(.secondary)
+        Spacer()
+        Picker("Scope", selection: $discovery.recordScope) {
+          Text("All Time").tag(PlayRecordScope.allTime)
+          Text("Last Week").tag(PlayRecordScope.lastWeek)
+        }
+        .fixedSize()
+        Button("Load · 1 request", systemImage: "arrow.clockwise") {
+          discovery.loadRecords(loginCoordinator: session)
+        }
+        .disabled(session.account == nil || requestInFlight)
+      }
+      .padding(12)
+
+      Divider()
+
+      if discovery.records.isEmpty {
+        Text(discovery.status)
+          .foregroundStyle(.secondary)
+          .frame(maxWidth: .infinity, maxHeight: .infinity)
+      } else {
+        List(discovery.records.indices, id: \.self) { index in
+          let entry = discovery.records[index]
+          HStack {
+            Text("\(index + 1)")
+              .font(.caption.monospacedDigit())
+              .foregroundStyle(.secondary)
+              .frame(width: 28, alignment: .trailing)
+            VStack(alignment: .leading, spacing: 3) {
+              Text(entry.track.name)
+              if !entry.track.artists.isEmpty {
+                Text(entry.track.artists.joined(separator: ", "))
+                  .font(.caption)
+                  .foregroundStyle(.secondary)
+              }
+            }
+            Spacer()
+            Text("\(entry.playCount) plays")
+              .font(.caption.monospacedDigit())
+              .foregroundStyle(.secondary)
+            Button("Play · 1 request", systemImage: "play.fill") {
+              playback.play(
+                tracks: discovery.records.map(\.track),
+                startIndex: index,
+                loginCoordinator: session
+              )
+            }
+            .buttonStyle(.borderless)
+            .disabled(session.account == nil || requestInFlight)
+          }
+          .padding(.vertical, 3)
+        }
+      }
+    }
+  }
+}
+
 private struct PlaybackBarView: View {
   let session: LoginCoordinator
   let library: PlaylistLibraryCoordinator
+  let discovery: DiscoveryCoordinator
   @Bindable var playback: PlaybackController
   @State private var scrubPosition: Double?
 
   private var requestInFlight: Bool {
-    session.isBusy || library.isLoading || playback.isResolving
+    session.isBusy || library.isLoading || discovery.isLoading
+      || playback.isResolving
   }
 
   private var stepDisabled: Bool {
