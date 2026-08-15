@@ -139,6 +139,9 @@ public actor NeteaseSession {
   private static let songDetailsURL = URL(
     string: "https://music.163.com/weapi/v3/song/detail"
   )!
+  private static let likedSongIDsURL = URL(
+    string: "https://music.163.com/weapi/song/like/get"
+  )!
 
   private let redirectBlocker: RedirectBlocker
   private let urlSession: URLSession
@@ -221,6 +224,21 @@ public actor NeteaseSession {
       data: data,
       response: response as! HTTPURLResponse,
       songIDs: songIDs
+    )
+  }
+
+  package func likedSongIDs(
+    userID: Int64,
+    credential: NeteaseCredential
+  ) async throws -> [Int64] {
+    let request = try Self.likedSongIDsRequest(
+      userID: userID,
+      credential: credential
+    )
+    let (data, response) = try await urlSession.data(for: request)
+    return try Self.classifyLikedSongIDs(
+      data: data,
+      response: response as! HTTPURLResponse
     )
   }
 
@@ -427,6 +445,34 @@ public actor NeteaseSession {
     return songIDs.compactMap { tracksByID[$0] }
   }
 
+  package static func likedSongIDsRequest(
+    userID: Int64,
+    credential: NeteaseCredential,
+    secretKey: String? = nil
+  ) throws -> URLRequest {
+    let json = try likedSongIDsJSON(userID: userID, credential: credential)
+    return weapiRequest(
+      url: likedSongIDsURL,
+      parameters: weapiParameters(json: json, secretKey: secretKey),
+      credential: credential
+    )
+  }
+
+  package static func classifyLikedSongIDs(
+    data: Data,
+    response: HTTPURLResponse
+  ) throws -> [Int64] {
+    guard (200..<300).contains(response.statusCode) else {
+      throw NeteaseServiceError(source: .http, statusCode: response.statusCode)
+    }
+
+    let code = try JSONDecoder().decode(ServiceCodePayload.self, from: data).code
+    guard code == 200 else {
+      throw NeteaseServiceError(source: .service, statusCode: code)
+    }
+    return try JSONDecoder().decode(LikedSongIDsPayload.self, from: data).ids
+  }
+
   package static func classifyAudioProbe(
     response: HTTPURLResponse
   ) -> AudioURLProbeResult {
@@ -616,6 +662,17 @@ public actor NeteaseSession {
       as: UTF8.self
     )
     return #"{"c":\#(c),"csrf_token":\#(csrf)}"#
+  }
+
+  private static func likedSongIDsJSON(
+    userID: Int64,
+    credential: NeteaseCredential
+  ) throws -> String {
+    let csrf = String(
+      decoding: try JSONEncoder().encode(credential.csrf?.value ?? ""),
+      as: UTF8.self
+    )
+    return #"{"uid":"\#(userID)","csrf_token":\#(csrf)}"#
   }
 
   private static func eapiHeaderFields(
@@ -818,6 +875,10 @@ private struct SongDetailsPayload: Decodable {
   struct Artist: Decodable {
     let name: String
   }
+}
+
+private struct LikedSongIDsPayload: Decodable {
+  let ids: [Int64]
 }
 
 private struct LyricsProbePayload: Decodable {

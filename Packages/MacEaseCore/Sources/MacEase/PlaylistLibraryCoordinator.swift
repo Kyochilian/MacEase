@@ -18,6 +18,7 @@ final class PlaylistLibraryCoordinator {
   var playlists: [UserPlaylist] = []
   var selectedPlaylist: UserPlaylist?
   var tracks: [PlaylistTrack] = []
+  var likedIDs: Set<Int64>?
   var hasMore = false
   var hasMoreTracks = false
   var isLoading = false
@@ -189,6 +190,43 @@ final class PlaylistLibraryCoordinator {
     }
   }
 
+  func loadLikedIDs(loginCoordinator: LoginCoordinator) {
+    guard !loginCoordinator.isBusy, !isLoading else { return }
+    guard let account = loginCoordinator.account else {
+      status = "Validate the session before loading liked songs"
+      return
+    }
+
+    let currentGeneration = generation
+    isLoading = true
+    status = "Loading liked song IDs (1 request)"
+    loadTask = Task {
+      await perform(
+        account: account,
+        generation: currentGeneration,
+        loginCoordinator: loginCoordinator,
+        invalidateOnService301: false,
+        operation: "Liked songs"
+      ) { credential in
+        let ids = try await self.session.likedSongIDs(
+          userID: account.userID,
+          credential: credential
+        )
+        guard
+          try await self.sessionRemainsCurrent(
+            account: account,
+            credential: credential,
+            generation: currentGeneration,
+            loginCoordinator: loginCoordinator
+          )
+        else { return }
+
+        self.likedIDs = Set(ids)
+        self.status = "Loaded \(ids.count) liked song IDs"
+      }
+    }
+  }
+
   func reset() {
     generation += 1
     loadTask?.cancel()
@@ -328,6 +366,7 @@ final class PlaylistLibraryCoordinator {
   private func clearLibrary() {
     playlists = []
     hasMore = false
+    likedIDs = nil
     clearDetail()
   }
 

@@ -126,6 +126,11 @@ private struct PlaylistLibraryView: View {
           library.load(reset: true, loginCoordinator: session)
         }
         .disabled(session.account == nil || requestInFlight)
+        Button("Load Liked IDs · 1 request", systemImage: "heart") {
+          library.loadLikedIDs(loginCoordinator: session)
+        }
+        .disabled(session.account == nil || requestInFlight)
+        .help("Marks loaded track rows that are in your liked songs")
         if library.hasMore {
           Button("Load More · 1 request", systemImage: "plus") {
             library.load(reset: false, loginCoordinator: session)
@@ -200,7 +205,15 @@ private struct PlaylistLibraryView: View {
                   let track = library.tracks[index]
                   HStack {
                     VStack(alignment: .leading, spacing: 3) {
-                      Text(track.name)
+                      HStack(spacing: 5) {
+                        Text(track.name)
+                        if library.likedIDs?.contains(track.id) == true {
+                          Image(systemName: "heart.fill")
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                            .help("In your liked songs")
+                        }
+                      }
                       if !track.artists.isEmpty {
                         Text(track.artists.joined(separator: ", "))
                           .font(.caption)
