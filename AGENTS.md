@@ -39,6 +39,12 @@ inside the `NeteaseKit` SPM module.
 - Keep implementations minimal, concise, and efficient.
 - Add only correctness and security checks supported by current evidence. Do not add
   speculative fallbacks, redundant compatibility layers, or "just in case" branches.
+- Before implementing a complex feature (new endpoint, playback state machine,
+  system integration), first consult `docs/reference-implementations.md`: it maps
+  each feature to vetted open-source implementations (file-level paths, verified
+  endpoint parameters, known quirks, and license red lines). Deep-read the
+  referenced source via MCP fetch before writing code. Never copy code from
+  GPL/unlicensed repos; MIT borrowings go into THIRD_PARTY_NOTICES.md.
 
 ## Research tools
 
