@@ -7,6 +7,7 @@
 | Project | Snapshot / license observation | MacEase usage |
 |---|---|---|
 | [`api-enhanced`](https://github.com/NeteaseCloudMusicApiEnhanced/api-enhanced) | `5b780addbafe`, MIT, 2026-08-06 | Endpoint/协议对照和 golden vectors；不嵌入 server、解灰、签到或 IP 功能 |
+| [`YesPlayMusic`](https://github.com/qier222/YesPlayMusic) | `df075cca247e`, MIT, 2026-08-15 | 借鉴 `src/utils/Player.js` 的队列/播放模式语义（循环回绕、shuffle 当前曲目置首、单曲循环重播、静音记忆），Swift 独立实现于 `PlaybackQueue`；不借鉴其解灰、scrobble、自动跳过失败曲目逻辑 |
 | [`NeteaseCloudMusicAPI-Swift`](https://github.com/Lincb522/NeteaseCloudMusicAPI-Swift) | `8626b8fe6281`, README 标注 MIT 但无许可证正文, 2026-08-06 | 仅行为与输出对照；澄清前不复制代码 |
 | [`MusicBox`](https://github.com/zeyugao/MusicBox) | `db1f50859496`, 未发现项目级许可证, 2026-08-06 | 研究登录、播放和缓存边界 |
 | [`MeloX`](https://github.com/youshen2/MeloX), [`go-musicfox`](https://github.com/go-musicfox/go-musicfox), [`HyPlayer`](https://github.com/HyPlayer/HyPlayer) | GPL-3.0, observed 2026-08-06 | 只研究产品行为，独立实现 |

@@ -4,9 +4,10 @@ import MacEaseSession
 import NeteaseKit
 import Observation
 
-/// Explicit single-track playback. Every Play or Play Again action performs
-/// exactly one `resolveSongURL` request; there is no queue, prefetch,
-/// automatic retry or automatic next track.
+/// Explicit queue playback. A queue starts only from a user action, every
+/// track transition performs exactly one `resolveSongURL` request (repeat one
+/// replays the current item with none), and any failure stops the queue with
+/// no automatic retry or skip. There is no prefetch and no background refresh.
 @MainActor
 @Observable
 final class PlaybackController {
@@ -14,57 +15,121 @@ final class PlaybackController {
     case idle
     case resolving
     case playing
+    case paused
     case finished
     case failed
   }
 
+  enum SleepTimerState: Equatable {
+    case off
+    case armed(Date)
+    case finishingTrack
+  }
+
+  private static let volumeDefaultsKey = "playback.volume"
+
   @ObservationIgnored private let session: NeteaseSession
   @ObservationIgnored private let vault = CredentialVault()
   @ObservationIgnored private var gate = PlaybackIntentGate()
+  @ObservationIgnored private var rng = SystemRandomNumberGenerator()
   @ObservationIgnored private var playTask: Task<Void, Never>?
   @ObservationIgnored private var player: AVPlayer?
   @ObservationIgnored private var periodicObserver: Any?
   @ObservationIgnored private var itemStatusObservation: NSKeyValueObservation?
   @ObservationIgnored private var playedToEndObserver: NSObjectProtocol?
   @ObservationIgnored private var recoverySnapshot: PlaybackRecoverySnapshot?
+  @ObservationIgnored private var currentAssetSummary: String?
+  @ObservationIgnored private var queueTracks: [PlaylistTrack] = []
+  @ObservationIgnored private weak var attachedLogin: LoginCoordinator?
+  @ObservationIgnored private var libraryBusy: (@MainActor () -> Bool)?
+  @ObservationIgnored private var sleepTask: Task<Void, Never>?
+  @ObservationIgnored private var sleepGeneration = 0
 
   private(set) var phase: Phase = .idle
+  private(set) var queue: PlaybackQueue?
+  private(set) var sleepTimer: SleepTimerState = .off
   private(set) var trackName: String?
   private(set) var positionSeconds: Double = 0
   private(set) var status = "Play a track from the library"
   var quality: PlaybackQuality = .standard
+  var sleepStopsImmediately = false
+
+  var playbackMode: PlaybackMode = .sequential {
+    didSet { queue?.setMode(playbackMode, using: &rng) }
+  }
+
+  var volume: Float = 1 {
+    didSet {
+      player?.volume = volume
+      UserDefaults.standard.set(Double(volume), forKey: Self.volumeDefaultsKey)
+    }
+  }
+
+  var isMuted = false {
+    didSet { player?.isMuted = isMuted }
+  }
 
   var isResolving: Bool { phase == .resolving }
-  var isActive: Bool { phase == .resolving || phase == .playing }
+  var isActive: Bool {
+    phase == .resolving || phase == .playing || phase == .paused
+  }
   var canPlayAgain: Bool { phase == .failed && recoverySnapshot != nil }
+  var canStepNext: Bool { queue?.nextIndex() != nil }
+  var canStepPrevious: Bool { queue?.previousIndex() != nil }
+  var queuePosition: String? {
+    queue.map { "\($0.currentIndex + 1) of \($0.count)" }
+  }
 
   init(session: NeteaseSession) {
     self.session = session
+    if let stored = UserDefaults.standard.object(forKey: Self.volumeDefaultsKey)
+      as? Double
+    {
+      volume = Float(min(max(stored, 0), 1))
+    }
   }
 
-  func play(trackID: Int64, name: String, loginCoordinator: LoginCoordinator) {
+  /// Wires the references auto-advance needs for its preflight checks.
+  func attach(
+    loginCoordinator: LoginCoordinator,
+    libraryBusy: @escaping @MainActor () -> Bool
+  ) {
+    attachedLogin = loginCoordinator
+    self.libraryBusy = libraryBusy
+  }
+
+  func play(tracks: [PlaylistTrack], startIndex: Int, loginCoordinator: LoginCoordinator) {
     guard !loginCoordinator.isBusy else { return }
     guard let account = loginCoordinator.account else {
       status = "Validate the session before playback"
       return
     }
-
-    let token = beginIntent()
-    recoverySnapshot = nil
-    trackName = name
-    phase = .resolving
-    status = "Resolving song URL (1 request)"
-    let requestedQuality = quality
-    playTask = Task {
-      await resolveAndPlay(
-        songID: trackID,
-        quality: requestedQuality,
-        account: account,
-        recovery: nil,
-        loginCoordinator: loginCoordinator,
-        token: token
+    guard
+      let queue = PlaybackQueue(
+        count: tracks.count,
+        startIndex: startIndex,
+        mode: playbackMode,
+        using: &rng
       )
-    }
+    else { return }
+
+    queueTracks = tracks
+    self.queue = queue
+    clearPendingSleepStop()
+    startEntry(
+      at: startIndex,
+      account: account,
+      loginCoordinator: loginCoordinator,
+      auto: false
+    )
+  }
+
+  func playNext(loginCoordinator: LoginCoordinator) {
+    step(to: queue?.nextIndex(), loginCoordinator: loginCoordinator)
+  }
+
+  func playPrevious(loginCoordinator: LoginCoordinator) {
+    step(to: queue?.previousIndex(), loginCoordinator: loginCoordinator)
   }
 
   func playAgain(loginCoordinator: LoginCoordinator) {
@@ -76,6 +141,7 @@ final class PlaybackController {
     guard let snapshot = recoverySnapshot else { return }
 
     let token = beginIntent()
+    clearPendingSleepStop()
     phase = .resolving
     status = "Re-resolving song URL (1 request)"
     playTask = Task {
@@ -90,16 +156,115 @@ final class PlaybackController {
     }
   }
 
+  func pause() {
+    guard phase == .playing, let player else { return }
+    player.pause()
+    phase = .paused
+    status = "Paused"
+  }
+
+  func resume() {
+    guard phase == .paused, let player else { return }
+    player.play()
+    phase = .playing
+    status = currentAssetSummary.map { "Playing: " + $0 } ?? "Playing"
+  }
+
   func stop() {
     gate.cancel()
     playTask?.cancel()
     playTask = nil
     recoverySnapshot = nil
+    queue = nil
+    queueTracks = []
+    clearPendingSleepStop()
     releasePlayback()
     phase = .idle
     trackName = nil
     positionSeconds = 0
     status = "Playback stopped"
+  }
+
+  /// A local timer; it never issues requests. Zero minutes cancels it,
+  /// including a pending stop-after-track.
+  func setSleepTimer(minutes: Int) {
+    sleepGeneration += 1
+    sleepTask?.cancel()
+    sleepTask = nil
+    guard minutes > 0 else {
+      sleepTimer = .off
+      return
+    }
+    let seconds = TimeInterval(minutes * 60)
+    sleepTimer = .armed(Date().addingTimeInterval(seconds))
+    let generation = sleepGeneration
+    sleepTask = Task { [weak self] in
+      try? await Task.sleep(for: .seconds(seconds))
+      guard !Task.isCancelled else { return }
+      self?.fireSleepTimer(generation: generation)
+    }
+  }
+
+  private func fireSleepTimer(generation: Int) {
+    guard generation == sleepGeneration, case .armed = sleepTimer else { return }
+    sleepTask = nil
+    guard isActive else {
+      sleepTimer = .off
+      return
+    }
+    if sleepStopsImmediately {
+      sleepTimer = .off
+      stop()
+      status = "Sleep timer stopped playback"
+    } else {
+      sleepTimer = .finishingTrack
+    }
+  }
+
+  private func step(to target: Int?, loginCoordinator: LoginCoordinator) {
+    guard !loginCoordinator.isBusy else { return }
+    guard let account = loginCoordinator.account else {
+      status = "Validate the session before playback"
+      return
+    }
+    guard let target, queue?.moveTo(target) == true else { return }
+
+    clearPendingSleepStop()
+    startEntry(
+      at: target,
+      account: account,
+      loginCoordinator: loginCoordinator,
+      auto: false
+    )
+  }
+
+  private func startEntry(
+    at index: Int,
+    account: NeteaseAccount,
+    loginCoordinator: LoginCoordinator,
+    auto: Bool
+  ) {
+    guard queueTracks.indices.contains(index) else { return }
+    let track = queueTracks[index]
+    let token = beginIntent()
+    recoverySnapshot = nil
+    trackName = track.name
+    phase = .resolving
+    status =
+      auto
+      ? "Auto-playing the next track (1 request)"
+      : "Resolving song URL (1 request)"
+    let requestedQuality = quality
+    playTask = Task {
+      await resolveAndPlay(
+        songID: track.id,
+        quality: requestedQuality,
+        account: account,
+        recovery: nil,
+        loginCoordinator: loginCoordinator,
+        token: token
+      )
+    }
   }
 
   private func resolveAndPlay(
@@ -148,7 +313,7 @@ final class PlaybackController {
         phase = .failed
         status =
           "Track unavailable: itemCode=\(itemCode), "
-          + "fee=\(fee.map(String.init) ?? "none")"
+          + "fee=\(fee.map(String.init) ?? "none"); the queue is not skipped"
       case .resolved(let resolved):
         try await startPlayback(asset: resolved, recovery: recovery, token: token)
       }
@@ -183,6 +348,8 @@ final class PlaybackController {
 
     let item = AVPlayerItem(asset: asset)
     let player = AVPlayer(playerItem: item)
+    player.volume = volume
+    player.isMuted = isMuted
     self.player = player
     observe(item: item, of: player, token: token)
 
@@ -199,6 +366,7 @@ final class PlaybackController {
     }
     player.play()
     positionSeconds = resumePosition
+    currentAssetSummary = assetSummary(resolved)
     phase = .playing
     status = "Playing: " + assetSummary(resolved)
   }
@@ -258,11 +426,60 @@ final class PlaybackController {
 
   private func handlePlayedToEnd(token: PlaybackIntentGate.Token) {
     guard gate.accepts(token) else { return }
+    if sleepTimer == .finishingTrack {
+      gate.cancel()
+      stop()
+      status = "Sleep timer stopped after the current track"
+      return
+    }
+    guard let queue else {
+      finishQueue(status: "Playback finished")
+      return
+    }
+    switch queue.afterNaturalEnd() {
+    case .replayCurrent:
+      replayCurrentItem(token: token)
+    case .end:
+      finishQueue(status: "Queue finished; no automatic repeat")
+    case .play(let index):
+      guard
+        let login = attachedLogin,
+        !login.isBusy,
+        let account = login.account,
+        libraryBusy?() != true,
+        self.queue?.moveTo(index) == true
+      else {
+        finishQueue(status: "Track finished; press Next to continue the queue")
+        return
+      }
+      startEntry(at: index, account: account, loginCoordinator: login, auto: true)
+    }
+  }
+
+  private func finishQueue(status: String) {
     gate.cancel()
     recoverySnapshot = nil
     releasePlayback()
     phase = .finished
-    status = "Playback finished; no automatic next track"
+    self.status = status
+  }
+
+  private func replayCurrentItem(token: PlaybackIntentGate.Token) {
+    guard let player else {
+      finishQueue(status: "Playback finished")
+      return
+    }
+    positionSeconds = 0
+    status = "Repeating the current track (no request)"
+    Task {
+      do {
+        try await seek(player, to: 0)
+        try checkCurrent(token)
+        player.play()
+      } catch {
+        // A newer intent superseded the replay; it owns the player now.
+      }
+    }
   }
 
   private func currentCredential(
@@ -365,11 +582,20 @@ final class PlaybackController {
 
   private func abandonPlayback(status: String) {
     recoverySnapshot = nil
+    queue = nil
+    queueTracks = []
+    clearPendingSleepStop()
     releasePlayback()
     phase = .idle
     trackName = nil
     positionSeconds = 0
     self.status = status
+  }
+
+  private func clearPendingSleepStop() {
+    if sleepTimer == .finishingTrack {
+      sleepTimer = .off
+    }
   }
 
   private func beginIntent() -> PlaybackIntentGate.Token {
@@ -392,6 +618,7 @@ final class PlaybackController {
       player.removeTimeObserver(periodicObserver)
     }
     periodicObserver = nil
+    currentAssetSummary = nil
     player?.currentItem?.cancelPendingSeeks()
     player?.pause()
     player = nil

@@ -12,9 +12,13 @@ struct MacEaseApp: App {
 
   init() {
     let netease = NeteaseSession()
-    _session = State(initialValue: LoginCoordinator(session: netease))
-    _library = State(initialValue: PlaylistLibraryCoordinator(session: netease))
-    _playback = State(initialValue: PlaybackController(session: netease))
+    let login = LoginCoordinator(session: netease)
+    let library = PlaylistLibraryCoordinator(session: netease)
+    let playback = PlaybackController(session: netease)
+    playback.attach(loginCoordinator: login) { library.isLoading }
+    _session = State(initialValue: login)
+    _library = State(initialValue: library)
+    _playback = State(initialValue: playback)
   }
 
   var body: some Scene {
@@ -206,13 +210,14 @@ private struct PlaylistLibraryView: View {
                     Spacer()
                     Button("Play · 1 request", systemImage: "play.fill") {
                       playback.play(
-                        trackID: track.id,
-                        name: track.name,
+                        tracks: library.tracks,
+                        startIndex: index,
                         loginCoordinator: session
                       )
                     }
                     .buttonStyle(.borderless)
                     .disabled(session.account == nil || requestInFlight)
+                    .help("Starts the queue from this track over the loaded list")
                   }
                   .padding(.vertical, 3)
                 }
@@ -257,49 +262,152 @@ private struct PlaybackBarView: View {
     session.isBusy || library.isLoading || playback.isResolving
   }
 
+  private var stepDisabled: Bool {
+    session.account == nil || requestInFlight
+  }
+
   var body: some View {
-    HStack(spacing: 10) {
-      Image(systemName: "music.note")
-        .foregroundStyle(.secondary)
-      VStack(alignment: .leading, spacing: 2) {
-        Text(playback.trackName ?? "Nothing playing")
-        Text(playback.status)
-          .font(.caption)
+    VStack(spacing: 0) {
+      HStack(spacing: 10) {
+        Image(systemName: "music.note")
           .foregroundStyle(.secondary)
-          .lineLimit(1)
-      }
-      Spacer()
-      if playback.phase == .playing {
-        Text(timeString(playback.positionSeconds))
-          .font(.caption.monospacedDigit())
-          .foregroundStyle(.secondary)
-      }
-      Picker("Quality", selection: $playback.quality) {
-        ForEach(PlaybackQuality.allCases, id: \.self) { quality in
-          Text(quality.rawValue).tag(quality)
+        VStack(alignment: .leading, spacing: 2) {
+          HStack(spacing: 6) {
+            Text(playback.trackName ?? "Nothing playing")
+            if let position = playback.queuePosition {
+              Text(position)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+          }
+          Text(playback.status)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+        }
+        Spacer()
+        if playback.phase == .playing || playback.phase == .paused {
+          Text(timeString(playback.positionSeconds))
+            .font(.caption.monospacedDigit())
+            .foregroundStyle(.secondary)
+        }
+        Picker("Quality", selection: $playback.quality) {
+          ForEach(PlaybackQuality.allCases, id: \.self) { quality in
+            Text(quality.rawValue).tag(quality)
+          }
+        }
+        .fixedSize()
+        .help("Applies to the next explicit Play")
+        .disabled(playback.isResolving)
+        if playback.canPlayAgain {
+          Button("Play Again · 1 request", systemImage: "arrow.counterclockwise") {
+            playback.playAgain(loginCoordinator: session)
+          }
+          .disabled(session.account == nil || requestInFlight)
+        }
+        if playback.isActive {
+          Button("Stop", systemImage: "stop.fill") {
+            playback.stop()
+          }
         }
       }
-      .fixedSize()
-      .help("Applies to the next explicit Play")
-      .disabled(playback.isResolving)
-      if playback.canPlayAgain {
-        Button("Play Again · 1 request", systemImage: "arrow.counterclockwise") {
-          playback.playAgain(loginCoordinator: session)
+      .padding(12)
+
+      Divider()
+
+      HStack(spacing: 10) {
+        Button("Previous · 1 request", systemImage: "backward.end.fill") {
+          playback.playPrevious(loginCoordinator: session)
         }
-        .disabled(session.account == nil || requestInFlight)
-      }
-      if playback.isActive {
-        Button("Stop", systemImage: "stop.fill") {
-          playback.stop()
+        .disabled(!playback.canStepPrevious || stepDisabled)
+        if playback.phase == .paused {
+          Button("Resume", systemImage: "play.fill") {
+            playback.resume()
+          }
+        } else {
+          Button("Pause", systemImage: "pause.fill") {
+            playback.pause()
+          }
+          .disabled(playback.phase != .playing)
         }
+        Button("Next · 1 request", systemImage: "forward.end.fill") {
+          playback.playNext(loginCoordinator: session)
+        }
+        .disabled(!playback.canStepNext || stepDisabled)
+
+        Picker("Mode", selection: $playback.playbackMode) {
+          ForEach(PlaybackMode.allCases, id: \.self) { mode in
+            Text(mode.label).tag(mode)
+          }
+        }
+        .fixedSize()
+        .help(
+          "Order after a track ends naturally; each new track is 1 request, "
+            + "repeat one is 0"
+        )
+
+        Spacer()
+
+        Button {
+          playback.isMuted.toggle()
+        } label: {
+          Image(
+            systemName: playback.isMuted
+              ? "speaker.slash.fill" : "speaker.wave.2.fill"
+          )
+        }
+        .buttonStyle(.borderless)
+        .help("Mute (local, no request)")
+        Slider(value: $playback.volume, in: 0...1)
+          .frame(width: 100)
+          .help("Volume (local, no request)")
+
+        Menu {
+          ForEach([15, 30, 45, 60, 90], id: \.self) { minutes in
+            Button("\(minutes) min") {
+              playback.setSleepTimer(minutes: minutes)
+            }
+          }
+          Button("Off") {
+            playback.setSleepTimer(minutes: 0)
+          }
+          Divider()
+          Toggle("Stop immediately at deadline", isOn: $playback.sleepStopsImmediately)
+        } label: {
+          Label(sleepLabel, systemImage: "moon.zzz")
+        }
+        .fixedSize()
+        .help("Local timer; by default it lets the current track finish")
       }
+      .padding(12)
     }
-    .padding(12)
+  }
+
+  private var sleepLabel: String {
+    switch playback.sleepTimer {
+    case .off:
+      "Sleep Timer"
+    case .armed(let deadline):
+      "Sleep at " + deadline.formatted(date: .omitted, time: .shortened)
+    case .finishingTrack:
+      "Sleep after this track"
+    }
   }
 
   private func timeString(_ seconds: Double) -> String {
     let total = Int(seconds.rounded(.down))
     return String(format: "%d:%02d", total / 60, total % 60)
+  }
+}
+
+extension PlaybackMode {
+  fileprivate var label: String {
+    switch self {
+    case .sequential: "Sequential"
+    case .repeatAll: "Repeat All"
+    case .repeatOne: "Repeat One"
+    case .shuffle: "Shuffle"
+    }
   }
 }
 
