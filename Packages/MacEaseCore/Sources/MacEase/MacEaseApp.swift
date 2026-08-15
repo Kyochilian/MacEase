@@ -270,6 +270,7 @@ private struct PlaybackBarView: View {
   let session: LoginCoordinator
   let library: PlaylistLibraryCoordinator
   @Bindable var playback: PlaybackController
+  @State private var scrubPosition: Double?
 
   private var requestInFlight: Bool {
     session.isBusy || library.isLoading || playback.isResolving
@@ -300,9 +301,30 @@ private struct PlaybackBarView: View {
         }
         Spacer()
         if playback.phase == .playing || playback.phase == .paused {
-          Text(timeString(playback.positionSeconds))
+          Text(timeString(scrubPosition ?? playback.positionSeconds))
             .font(.caption.monospacedDigit())
             .foregroundStyle(.secondary)
+          if let duration = playback.durationSeconds {
+            Slider(
+              value: Binding(
+                get: { min(scrubPosition ?? playback.positionSeconds, duration) },
+                set: { scrubPosition = $0 }
+              ),
+              in: 0...duration
+            ) { editing in
+              if !editing {
+                if let scrubPosition {
+                  playback.seek(to: scrubPosition)
+                }
+                scrubPosition = nil
+              }
+            }
+            .frame(width: 180)
+            .help("Seek (local, no request)")
+            Text(timeString(duration))
+              .font(.caption.monospacedDigit())
+              .foregroundStyle(.secondary)
+          }
         }
         Picker("Quality", selection: $playback.quality) {
           ForEach(PlaybackQuality.allCases, id: \.self) { quality in

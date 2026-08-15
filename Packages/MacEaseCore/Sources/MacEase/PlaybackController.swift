@@ -39,6 +39,7 @@ final class PlaybackController {
   @ObservationIgnored private var playedToEndObserver: NSObjectProtocol?
   @ObservationIgnored private var recoverySnapshot: PlaybackRecoverySnapshot?
   @ObservationIgnored private var currentAssetSummary: String?
+  @ObservationIgnored private var activeToken: PlaybackIntentGate.Token?
   @ObservationIgnored private var queueTracks: [PlaylistTrack] = []
   @ObservationIgnored private weak var attachedLogin: LoginCoordinator?
   @ObservationIgnored private var libraryBusy: (@MainActor () -> Bool)?
@@ -50,6 +51,7 @@ final class PlaybackController {
   private(set) var sleepTimer: SleepTimerState = .off
   private(set) var trackName: String?
   private(set) var positionSeconds: Double = 0
+  private(set) var durationSeconds: Double?
   private(set) var status = "Play a track from the library"
   var quality: PlaybackQuality = .standard
   var sleepStopsImmediately = false
@@ -168,6 +170,27 @@ final class PlaybackController {
     player.play()
     phase = .playing
     status = currentAssetSummary.map { "Playing: " + $0 } ?? "Playing"
+  }
+
+  /// Local AVPlayer seek; it never issues a NetEase request.
+  func seek(to seconds: Double) {
+    guard
+      phase == .playing || phase == .paused,
+      let player,
+      let duration = durationSeconds,
+      let token = activeToken
+    else { return }
+
+    let target = min(max(seconds, 0), duration)
+    positionSeconds = target
+    Task {
+      do {
+        try await seek(player, to: target)
+        try checkCurrent(token)
+      } catch {
+        // Superseded by a newer seek or intent; the newer owner updates state.
+      }
+    }
   }
 
   func stop() {
@@ -337,7 +360,7 @@ final class PlaybackController {
       url: resolved.url,
       options: [AVURLAssetHTTPUserAgentKey: "MacEasePhase0/0.1 (macOS 15)"]
     )
-    let isPlayable = try await asset.load(.isPlayable)
+    let (isPlayable, duration) = try await asset.load(.isPlayable, .duration)
     try checkCurrent(token)
     guard isPlayable else {
       recoverySnapshot = nil
@@ -366,6 +389,9 @@ final class PlaybackController {
     }
     player.play()
     positionSeconds = resumePosition
+    let durationInSeconds = duration.seconds
+    durationSeconds =
+      durationInSeconds.isFinite && durationInSeconds > 0 ? durationInSeconds : nil
     currentAssetSummary = assetSummary(resolved)
     phase = .playing
     status = "Playing: " + assetSummary(resolved)
@@ -600,6 +626,7 @@ final class PlaybackController {
 
   private func beginIntent() -> PlaybackIntentGate.Token {
     let token = gate.begin()
+    activeToken = token
     playTask?.cancel()
     playTask = nil
     releasePlayback()
@@ -619,6 +646,7 @@ final class PlaybackController {
     }
     periodicObserver = nil
     currentAssetSummary = nil
+    durationSeconds = nil
     player?.currentItem?.cancelPendingSeeks()
     player?.pause()
     player = nil
