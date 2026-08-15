@@ -19,6 +19,7 @@ __pycache__/
 .env
 .env.*
 !.env.example
+.python-version
 
 # Local secrets
 Secrets/
@@ -29,3 +30,7 @@ secrets/
 
 # Local working notes (not tracked)
 docs/
+init.md
+AGENTS.md
+CLAUDE.md
+.gitignore

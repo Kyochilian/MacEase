@@ -56,6 +56,9 @@ Use native web tools only when the corresponding MCP tool is unavailable or fail
 GitHub read operations must use mirrors first:
 ghfast.top → gh-proxy.com → ghproxy.net → github.com.
 Always push directly to GitHub.
+When pushing, do not add any AI as a collaborator: do not invite AI
+accounts to the repository, and do not include `Co-authored-by` trailers
+for Cursor, Claude, or any other AI agent.
 
 ## Python
 
