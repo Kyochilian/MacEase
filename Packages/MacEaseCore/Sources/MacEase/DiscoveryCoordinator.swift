@@ -3,9 +3,12 @@ import MacEaseSession
 import NeteaseKit
 import Observation
 
-/// Discovery and listening-ranking reads. Every section loads only from an
-/// explicit one-request user action; none of these endpoints has verified
-/// credential-invalidation semantics, so service 301 classifies and stops.
+/// Discovery and listening-ranking reads. Sections load from an explicit
+/// one-request user action, plus one launch-scoped prefetch of the four
+/// Discover sections after the first successful validation (roadmap
+/// decision); refreshes stay user-triggered. None of these endpoints has
+/// verified credential-invalidation semantics, so service 301 classifies
+/// and stops.
 @MainActor
 @Observable
 final class DiscoveryCoordinator {
@@ -13,6 +16,7 @@ final class DiscoveryCoordinator {
   @ObservationIgnored private let vault = CredentialVault()
   @ObservationIgnored private var generation = 0
   @ObservationIgnored private var loadTask: Task<Void, Never>?
+  @ObservationIgnored private var hasPrefetched = false
 
   var dailySongs: [PlaylistTrack] = []
   var dailyPlaylists: [DiscoveredPlaylist] = []
@@ -27,63 +31,56 @@ final class DiscoveryCoordinator {
     self.session = session
   }
 
+  /// One-time prefetch of the four Discover sections after the first
+  /// successful validation of this app run: one request per section in
+  /// sequence, stopping at the first error, with no retry. Later refreshes
+  /// remain explicit user actions.
+  func prefetch(loginCoordinator: LoginCoordinator) {
+    guard
+      !hasPrefetched, !loginCoordinator.isBusy, !isLoading,
+      let account = loginCoordinator.account
+    else { return }
+    hasPrefetched = true
+    let currentGeneration = generation
+    isLoading = true
+    status = "Prefetching Discover once (up to 4 requests)"
+    loadTask = Task {
+      defer { finish(generation: currentGeneration) }
+      for step in [runDailySongs, runDailyPlaylists, runPersonalized, runToplists] {
+        guard await step(account, currentGeneration, loginCoordinator) else { return }
+      }
+    }
+  }
+
   func loadDailySongs(loginCoordinator: LoginCoordinator) {
     load(
       loadingStatus: "Loading daily recommended songs (1 request)",
-      operation: "Daily songs",
       loginCoordinator: loginCoordinator,
-      fetch: { credential, _ in
-        try await self.session.dailyRecommendedSongs(credential: credential)
-      },
-      apply: { songs in
-        self.dailySongs = songs
-        return "Loaded \(songs.count) daily recommended songs"
-      }
+      run: runDailySongs
     )
   }
 
   func loadDailyPlaylists(loginCoordinator: LoginCoordinator) {
     load(
       loadingStatus: "Loading daily recommended playlists (1 request)",
-      operation: "Daily playlists",
       loginCoordinator: loginCoordinator,
-      fetch: { credential, _ in
-        try await self.session.dailyRecommendedPlaylists(credential: credential)
-      },
-      apply: { playlists in
-        self.dailyPlaylists = playlists
-        return "Loaded \(playlists.count) daily recommended playlists"
-      }
+      run: runDailyPlaylists
     )
   }
 
   func loadPersonalized(loginCoordinator: LoginCoordinator) {
     load(
       loadingStatus: "Loading recommended playlists (1 request)",
-      operation: "Recommended playlists",
       loginCoordinator: loginCoordinator,
-      fetch: { credential, _ in
-        try await self.session.personalizedPlaylists(credential: credential)
-      },
-      apply: { playlists in
-        self.personalized = playlists
-        return "Loaded \(playlists.count) recommended playlists"
-      }
+      run: runPersonalized
     )
   }
 
   func loadToplists(loginCoordinator: LoginCoordinator) {
     load(
       loadingStatus: "Loading toplists (1 request)",
-      operation: "Toplists",
       loginCoordinator: loginCoordinator,
-      fetch: { credential, _ in
-        try await self.session.toplists(credential: credential)
-      },
-      apply: { toplists in
-        self.toplists = toplists
-        return "Loaded \(toplists.count) toplists"
-      }
+      run: runToplists
     )
   }
 
@@ -91,18 +88,25 @@ final class DiscoveryCoordinator {
     let scope = recordScope
     load(
       loadingStatus: "Loading listening rankings (1 request)",
-      operation: "Listening rankings",
       loginCoordinator: loginCoordinator,
-      fetch: { credential, account in
-        try await self.session.playRecords(
-          userID: account.userID,
-          scope: scope,
-          credential: credential
+      run: { account, generation, loginCoordinator in
+        await self.run(
+          operation: "Listening rankings",
+          account: account,
+          generation: generation,
+          loginCoordinator: loginCoordinator,
+          fetch: { credential, account in
+            try await self.session.playRecords(
+              userID: account.userID,
+              scope: scope,
+              credential: credential
+            )
+          },
+          apply: { records in
+            self.records = records
+            return "Loaded \(records.count) ranking entries"
+          }
         )
-      },
-      apply: { records in
-        self.records = records
-        return "Loaded \(records.count) ranking entries"
       }
     )
   }
@@ -116,12 +120,10 @@ final class DiscoveryCoordinator {
     status = "Validate the session, then load each section explicitly"
   }
 
-  private func load<Value: Sendable>(
+  private func load(
     loadingStatus: String,
-    operation: String,
     loginCoordinator: LoginCoordinator,
-    fetch: @escaping @MainActor (NeteaseCredential, NeteaseAccount) async throws -> Value,
-    apply: @escaping @MainActor (Value) -> String
+    run: @escaping @MainActor (NeteaseAccount, Int, LoginCoordinator) async -> Bool
   ) {
     guard !loginCoordinator.isBusy, !isLoading else { return }
     guard let account = loginCoordinator.account else {
@@ -134,28 +136,120 @@ final class DiscoveryCoordinator {
     status = loadingStatus
     loadTask = Task {
       defer { finish(generation: currentGeneration) }
+      _ = await run(account, currentGeneration, loginCoordinator)
+    }
+  }
 
-      var credential: NeteaseCredential?
-      do {
-        credential = try await currentCredential(
+  private func runDailySongs(
+    account: NeteaseAccount,
+    generation: Int,
+    loginCoordinator: LoginCoordinator
+  ) async -> Bool {
+    await run(
+      operation: "Daily songs",
+      account: account,
+      generation: generation,
+      loginCoordinator: loginCoordinator,
+      fetch: { credential, _ in
+        try await self.session.dailyRecommendedSongs(credential: credential)
+      },
+      apply: { songs in
+        self.dailySongs = songs
+        return "Loaded \(songs.count) daily recommended songs"
+      }
+    )
+  }
+
+  private func runDailyPlaylists(
+    account: NeteaseAccount,
+    generation: Int,
+    loginCoordinator: LoginCoordinator
+  ) async -> Bool {
+    await run(
+      operation: "Daily playlists",
+      account: account,
+      generation: generation,
+      loginCoordinator: loginCoordinator,
+      fetch: { credential, _ in
+        try await self.session.dailyRecommendedPlaylists(credential: credential)
+      },
+      apply: { playlists in
+        self.dailyPlaylists = playlists
+        return "Loaded \(playlists.count) daily recommended playlists"
+      }
+    )
+  }
+
+  private func runPersonalized(
+    account: NeteaseAccount,
+    generation: Int,
+    loginCoordinator: LoginCoordinator
+  ) async -> Bool {
+    await run(
+      operation: "Recommended playlists",
+      account: account,
+      generation: generation,
+      loginCoordinator: loginCoordinator,
+      fetch: { credential, _ in
+        try await self.session.personalizedPlaylists(credential: credential)
+      },
+      apply: { playlists in
+        self.personalized = playlists
+        return "Loaded \(playlists.count) recommended playlists"
+      }
+    )
+  }
+
+  private func runToplists(
+    account: NeteaseAccount,
+    generation: Int,
+    loginCoordinator: LoginCoordinator
+  ) async -> Bool {
+    await run(
+      operation: "Toplists",
+      account: account,
+      generation: generation,
+      loginCoordinator: loginCoordinator,
+      fetch: { credential, _ in
+        try await self.session.toplists(credential: credential)
+      },
+      apply: { toplists in
+        self.toplists = toplists
+        return "Loaded \(toplists.count) toplists"
+      }
+    )
+  }
+
+  private func run<Value: Sendable>(
+    operation: String,
+    account: NeteaseAccount,
+    generation: Int,
+    loginCoordinator: LoginCoordinator,
+    fetch: @MainActor (NeteaseCredential, NeteaseAccount) async throws -> Value,
+    apply: @MainActor (Value) -> String
+  ) async -> Bool {
+    do {
+      guard
+        let credential = try await currentCredential(
           account: account,
-          generation: currentGeneration,
+          generation: generation,
           loginCoordinator: loginCoordinator
         )
-        guard let credential else { return }
-        let value = try await fetch(credential, account)
-        guard
-          try await sessionRemainsCurrent(
-            account: account,
-            credential: credential,
-            generation: currentGeneration,
-            loginCoordinator: loginCoordinator
-          )
-        else { return }
-        status = apply(value)
-      } catch {
-        handle(error, generation: currentGeneration, operation: operation)
-      }
+      else { return false }
+      let value = try await fetch(credential, account)
+      guard
+        try await sessionRemainsCurrent(
+          account: account,
+          credential: credential,
+          generation: generation,
+          loginCoordinator: loginCoordinator
+        )
+      else { return false }
+      status = apply(value)
+      return true
+    } catch {
+      handle(error, generation: generation, operation: operation)
+      return false
     }
   }
 

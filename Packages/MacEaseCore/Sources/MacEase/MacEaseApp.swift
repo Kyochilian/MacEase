@@ -163,7 +163,12 @@ private struct SessionView: View {
     playback.stop()
     library.reset()
     discovery.reset()
-    Task { await operation() }
+    Task {
+      await operation()
+      // Roadmap decision: one launch-scoped Discover prefetch after the
+      // first successful validation; refreshes stay user-triggered.
+      discovery.prefetch(loginCoordinator: session)
+    }
   }
 }
 
