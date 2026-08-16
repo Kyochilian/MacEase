@@ -471,6 +471,7 @@ private struct PlayRecordsView: View {
           Text("Last Week").tag(PlayRecordScope.lastWeek)
         }
         .fixedSize()
+        .disabled(requestInFlight)
         Button("Load · 1 request", systemImage: "arrow.clockwise") {
           discovery.loadRecords(loginCoordinator: session)
         }
@@ -672,6 +673,13 @@ private struct PlaybackBarView: View {
         .help("Local timer; by default it lets the current track finish")
       }
       .padding(12)
+    }
+    // A drag session can outlive the slider when the track ends mid-drag;
+    // stale scrub state would freeze the next track's displayed position.
+    .onChange(of: playback.phase) {
+      if playback.phase != .playing && playback.phase != .paused {
+        scrubPosition = nil
+      }
     }
   }
 

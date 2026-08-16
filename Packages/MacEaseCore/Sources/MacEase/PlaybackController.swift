@@ -498,13 +498,12 @@ final class PlaybackController {
     positionSeconds = 0
     status = "Repeating the current track (no request)"
     Task {
-      do {
-        try await seek(player, to: 0)
-        try checkCurrent(token)
-        player.play()
-      } catch {
-        // A newer intent superseded the replay; it owns the player now.
-      }
+      // A cancelled seek here only means a same-intent user seek superseded
+      // seek(0); replay still owns the player unless the intent changed or
+      // the user paused during the gap.
+      _ = try? await seek(player, to: 0)
+      guard gate.accepts(token), !Task.isCancelled, phase == .playing else { return }
+      player.play()
     }
   }
 
