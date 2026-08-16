@@ -20,6 +20,7 @@ __pycache__/
 .env.*
 !.env.example
 .python-version
+scripts/
 
 # Local secrets
 Secrets/
@@ -33,4 +34,4 @@ docs/
 init.md
 AGENTS.md
 CLAUDE.md
-.gitignore
+THIRD_PARTY_NOTICES.md
