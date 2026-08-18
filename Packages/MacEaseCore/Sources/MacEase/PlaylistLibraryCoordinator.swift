@@ -5,15 +5,21 @@ import Observation
 
 @MainActor
 @Observable
-final class PlaylistLibraryCoordinator {
+final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
   private static let playlistPageSize = 30
 
   @ObservationIgnored private let session: NeteaseSession
-  @ObservationIgnored private let vault = CredentialVault()
-  @ObservationIgnored private var generation = 0
+  @ObservationIgnored let vault = CredentialVault()
+  @ObservationIgnored private(set) var generation = 0
   @ObservationIgnored private var loadTask: Task<Void, Never>?
   @ObservationIgnored private var trackIDs: [Int64] = []
   @ObservationIgnored private var loadedTrackIDCount = 0
+
+  var noStoredSessionStatus: String { "No stored session to load library" }
+
+  func clearSessionScopedData() {
+    clearLibrary()
+  }
 
   var playlists: [UserPlaylist] = []
   var selectedPlaylist: UserPlaylist?
@@ -271,55 +277,6 @@ final class PlaylistLibraryCoordinator {
         operation: operation
       )
     }
-  }
-
-  private func currentCredential(
-    account: NeteaseAccount,
-    generation: Int,
-    loginCoordinator: LoginCoordinator
-  ) async throws -> NeteaseCredential? {
-    guard let credential = try await vault.load() else {
-      guard self.generation == generation else { return nil }
-      loginCoordinator.hasStoredSession = false
-      loginCoordinator.account = nil
-      loginCoordinator.status = "No stored session to validate"
-      clearLibrary()
-      status = "No stored session to load library"
-      return nil
-    }
-    guard self.generation == generation else { return nil }
-    guard loginCoordinator.matchesValidatedSession(credential, account: account) else {
-      loginCoordinator.hasStoredSession = true
-      loginCoordinator.account = nil
-      loginCoordinator.status = "Stored session changed; validate again"
-      clearLibrary()
-      status = "Session changed; validate again"
-      return nil
-    }
-    return credential
-  }
-
-  private func sessionRemainsCurrent(
-    account: NeteaseAccount,
-    credential: NeteaseCredential,
-    generation: Int,
-    loginCoordinator: LoginCoordinator
-  ) async throws -> Bool {
-    guard self.generation == generation else { return false }
-    let storedCredential = try await vault.load()
-    guard self.generation == generation else { return false }
-    guard
-      storedCredential == credential,
-      loginCoordinator.matchesValidatedSession(credential, account: account)
-    else {
-      loginCoordinator.hasStoredSession = storedCredential != nil
-      loginCoordinator.account = nil
-      loginCoordinator.status = "Stored session changed; validate again"
-      clearLibrary()
-      status = "Session changed; validate again"
-      return false
-    }
-    return true
   }
 
   private func handle(
