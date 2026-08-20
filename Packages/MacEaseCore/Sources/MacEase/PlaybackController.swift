@@ -81,6 +81,13 @@ final class PlaybackController {
   var queuePosition: String? {
     queue.map { "\($0.currentIndex + 1) of \($0.count)" }
   }
+  /// The entry a similar-songs seed refers to, when a queue is active.
+  var currentTrack: PlaylistTrack? {
+    guard let index = queue?.currentIndex, queueTracks.indices.contains(index) else {
+      return nil
+    }
+    return queueTracks[index]
+  }
 
   init(session: NeteaseSession) {
     self.session = session

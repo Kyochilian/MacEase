@@ -180,6 +180,9 @@ public actor NeteaseSession {
   private static let personalizedPlaylistsURL = URL(
     string: "https://music.163.com/weapi/personalized/playlist"
   )!
+  private static let similarSongsURL = URL(
+    string: "https://music.163.com/weapi/api/v1/discovery/simiSong"
+  )!
 
   private let redirectBlocker: RedirectBlocker
   private let urlSession: URLSession
@@ -343,6 +346,21 @@ public actor NeteaseSession {
     )
     let (data, response) = try await urlSession.data(for: request)
     return try Self.classifyToplists(
+      data: data,
+      response: response as! HTTPURLResponse
+    )
+  }
+
+  package func similarSongs(
+    songID: Int64,
+    credential: NeteaseCredential
+  ) async throws -> [PlaylistTrack] {
+    let request = try Self.similarSongsRequest(
+      songID: songID,
+      credential: credential
+    )
+    let (data, response) = try await urlSession.data(for: request)
+    return try Self.classifySimilarSongs(
       data: data,
       response: response as! HTTPURLResponse
     )
@@ -751,6 +769,39 @@ public actor NeteaseSession {
       .list.map { DiscoveredPlaylist(id: $0.id, name: $0.name) }
   }
 
+  package static func similarSongsRequest(
+    songID: Int64,
+    credential: NeteaseCredential,
+    secretKey: String? = nil
+  ) throws -> URLRequest {
+    let json = try similarSongsJSON(songID: songID, credential: credential)
+    return weapiRequest(
+      url: similarSongsURL,
+      parameters: weapiParameters(json: json, secretKey: secretKey),
+      credential: credential
+    )
+  }
+
+  /// Unlike the other track endpoints, this legacy path returns `artists`
+  /// rather than `ar`.
+  package static func classifySimilarSongs(
+    data: Data,
+    response: HTTPURLResponse
+  ) throws -> [PlaylistTrack] {
+    guard (200..<300).contains(response.statusCode) else {
+      throw NeteaseServiceError(source: .http, statusCode: response.statusCode)
+    }
+
+    let code = try JSONDecoder().decode(ServiceCodePayload.self, from: data).code
+    guard code == 200 else {
+      throw NeteaseServiceError(source: .service, statusCode: code)
+    }
+    return try JSONDecoder().decode(SimilarSongsPayload.self, from: data)
+      .songs.map {
+        PlaylistTrack(id: $0.id, name: $0.name, artists: $0.artists.map(\.name))
+      }
+  }
+
   package static func classifyAudioProbe(
     response: HTTPURLResponse
   ) -> AudioURLProbeResult {
@@ -973,6 +1024,17 @@ public actor NeteaseSession {
       as: UTF8.self
     )
     return #"{"limit":30,"total":true,"n":1000,"csrf_token":\#(csrf)}"#
+  }
+
+  private static func similarSongsJSON(
+    songID: Int64,
+    credential: NeteaseCredential
+  ) throws -> String {
+    let csrf = String(
+      decoding: try JSONEncoder().encode(credential.csrf?.value ?? ""),
+      as: UTF8.self
+    )
+    return #"{"songid":\#(songID),"limit":50,"offset":0,"csrf_token":\#(csrf)}"#
   }
 
   private static func eapiHeaderFields(
@@ -1242,6 +1304,20 @@ private struct ToplistsPayload: Decodable {
 
   struct Item: Decodable {
     let id: Int64
+    let name: String
+  }
+}
+
+private struct SimilarSongsPayload: Decodable {
+  let songs: [Song]
+
+  struct Song: Decodable {
+    let id: Int64
+    let name: String
+    let artists: [Artist]
+  }
+
+  struct Artist: Decodable {
     let name: String
   }
 }

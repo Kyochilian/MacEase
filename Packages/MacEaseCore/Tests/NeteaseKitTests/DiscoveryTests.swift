@@ -199,6 +199,51 @@ private func expectWeAPIBody(
   )
 }
 
+@Test func similarSongsRequestUsesTheLockedLegacyContract() throws {
+  let request = try NeteaseSession.similarSongsRequest(
+    songID: 347_230,
+    credential: discoveryCredential,
+    secretKey: "0123456789abcdef"
+  )
+
+  #expect(
+    request.url?.absoluteString
+      == "https://music.163.com/weapi/api/v1/discovery/simiSong"
+  )
+  #expect(request.httpMethod == "POST")
+  #expect(
+    request.value(forHTTPHeaderField: "Cookie") == "MUSIC_U=music-u-test; __csrf=csrf-test"
+  )
+  expectWeAPIBody(
+    request,
+    json: #"{"songid":347230,"limit":50,"offset":0,"csrf_token":"csrf-test"}"#
+  )
+}
+
+@Test func similarSongsDecodeTheLegacyArtistsField() throws {
+  // This legacy endpoint returns `artists`, unlike the `ar` used elsewhere.
+  let tracks = try NeteaseSession.classifySimilarSongs(
+    data: Data(
+      #"{"code":200,"songs":[{"id":33894312,"name":"Later","artists":[{"name":"A"},{"name":"B"}],"album":{"fee":0}}]}"#
+        .utf8
+    ),
+    response: okResponse
+  )
+
+  #expect(tracks == [PlaylistTrack(id: 33_894_312, name: "Later", artists: ["A", "B"])])
+}
+
+@Test func similarSongsRejectAnArResponseShape() {
+  // Guards the `artists` vs `ar` distinction: an `ar`-shaped payload must
+  // fail loudly rather than silently decode to empty artists.
+  #expect(throws: (any Error).self) {
+    try NeteaseSession.classifySimilarSongs(
+      data: Data(#"{"code":200,"songs":[{"id":1,"name":"X","ar":[{"name":"A"}]}]}"#.utf8),
+      response: okResponse
+    )
+  }
+}
+
 @Test func discoveryClassifiersDistinguishServiceAndHTTPErrors() {
   let failedHTTPResponse = HTTPURLResponse(
     url: URL(string: "https://music.163.com")!,
@@ -222,6 +267,12 @@ private func expectWeAPIBody(
   }
   #expect(throws: NeteaseServiceError(source: .service, statusCode: 301)) {
     try NeteaseSession.classifyToplists(
+      data: Data(#"{"code":301}"#.utf8),
+      response: okResponse
+    )
+  }
+  #expect(throws: NeteaseServiceError(source: .service, statusCode: 301)) {
+    try NeteaseSession.classifySimilarSongs(
       data: Data(#"{"code":301}"#.utf8),
       response: okResponse
     )

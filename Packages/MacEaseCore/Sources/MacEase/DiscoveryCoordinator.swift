@@ -29,6 +29,8 @@ final class DiscoveryCoordinator: SessionGuardedCoordinator {
   var personalized: [DiscoveredPlaylist] = []
   var toplists: [DiscoveredPlaylist] = []
   var records: [PlayRecordEntry] = []
+  var similarSongs: [PlaylistTrack] = []
+  var similarSeedName: String?
   var recordScope: PlayRecordScope = .allTime
   var isLoading = false
   var status = "Validate the session, then load each section explicitly"
@@ -111,6 +113,36 @@ final class DiscoveryCoordinator: SessionGuardedCoordinator {
           apply: { records in
             self.records = records
             return "Loaded \(records.count) ranking entries"
+          }
+        )
+      }
+    )
+  }
+
+  /// Similar songs for one explicitly chosen seed track (1 request).
+  func loadSimilarSongs(
+    seed: PlaylistTrack,
+    loginCoordinator: LoginCoordinator
+  ) {
+    load(
+      loadingStatus: "Loading similar songs (1 request)",
+      loginCoordinator: loginCoordinator,
+      run: { account, generation, loginCoordinator in
+        await self.run(
+          operation: "Similar songs",
+          account: account,
+          generation: generation,
+          loginCoordinator: loginCoordinator,
+          fetch: { credential, _ in
+            try await self.session.similarSongs(
+              songID: seed.id,
+              credential: credential
+            )
+          },
+          apply: { songs in
+            self.similarSongs = songs
+            self.similarSeedName = seed.name
+            return "Loaded \(songs.count) songs similar to \(seed.name)"
           }
         )
       }
@@ -283,5 +315,7 @@ final class DiscoveryCoordinator: SessionGuardedCoordinator {
     personalized = []
     toplists = []
     records = []
+    similarSongs = []
+    similarSeedName = nil
   }
 }

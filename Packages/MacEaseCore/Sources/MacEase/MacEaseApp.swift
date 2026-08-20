@@ -405,6 +405,48 @@ private struct DiscoverView: View {
             discovery.loadToplists(loginCoordinator: session)
           }
         }
+
+        Section {
+          ForEach(discovery.similarSongs.indices, id: \.self) { index in
+            let track = discovery.similarSongs[index]
+            HStack {
+              VStack(alignment: .leading, spacing: 3) {
+                Text(track.name)
+                if !track.artists.isEmpty {
+                  Text(track.artists.joined(separator: ", "))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+              }
+              Spacer()
+              Button("Play · 1 request", systemImage: "play.fill") {
+                playback.play(
+                  tracks: discovery.similarSongs,
+                  startIndex: index,
+                  loginCoordinator: session
+                )
+              }
+              .buttonStyle(.borderless)
+              .disabled(loadDisabled)
+            }
+          }
+        } header: {
+          HStack {
+            Text(
+              discovery.similarSeedName
+                .map { "Similar to \($0)" } ?? "Similar Songs"
+            )
+            Spacer()
+            Button("Load · 1 request", systemImage: "arrow.clockwise") {
+              if let seed = playback.currentTrack {
+                discovery.loadSimilarSongs(seed: seed, loginCoordinator: session)
+              }
+            }
+            .buttonStyle(.borderless)
+            .disabled(loadDisabled || playback.currentTrack == nil)
+            .help("Uses the current queue track as the seed")
+          }
+        }
       }
 
       Divider()
