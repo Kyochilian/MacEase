@@ -181,7 +181,7 @@ public actor NeteaseSession {
     string: "https://music.163.com/weapi/personalized/playlist"
   )!
   private static let similarSongsURL = URL(
-    string: "https://music.163.com/weapi/api/v1/discovery/simiSong"
+    string: "https://music.163.com/weapi/v1/discovery/simiSong"
   )!
 
   private let redirectBlocker: RedirectBlocker

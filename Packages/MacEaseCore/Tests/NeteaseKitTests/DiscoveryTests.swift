@@ -206,9 +206,11 @@ private func expectWeAPIBody(
     secretKey: "0123456789abcdef"
   )
 
+  // `/weapi/` + uri.substr(5) strips the leading `/api/`, as for every other
+  // weapi endpoint here.
   #expect(
     request.url?.absoluteString
-      == "https://music.163.com/weapi/api/v1/discovery/simiSong"
+      == "https://music.163.com/weapi/v1/discovery/simiSong"
   )
   #expect(request.httpMethod == "POST")
   #expect(
