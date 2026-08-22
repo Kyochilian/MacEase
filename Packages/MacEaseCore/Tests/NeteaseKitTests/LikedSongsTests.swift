@@ -24,7 +24,16 @@ private let likedCredential = NeteaseCredential(
 
   #expect(liked.url?.absoluteString == "https://music.163.com/weapi/radio/like")
   #expect(liked.httpMethod == "POST")
-  #expect(liked.value(forHTTPHeaderField: "Cookie") == "MUSIC_U=music-u-test; __csrf=csrf-test")
+  // The write path adds MacEase's own honest platform identity (the read paths
+  // are live-verified without it). No fabricated device or tracking ID.
+  let cookie = liked.value(forHTTPHeaderField: "Cookie") ?? ""
+  #expect(cookie.hasPrefix("MUSIC_U=music-u-test; __csrf=csrf-test; "))
+  #expect(cookie.contains("os=osx"))
+  #expect(cookie.contains("appver=0.1"))
+  #expect(cookie.contains("channel=github"))
+  #expect(!cookie.contains("deviceId"))
+  #expect(!cookie.contains("NMTID"))
+  #expect(!cookie.contains("_ntes_nuid"))
   #expect(
     String(decoding: liked.httpBody!, as: UTF8.self)
       == String(

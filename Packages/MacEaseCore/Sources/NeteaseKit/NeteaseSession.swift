@@ -835,7 +835,8 @@ public actor NeteaseSession {
     return weapiRequest(
       url: likeSongURL,
       parameters: weapiParameters(json: json, secretKey: secretKey),
-      credential: credential
+      credential: credential,
+      platformContext: true
     )
   }
 
@@ -1162,10 +1163,19 @@ public actor NeteaseSession {
       ?? NeteaseCrypto.weapi(json: json)
   }
 
+  /// MacEase's own platform identity, matching what the already-verified eapi
+  /// path sends. It states the real OS and MacEase's own version/channel; it
+  /// never claims to be the official NetEase client and carries no fabricated
+  /// device or tracking identifier.
+  private static func platformCookies() -> String {
+    "os=osx; osver=\(osVersion); appver=0.1; channel=github"
+  }
+
   private static func weapiRequest(
     url: URL,
     parameters: WeAPIParameters,
-    credential: NeteaseCredential
+    credential: NeteaseCredential,
+    platformContext: Bool = false
   ) -> URLRequest {
     var request = URLRequest(url: url)
     request.httpMethod = "POST"
@@ -1179,7 +1189,12 @@ public actor NeteaseSession {
       forHTTPHeaderField: "Content-Type"
     )
     request.setValue("https://music.163.com/", forHTTPHeaderField: "Referer")
-    request.setValue(cookieHeader(credential), forHTTPHeaderField: "Cookie")
+    request.setValue(
+      platformContext
+        ? cookieHeader(credential) + "; " + platformCookies()
+        : cookieHeader(credential),
+      forHTTPHeaderField: "Cookie"
+    )
     return request
   }
 
