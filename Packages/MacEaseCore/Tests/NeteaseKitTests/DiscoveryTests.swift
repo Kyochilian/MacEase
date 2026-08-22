@@ -246,6 +246,61 @@ private func expectWeAPIBody(
   }
 }
 
+@Test func searchSongsUsesTheCloudsearchContract() throws {
+  let request = try NeteaseSession.searchSongsRequest(
+    keywords: "周杰伦",
+    credential: discoveryCredential,
+    osVersion: "15.5",
+    buildVersion: "1722945678",
+    requestID: "1722945678123_0042"
+  )
+  let header =
+    #"{"osver":"15.5","os":"osx","appver":"0.1","buildver":"1722945678","#
+    + #""__csrf":"csrf-test","channel":"github","#
+    + #""requestId":"1722945678123_0042","MUSIC_U":"music-u-test"}"#
+  let json =
+    #"{"s":"周杰伦","type":1,"limit":30,"offset":0,"total":true,"#
+    + #""e_r":false,"header":\#(header)}"#
+
+  #expect(
+    request.url?.absoluteString
+      == "https://interfacepc.music.163.com/eapi/cloudsearch/pc"
+  )
+  #expect(
+    String(decoding: request.httpBody!, as: UTF8.self)
+      == "params=" + NeteaseCrypto.eapi(path: "/api/cloudsearch/pc", json: json)
+  )
+}
+
+@Test func searchSongsDecodeTheModernArShape() throws {
+  // Cloudsearch returns `ar`, unlike the legacy simiSong endpoint's `artists`.
+  let tracks = try NeteaseSession.classifySearchSongs(
+    data: Data(
+      #"{"code":200,"result":{"songCount":1,"songs":[{"id":509781655,"name":"想你就写信 (Live)","dt":238698,"ar":[{"id":6452,"name":"周杰伦"},{"id":12010120,"name":"李硕"}],"al":{"id":36412633,"name":"专辑"}}]}}"#
+        .utf8
+    ),
+    response: okResponse
+  )
+
+  #expect(
+    tracks == [
+      PlaylistTrack(id: 509_781_655, name: "想你就写信 (Live)", artists: ["周杰伦", "李硕"])
+    ]
+  )
+}
+
+@Test func searchSongsRejectALegacyArtistsShape() {
+  #expect(throws: (any Error).self) {
+    try NeteaseSession.classifySearchSongs(
+      data: Data(
+        #"{"code":200,"result":{"songs":[{"id":1,"name":"X","artists":[{"name":"A"}]}]}}"#
+          .utf8
+      ),
+      response: okResponse
+    )
+  }
+}
+
 @Test func discoveryClassifiersDistinguishServiceAndHTTPErrors() {
   let failedHTTPResponse = HTTPURLResponse(
     url: URL(string: "https://music.163.com")!,

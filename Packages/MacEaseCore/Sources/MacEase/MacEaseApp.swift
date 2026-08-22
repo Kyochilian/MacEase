@@ -10,6 +10,7 @@ struct MacEaseApp: App {
     case session
     case library
     case discover
+    case search
     case records
   }
 
@@ -74,6 +75,14 @@ struct MacEaseApp: App {
           )
           .tabItem { Label("Discover", systemImage: "sparkles") }
           .tag(MainTab.discover)
+          SearchView(
+            session: session,
+            library: library,
+            discovery: discovery,
+            playback: playback
+          )
+          .tabItem { Label("Search", systemImage: "magnifyingglass") }
+          .tag(MainTab.search)
           PlayRecordsView(
             session: session,
             library: library,
@@ -618,6 +627,98 @@ private struct DiscoverView: View {
         .buttonStyle(.borderless)
         .disabled(loadDisabled)
         .help("Subscribe to this playlist · 1 request")
+      }
+    }
+  }
+}
+
+private struct SearchView: View {
+  let session: LoginCoordinator
+  let library: PlaylistLibraryCoordinator
+  @Bindable var discovery: DiscoveryCoordinator
+  let playback: PlaybackController
+
+  private var requestInFlight: Bool {
+    session.isBusy || library.isLoading || discovery.isLoading
+      || playback.isResolving
+  }
+
+  private var searchDisabled: Bool {
+    session.account == nil || requestInFlight
+      || discovery.searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        .isEmpty
+  }
+
+  var body: some View {
+    VStack(spacing: 0) {
+      HStack {
+        TextField("Search songs", text: $discovery.searchQuery)
+          .onSubmit {
+            if !searchDisabled { discovery.search(loginCoordinator: session) }
+          }
+        Button("Search · 1 request", systemImage: "magnifyingglass") {
+          discovery.search(loginCoordinator: session)
+        }
+        .disabled(searchDisabled)
+      }
+      .padding(12)
+
+      Divider()
+
+      if discovery.searchResults.isEmpty {
+        Text(discovery.status)
+          .foregroundStyle(.secondary)
+          .frame(maxWidth: .infinity, maxHeight: .infinity)
+      } else {
+        List(discovery.searchResults.indices, id: \.self) { index in
+          let track = discovery.searchResults[index]
+          HStack {
+            VStack(alignment: .leading, spacing: 3) {
+              Text(track.name)
+              if !track.artists.isEmpty {
+                Text(track.artists.joined(separator: ", "))
+                  .font(.caption)
+                  .foregroundStyle(.secondary)
+              }
+            }
+            Spacer()
+            let isLiked = library.likedIDs?.contains(track.id) == true
+            Button {
+              library.setLiked(!isLiked, for: track, loginCoordinator: session)
+            } label: {
+              Image(systemName: isLiked ? "heart.fill" : "heart")
+                .foregroundStyle(isLiked ? .red : .secondary)
+            }
+            .buttonStyle(.borderless)
+            .disabled(session.account == nil || requestInFlight)
+            .help(isLiked ? "Unlike · 1 request" : "Like · 1 request")
+            Menu {
+              ForEach(library.playlists.filter(\.owned), id: \.id) { target in
+                Button(target.name) {
+                  library.addTrack(track, to: target, loginCoordinator: session)
+                }
+              }
+            } label: {
+              Image(systemName: "text.badge.plus")
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .disabled(
+              requestInFlight || !library.playlists.contains(where: \.owned)
+            )
+            .help("Add to one of your playlists · 1 request")
+            Button("Play · 1 request", systemImage: "play.fill") {
+              playback.play(
+                tracks: discovery.searchResults,
+                startIndex: index,
+                loginCoordinator: session
+              )
+            }
+            .buttonStyle(.borderless)
+            .disabled(session.account == nil || requestInFlight)
+          }
+          .padding(.vertical, 3)
+        }
       }
     }
   }

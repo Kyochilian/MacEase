@@ -211,6 +211,10 @@ public actor NeteaseSession {
     path: "/api/playlist/subscribe",
     url: URL(string: "https://interfacepc.music.163.com/eapi/playlist/subscribe")!
   )
+  private static let searchSongsEndpoint = EndpointDescriptor(
+    path: "/api/cloudsearch/pc",
+    url: URL(string: "https://interfacepc.music.163.com/eapi/cloudsearch/pc")!
+  )
   private static let unsubscribePlaylistEndpoint = EndpointDescriptor(
     path: "/api/playlist/unsubscribe",
     url: URL(string: "https://interfacepc.music.163.com/eapi/playlist/unsubscribe")!
@@ -516,6 +520,27 @@ public actor NeteaseSession {
     )
     let (data, response) = try await urlSession.data(for: request)
     try Self.classifyWriteAcknowledgement(
+      data: data,
+      response: response as! HTTPURLResponse
+    )
+  }
+
+  /// Song search. Uses cloudsearch, the endpoint the official desktop client
+  /// uses, so results match what the NetEase app returns.
+  package func searchSongs(
+    keywords: String,
+    credential: NeteaseCredential
+  ) async throws -> [PlaylistTrack] {
+    let timestamp = Date().timeIntervalSince1970
+    let request = try Self.searchSongsRequest(
+      keywords: keywords,
+      credential: credential,
+      osVersion: Self.osVersion,
+      buildVersion: String(Int(timestamp)),
+      requestID: Self.requestID(timestamp: timestamp)
+    )
+    let (data, response) = try await urlSession.data(for: request)
+    return try Self.classifySearchSongs(
       data: data,
       response: response as! HTTPURLResponse
     )
@@ -1101,6 +1126,51 @@ public actor NeteaseSession {
     )
   }
 
+  package static func searchSongsRequest(
+    keywords: String,
+    credential: NeteaseCredential,
+    osVersion: String,
+    buildVersion: String,
+    requestID: String
+  ) throws -> URLRequest {
+    let headerFields = eapiHeaderFields(
+      credential: credential,
+      osVersion: osVersion,
+      buildVersion: buildVersion,
+      requestID: requestID
+    )
+    let header = try eapiHeaderJSON(headerFields)
+    let encoded = String(decoding: try JSONEncoder().encode(keywords), as: UTF8.self)
+    let json =
+      #"{"s":\#(encoded),"type":1,"limit":30,"offset":0,"total":true,"#
+      + #""e_r":false,"header":\#(header)}"#
+    return eapiRequest(
+      endpoint: searchSongsEndpoint,
+      json: json,
+      headerFields: headerFields
+    )
+  }
+
+  /// Cloudsearch returns tracks in the modern `ar` shape, unlike the legacy
+  /// simiSong endpoint which uses `artists`.
+  package static func classifySearchSongs(
+    data: Data,
+    response: HTTPURLResponse
+  ) throws -> [PlaylistTrack] {
+    guard (200..<300).contains(response.statusCode) else {
+      throw NeteaseServiceError(source: .http, statusCode: response.statusCode)
+    }
+
+    let code = try JSONDecoder().decode(ServiceCodePayload.self, from: data).code
+    guard code == 200 else {
+      throw NeteaseServiceError(source: .service, statusCode: code)
+    }
+    return try JSONDecoder().decode(SearchSongsPayload.self, from: data)
+      .result.songs.map {
+        PlaylistTrack(id: $0.id, name: $0.name, artists: $0.ar.map(\.name))
+      }
+  }
+
   /// Every write endpoint acknowledges with `code == 200` and carries no other
   /// field MacEase uses. Anything else is reported and stops; in particular the
   /// reference implementation's automatic resend on 512 is deliberately not
@@ -1658,6 +1728,24 @@ private struct ToplistsPayload: Decodable {
 
   struct Item: Decodable {
     let id: Int64
+    let name: String
+  }
+}
+
+private struct SearchSongsPayload: Decodable {
+  let result: Result
+
+  struct Result: Decodable {
+    let songs: [Song]
+  }
+
+  struct Song: Decodable {
+    let id: Int64
+    let name: String
+    let ar: [Artist]
+  }
+
+  struct Artist: Decodable {
     let name: String
   }
 }

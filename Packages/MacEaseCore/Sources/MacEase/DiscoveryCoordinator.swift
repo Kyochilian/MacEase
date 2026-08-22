@@ -31,6 +31,8 @@ final class DiscoveryCoordinator: SessionGuardedCoordinator {
   var records: [PlayRecordEntry] = []
   var similarSongs: [PlaylistTrack] = []
   var similarSeedName: String?
+  var searchResults: [PlaylistTrack] = []
+  var searchQuery = ""
   var recordScope: PlayRecordScope = .allTime
   var isLoading = false
   var status = "Validate the session, then load each section explicitly"
@@ -143,6 +145,35 @@ final class DiscoveryCoordinator: SessionGuardedCoordinator {
             self.similarSongs = songs
             self.similarSeedName = seed.name
             return "Loaded \(songs.count) songs similar to \(seed.name)"
+          }
+        )
+      }
+    )
+  }
+
+  /// Song search (1 request). Runs only from an explicit Search action; there
+  /// is no as-you-type querying.
+  func search(loginCoordinator: LoginCoordinator) {
+    let keywords = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !keywords.isEmpty else { return }
+    load(
+      loadingStatus: "Searching (1 request)",
+      loginCoordinator: loginCoordinator,
+      run: { account, generation, loginCoordinator in
+        await self.run(
+          operation: "Search",
+          account: account,
+          generation: generation,
+          loginCoordinator: loginCoordinator,
+          fetch: { credential, _ in
+            try await self.session.searchSongs(
+              keywords: keywords,
+              credential: credential
+            )
+          },
+          apply: { songs in
+            self.searchResults = songs
+            return "Found \(songs.count) songs for \(keywords)"
           }
         )
       }
@@ -317,5 +348,6 @@ final class DiscoveryCoordinator: SessionGuardedCoordinator {
     records = []
     similarSongs = []
     similarSeedName = nil
+    searchResults = []
   }
 }
