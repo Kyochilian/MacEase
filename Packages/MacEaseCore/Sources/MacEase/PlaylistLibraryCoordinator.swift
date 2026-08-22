@@ -239,6 +239,59 @@ final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
     }
   }
 
+  /// The first write action: toggles the server-side liked state for one
+  /// track (1 request). On success only `likedIDs` is updated locally; the
+  /// liked list is never auto-refreshed. Any failure is reported and stops.
+  func setLiked(
+    _ liked: Bool,
+    for track: PlaylistTrack,
+    loginCoordinator: LoginCoordinator
+  ) {
+    guard !loginCoordinator.isBusy, !isLoading else { return }
+    guard let account = loginCoordinator.account else {
+      status = "Validate the session before changing liked songs"
+      return
+    }
+
+    let currentGeneration = generation
+    isLoading = true
+    status = liked ? "Liking the track (1 request)" : "Unliking the track (1 request)"
+    loadTask = Task {
+      await perform(
+        account: account,
+        generation: currentGeneration,
+        loginCoordinator: loginCoordinator,
+        invalidateOnService301: false,
+        operation: liked ? "Like" : "Unlike"
+      ) { credential in
+        try await self.session.setSongLiked(
+          songID: track.id,
+          liked: liked,
+          credential: credential
+        )
+        guard
+          try await self.sessionRemainsCurrent(
+            account: account,
+            credential: credential,
+            generation: currentGeneration,
+            loginCoordinator: loginCoordinator
+          )
+        else { return }
+
+        if self.likedIDs != nil {
+          if liked {
+            self.likedIDs?.insert(track.id)
+          } else {
+            self.likedIDs?.remove(track.id)
+          }
+        }
+        self.status =
+          (liked ? "Liked " : "Unliked ") + track.name
+          + (self.likedIDs == nil ? "; load liked IDs to see hearts" : "")
+      }
+    }
+  }
+
   func reset() {
     generation += 1
     loadTask?.cancel()

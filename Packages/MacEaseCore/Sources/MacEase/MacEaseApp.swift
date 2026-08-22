@@ -272,15 +272,7 @@ private struct PlaylistLibraryView: View {
                   let track = library.tracks[index]
                   HStack {
                     VStack(alignment: .leading, spacing: 3) {
-                      HStack(spacing: 5) {
-                        Text(track.name)
-                        if library.likedIDs?.contains(track.id) == true {
-                          Image(systemName: "heart.fill")
-                            .font(.caption)
-                            .foregroundStyle(.red)
-                            .help("In your liked songs")
-                        }
-                      }
+                      Text(track.name)
                       if !track.artists.isEmpty {
                         Text(track.artists.joined(separator: ", "))
                           .font(.caption)
@@ -288,6 +280,19 @@ private struct PlaylistLibraryView: View {
                       }
                     }
                     Spacer()
+                    let isLiked = library.likedIDs?.contains(track.id) == true
+                    Button {
+                      library.setLiked(!isLiked, for: track, loginCoordinator: session)
+                    } label: {
+                      Image(systemName: isLiked ? "heart.fill" : "heart")
+                        .foregroundStyle(isLiked ? .red : .secondary)
+                    }
+                    .buttonStyle(.borderless)
+                    .disabled(session.account == nil || requestInFlight)
+                    .help(
+                      isLiked
+                        ? "Unlike · 1 request" : "Like · 1 request"
+                    )
                     Button("Play · 1 request", systemImage: "play.fill") {
                       playback.play(
                         tracks: library.tracks,

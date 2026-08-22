@@ -183,6 +183,9 @@ public actor NeteaseSession {
   private static let similarSongsURL = URL(
     string: "https://music.163.com/weapi/v1/discovery/simiSong"
   )!
+  private static let likeSongURL = URL(
+    string: "https://music.163.com/weapi/radio/like"
+  )!
 
   private let redirectBlocker: RedirectBlocker
   private let urlSession: URLSession
@@ -361,6 +364,26 @@ public actor NeteaseSession {
     )
     let (data, response) = try await urlSession.data(for: request)
     return try Self.classifySimilarSongs(
+      data: data,
+      response: response as! HTTPURLResponse
+    )
+  }
+
+  /// The first write endpoint: it mutates the server-side liked-songs list.
+  /// Registered under init.md §3.2 and approved 2026-08-22. No automatic
+  /// retry: any non-200 is reported to the user and stops.
+  package func setSongLiked(
+    songID: Int64,
+    liked: Bool,
+    credential: NeteaseCredential
+  ) async throws {
+    let request = try Self.likeSongRequest(
+      songID: songID,
+      liked: liked,
+      credential: credential
+    )
+    let (data, response) = try await urlSession.data(for: request)
+    try Self.classifyLikeSong(
       data: data,
       response: response as! HTTPURLResponse
     )
@@ -802,6 +825,35 @@ public actor NeteaseSession {
       }
   }
 
+  package static func likeSongRequest(
+    songID: Int64,
+    liked: Bool,
+    credential: NeteaseCredential,
+    secretKey: String? = nil
+  ) throws -> URLRequest {
+    let json = try likeSongJSON(songID: songID, liked: liked, credential: credential)
+    return weapiRequest(
+      url: likeSongURL,
+      parameters: weapiParameters(json: json, secretKey: secretKey),
+      credential: credential
+    )
+  }
+
+  /// Success is `code == 200` only; the body carries no other useful field.
+  package static func classifyLikeSong(
+    data: Data,
+    response: HTTPURLResponse
+  ) throws {
+    guard (200..<300).contains(response.statusCode) else {
+      throw NeteaseServiceError(source: .http, statusCode: response.statusCode)
+    }
+
+    let code = try JSONDecoder().decode(ServiceCodePayload.self, from: data).code
+    guard code == 200 else {
+      throw NeteaseServiceError(source: .service, statusCode: code)
+    }
+  }
+
   package static func classifyAudioProbe(
     response: HTTPURLResponse
   ) -> AudioURLProbeResult {
@@ -1035,6 +1087,20 @@ public actor NeteaseSession {
       as: UTF8.self
     )
     return #"{"songid":\#(songID),"limit":50,"offset":0,"csrf_token":\#(csrf)}"#
+  }
+
+  /// `like` is a JSON boolean and `time` a string, per the locked `like.js`.
+  private static func likeSongJSON(
+    songID: Int64,
+    liked: Bool,
+    credential: NeteaseCredential
+  ) throws -> String {
+    let csrf = String(
+      decoding: try JSONEncoder().encode(credential.csrf?.value ?? ""),
+      as: UTF8.self
+    )
+    return
+      #"{"alg":"itembased","trackId":\#(songID),"like":\#(liked),"time":"3","csrf_token":\#(csrf)}"#
   }
 
   private static func eapiHeaderFields(

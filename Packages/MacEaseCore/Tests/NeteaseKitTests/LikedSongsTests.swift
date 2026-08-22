@@ -8,6 +8,87 @@ private let likedCredential = NeteaseCredential(
   csrf: NeteaseCookie(name: .csrf, value: "csrf-test")
 )
 
+@Test func likeSongRequestSendsTheLockedWriteContract() throws {
+  let liked = try NeteaseSession.likeSongRequest(
+    songID: 33_894_312,
+    liked: true,
+    credential: likedCredential,
+    secretKey: "0123456789abcdef"
+  )
+  // `like` is a JSON boolean and `time` a string, per the locked like.js.
+  let likedParameters = NeteaseCrypto.weapi(
+    json:
+      #"{"alg":"itembased","trackId":33894312,"like":true,"time":"3","csrf_token":"csrf-test"}"#,
+    secretKey: "0123456789abcdef"
+  )
+
+  #expect(liked.url?.absoluteString == "https://music.163.com/weapi/radio/like")
+  #expect(liked.httpMethod == "POST")
+  #expect(liked.value(forHTTPHeaderField: "Cookie") == "MUSIC_U=music-u-test; __csrf=csrf-test")
+  #expect(
+    String(decoding: liked.httpBody!, as: UTF8.self)
+      == String(
+        decoding: FormURLEncoder.encode([
+          ("params", likedParameters.params),
+          ("encSecKey", likedParameters.encSecKey),
+        ]),
+        as: UTF8.self
+      )
+  )
+
+  let unliked = try NeteaseSession.likeSongRequest(
+    songID: 33_894_312,
+    liked: false,
+    credential: likedCredential,
+    secretKey: "0123456789abcdef"
+  )
+  let unlikedParameters = NeteaseCrypto.weapi(
+    json:
+      #"{"alg":"itembased","trackId":33894312,"like":false,"time":"3","csrf_token":"csrf-test"}"#,
+    secretKey: "0123456789abcdef"
+  )
+  #expect(
+    String(decoding: unliked.httpBody!, as: UTF8.self)
+      == String(
+        decoding: FormURLEncoder.encode([
+          ("params", unlikedParameters.params),
+          ("encSecKey", unlikedParameters.encSecKey),
+        ]),
+        as: UTF8.self
+      )
+  )
+  #expect(unliked.httpBody != liked.httpBody)
+}
+
+@Test func likeSongTreatsOnlyCode200AsSuccess() throws {
+  let okResponse = HTTPURLResponse(
+    url: URL(string: "https://music.163.com")!,
+    statusCode: 200,
+    httpVersion: nil,
+    headerFields: nil
+  )!
+  let failedHTTPResponse = HTTPURLResponse(
+    url: URL(string: "https://music.163.com")!,
+    statusCode: 502,
+    httpVersion: nil,
+    headerFields: nil
+  )!
+
+  try NeteaseSession.classifyLikeSong(
+    data: Data(#"{"code":200}"#.utf8),
+    response: okResponse
+  )
+  #expect(throws: NeteaseServiceError(source: .service, statusCode: 301)) {
+    try NeteaseSession.classifyLikeSong(
+      data: Data(#"{"code":301}"#.utf8),
+      response: okResponse
+    )
+  }
+  #expect(throws: NeteaseServiceError(source: .http, statusCode: 502)) {
+    try NeteaseSession.classifyLikeSong(data: Data(), response: failedHTTPResponse)
+  }
+}
+
 @Test func likedSongIDsRequestUsesExplicitUserAndSessionContext() throws {
   let request = try NeteaseSession.likedSongIDsRequest(
     userID: 987_654_321,
