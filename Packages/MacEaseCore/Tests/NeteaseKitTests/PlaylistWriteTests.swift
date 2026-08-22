@@ -157,6 +157,47 @@ private let eapiHeader =
   )
 }
 
+@Test func subscribeUsesDistinctPathsAndNoAntiCheatToken() throws {
+  let subscribe = try NeteaseSession.subscribePlaylistRequest(
+    true,
+    playlistID: 24_381_616,
+    credential: writeCredential,
+    osVersion: "15.5",
+    buildVersion: "1722945678",
+    requestID: "1722945678123_0042"
+  )
+  let json = #"{"id":24381616,"e_r":false,"header":\#(eapiHeader)}"#
+
+  #expect(
+    subscribe.url?.absoluteString
+      == "https://interfacepc.music.163.com/eapi/playlist/subscribe"
+  )
+  #expect(
+    String(decoding: subscribe.httpBody!, as: UTF8.self)
+      == "params=" + NeteaseCrypto.eapi(path: "/api/playlist/subscribe", json: json)
+  )
+
+  let unsubscribe = try NeteaseSession.subscribePlaylistRequest(
+    false,
+    playlistID: 24_381_616,
+    credential: writeCredential,
+    osVersion: "15.5",
+    buildVersion: "1722945678",
+    requestID: "1722945678123_0042"
+  )
+  #expect(
+    unsubscribe.url?.absoluteString
+      == "https://interfacepc.music.163.com/eapi/playlist/unsubscribe"
+  )
+  // The reference implementation attaches a Yidun anti-cheat token obtained by
+  // spoofing browser fingerprints. MacEase never sends one.
+  #expect(subscribe.value(forHTTPHeaderField: "X-antiCheatToken") == nil)
+  #expect(unsubscribe.value(forHTTPHeaderField: "X-antiCheatToken") == nil)
+  let cookie = subscribe.value(forHTTPHeaderField: "Cookie") ?? ""
+  #expect(!cookie.contains("checkToken"))
+  #expect(!cookie.contains("deviceId"))
+}
+
 @Test func writeAcknowledgementAcceptsOnlyCode200() throws {
   try NeteaseSession.classifyWriteAcknowledgement(
     data: Data(#"{"code":200}"#.utf8),

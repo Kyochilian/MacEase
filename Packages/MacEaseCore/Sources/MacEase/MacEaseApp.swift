@@ -261,6 +261,20 @@ private struct PlaylistLibraryView: View {
                   .buttonStyle(.borderless)
                   .disabled(requestInFlight)
                   .help("Delete playlist · 1 request")
+                } else {
+                  Button {
+                    library.setSubscribed(
+                      false,
+                      playlistID: playlist.id,
+                      playlistName: playlist.name,
+                      loginCoordinator: session
+                    )
+                  } label: {
+                    Image(systemName: "minus.circle")
+                  }
+                  .buttonStyle(.borderless)
+                  .disabled(requestInFlight)
+                  .help("Unsubscribe from this saved playlist · 1 request")
                 }
               }
               .padding(.vertical, 3)
@@ -591,6 +605,19 @@ private struct DiscoverView: View {
         }
         .buttonStyle(.borderless)
         .disabled(loadDisabled)
+        Button {
+          library.setSubscribed(
+            true,
+            playlistID: playlist.id,
+            playlistName: playlist.name,
+            loginCoordinator: session
+          )
+        } label: {
+          Image(systemName: "plus.circle")
+        }
+        .buttonStyle(.borderless)
+        .disabled(loadDisabled)
+        .help("Subscribe to this playlist · 1 request")
       }
     }
   }

@@ -406,6 +406,34 @@ final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
     }
   }
 
+  /// Subscribes to a playlist discovered elsewhere (1 request). See
+  /// `NeteaseSession.setPlaylistSubscribed` for the anti-cheat token note: a
+  /// `-460` here means the endpoint demands one and the action simply stops.
+  func setSubscribed(
+    _ subscribed: Bool,
+    playlistID: Int64,
+    playlistName: String,
+    loginCoordinator: LoginCoordinator
+  ) {
+    write(
+      loadingStatus: subscribed
+        ? "Subscribing to the playlist (1 request)"
+        : "Unsubscribing from the playlist (1 request)",
+      operation: subscribed ? "Subscribe" : "Unsubscribe",
+      loginCoordinator: loginCoordinator
+    ) { credential in
+      try await self.session.setPlaylistSubscribed(
+        subscribed,
+        playlistID: playlistID,
+        credential: credential
+      )
+      return {
+        (subscribed ? "Subscribed to " : "Unsubscribed from ") + playlistName
+          + "; Load Playlists to refresh"
+      }
+    }
+  }
+
   /// The write body performs the request and returns the local-state update,
   /// which runs only after the postflight session check passes.
   private func write(

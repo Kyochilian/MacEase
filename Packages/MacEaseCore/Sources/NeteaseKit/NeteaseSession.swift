@@ -207,6 +207,14 @@ public actor NeteaseSession {
     path: "/api/batch",
     url: URL(string: "https://interfacepc.music.163.com/eapi/batch")!
   )
+  private static let subscribePlaylistEndpoint = EndpointDescriptor(
+    path: "/api/playlist/subscribe",
+    url: URL(string: "https://interfacepc.music.163.com/eapi/playlist/subscribe")!
+  )
+  private static let unsubscribePlaylistEndpoint = EndpointDescriptor(
+    path: "/api/playlist/unsubscribe",
+    url: URL(string: "https://interfacepc.music.163.com/eapi/playlist/unsubscribe")!
+  )
 
   private let redirectBlocker: RedirectBlocker
   private let urlSession: URLSession
@@ -472,6 +480,35 @@ public actor NeteaseSession {
     let request = try Self.renamePlaylistRequest(
       playlistID: playlistID,
       name: name,
+      credential: credential,
+      osVersion: Self.osVersion,
+      buildVersion: String(Int(timestamp)),
+      requestID: Self.requestID(timestamp: timestamp)
+    )
+    let (data, response) = try await urlSession.data(for: request)
+    try Self.classifyWriteAcknowledgement(
+      data: data,
+      response: response as! HTTPURLResponse
+    )
+  }
+
+  /// Subscribes to or unsubscribes from someone else's playlist.
+  ///
+  /// The reference implementation forces an anti-cheat (Yidun) token on the
+  /// subscribe branch, which it obtains by running the fingerprinting SDK in a
+  /// spoofed browser. MacEase does not do that and sends the same honest
+  /// platform identity every other write uses. Whether the endpoint actually
+  /// requires the token is decided by live test: a `-460` here means it does,
+  /// and the feature stops rather than gaining a spoofed fingerprint.
+  package func setPlaylistSubscribed(
+    _ subscribed: Bool,
+    playlistID: Int64,
+    credential: NeteaseCredential
+  ) async throws {
+    let timestamp = Date().timeIntervalSince1970
+    let request = try Self.subscribePlaylistRequest(
+      subscribed,
+      playlistID: playlistID,
       credential: credential,
       osVersion: Self.osVersion,
       buildVersion: String(Int(timestamp)),
@@ -1036,6 +1073,29 @@ public actor NeteaseSession {
       #"{"/api/playlist/update/name":\#(encodedInner),"e_r":false,"header":\#(header)}"#
     return eapiRequest(
       endpoint: batchEndpoint,
+      json: json,
+      headerFields: headerFields
+    )
+  }
+
+  package static func subscribePlaylistRequest(
+    _ subscribed: Bool,
+    playlistID: Int64,
+    credential: NeteaseCredential,
+    osVersion: String,
+    buildVersion: String,
+    requestID: String
+  ) throws -> URLRequest {
+    let headerFields = eapiHeaderFields(
+      credential: credential,
+      osVersion: osVersion,
+      buildVersion: buildVersion,
+      requestID: requestID
+    )
+    let header = try eapiHeaderJSON(headerFields)
+    let json = #"{"id":\#(playlistID),"e_r":false,"header":\#(header)}"#
+    return eapiRequest(
+      endpoint: subscribed ? subscribePlaylistEndpoint : unsubscribePlaylistEndpoint,
       json: json,
       headerFields: headerFields
     )
