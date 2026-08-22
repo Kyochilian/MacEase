@@ -292,6 +292,159 @@ final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
     }
   }
 
+  /// Playlist write actions (1 request each). None of them triggers an
+  /// automatic reload: the user reloads explicitly, so the request count stays
+  /// exactly what the button promises.
+  func createPlaylist(named name: String, loginCoordinator: LoginCoordinator) {
+    let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { return }
+    write(
+      loadingStatus: "Creating the playlist (1 request)",
+      operation: "Create playlist",
+      loginCoordinator: loginCoordinator
+    ) { credential in
+      try await self.session.createPlaylist(name: trimmed, credential: credential)
+      return { "Created \(trimmed); Load Playlists to see it" }
+    }
+  }
+
+  func deletePlaylist(_ playlist: UserPlaylist, loginCoordinator: LoginCoordinator) {
+    write(
+      loadingStatus: "Deleting the playlist (1 request)",
+      operation: "Delete playlist",
+      loginCoordinator: loginCoordinator
+    ) { credential in
+      try await self.session.deletePlaylist(
+        playlistID: playlist.id,
+        credential: credential
+      )
+      return {
+        self.playlists.removeAll { $0.id == playlist.id }
+        if self.selectedPlaylist?.id == playlist.id {
+          self.clearDetail()
+        }
+        return "Deleted \(playlist.name)"
+      }
+    }
+  }
+
+  func renameSelectedPlaylist(to name: String, loginCoordinator: LoginCoordinator) {
+    let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard let playlist = selectedPlaylist, !trimmed.isEmpty,
+      trimmed != playlist.name
+    else { return }
+    write(
+      loadingStatus: "Renaming the playlist (1 request)",
+      operation: "Rename playlist",
+      loginCoordinator: loginCoordinator
+    ) { credential in
+      try await self.session.renamePlaylist(
+        playlistID: playlist.id,
+        name: trimmed,
+        credential: credential
+      )
+      return {
+        let renamed = UserPlaylist(
+          id: playlist.id,
+          name: trimmed,
+          trackCount: playlist.trackCount,
+          owned: playlist.owned
+        )
+        self.selectedPlaylist = renamed
+        if let index = self.playlists.firstIndex(where: { $0.id == playlist.id }) {
+          self.playlists[index] = renamed
+        }
+        return "Renamed to \(trimmed)"
+      }
+    }
+  }
+
+  func addTrack(
+    _ track: PlaylistTrack,
+    to playlist: UserPlaylist,
+    loginCoordinator: LoginCoordinator
+  ) {
+    write(
+      loadingStatus: "Adding the track (1 request)",
+      operation: "Add track",
+      loginCoordinator: loginCoordinator
+    ) { credential in
+      try await self.session.editPlaylistTracks(
+        .add,
+        playlistID: playlist.id,
+        trackIDs: [track.id],
+        credential: credential
+      )
+      return { "Added \(track.name) to \(playlist.name)" }
+    }
+  }
+
+  /// Removes from the currently selected playlist and drops the row locally;
+  /// the detail list is not refetched.
+  func removeSelectedPlaylistTrack(at index: Int, loginCoordinator: LoginCoordinator) {
+    guard let playlist = selectedPlaylist, tracks.indices.contains(index) else {
+      return
+    }
+    let track = tracks[index]
+    write(
+      loadingStatus: "Removing the track (1 request)",
+      operation: "Remove track",
+      loginCoordinator: loginCoordinator
+    ) { credential in
+      try await self.session.editPlaylistTracks(
+        .del,
+        playlistID: playlist.id,
+        trackIDs: [track.id],
+        credential: credential
+      )
+      return {
+        if self.tracks.indices.contains(index), self.tracks[index].id == track.id {
+          self.tracks.remove(at: index)
+        }
+        return "Removed \(track.name) from \(playlist.name)"
+      }
+    }
+  }
+
+  /// The write body performs the request and returns the local-state update,
+  /// which runs only after the postflight session check passes.
+  private func write(
+    loadingStatus: String,
+    operation: String,
+    loginCoordinator: LoginCoordinator,
+    body: @escaping @MainActor (NeteaseCredential) async throws -> @MainActor () -> String
+  ) {
+    guard !loginCoordinator.isBusy, !isLoading else { return }
+    guard let account = loginCoordinator.account else {
+      status = "Validate the session before changing playlists"
+      return
+    }
+
+    let currentGeneration = generation
+    isLoading = true
+    status = loadingStatus
+    loadTask = Task {
+      await perform(
+        account: account,
+        generation: currentGeneration,
+        loginCoordinator: loginCoordinator,
+        invalidateOnService301: false,
+        operation: operation
+      ) { credential in
+        let apply = try await body(credential)
+        guard
+          try await self.sessionRemainsCurrent(
+            account: account,
+            credential: credential,
+            generation: currentGeneration,
+            loginCoordinator: loginCoordinator
+          )
+        else { return }
+        self.status = apply()
+      }
+    }
+  }
+
   func reset() {
     generation += 1
     loadTask?.cancel()

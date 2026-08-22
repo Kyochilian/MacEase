@@ -130,6 +130,11 @@ package struct LyricsProbeOutcome: Equatable, Sendable {
   package let setsCookie: Bool
 }
 
+package enum PlaylistTrackEdit: String, Sendable {
+  case add
+  case del
+}
+
 public actor NeteaseSession {
   package static let songDetailRequestLimit = 1000
 
@@ -186,6 +191,22 @@ public actor NeteaseSession {
   private static let likeSongURL = URL(
     string: "https://music.163.com/weapi/radio/like"
   )!
+  private static let createPlaylistURL = URL(
+    string: "https://music.163.com/weapi/playlist/create"
+  )!
+  private static let deletePlaylistURL = URL(
+    string: "https://music.163.com/weapi/playlist/remove"
+  )!
+  private static let manipulateTracksEndpoint = EndpointDescriptor(
+    path: "/api/playlist/manipulate/tracks",
+    url: URL(
+      string: "https://interfacepc.music.163.com/eapi/playlist/manipulate/tracks"
+    )!
+  )
+  private static let batchEndpoint = EndpointDescriptor(
+    path: "/api/batch",
+    url: URL(string: "https://interfacepc.music.163.com/eapi/batch")!
+  )
 
   private let redirectBlocker: RedirectBlocker
   private let urlSession: URLSession
@@ -384,6 +405,80 @@ public actor NeteaseSession {
     )
     let (data, response) = try await urlSession.data(for: request)
     try Self.classifyLikeSong(
+      data: data,
+      response: response as! HTTPURLResponse
+    )
+  }
+
+  /// Creates a playlist. The response carries the new id, but MacEase does not
+  /// decode it: the user reloads the list explicitly, so no follow-up request
+  /// is issued automatically.
+  package func createPlaylist(
+    name: String,
+    credential: NeteaseCredential
+  ) async throws {
+    let request = try Self.createPlaylistRequest(name: name, credential: credential)
+    let (data, response) = try await urlSession.data(for: request)
+    try Self.classifyWriteAcknowledgement(
+      data: data,
+      response: response as! HTTPURLResponse
+    )
+  }
+
+  package func deletePlaylist(
+    playlistID: Int64,
+    credential: NeteaseCredential
+  ) async throws {
+    let request = try Self.deletePlaylistRequest(
+      playlistID: playlistID,
+      credential: credential
+    )
+    let (data, response) = try await urlSession.data(for: request)
+    try Self.classifyWriteAcknowledgement(
+      data: data,
+      response: response as! HTTPURLResponse
+    )
+  }
+
+  package func editPlaylistTracks(
+    _ edit: PlaylistTrackEdit,
+    playlistID: Int64,
+    trackIDs: [Int64],
+    credential: NeteaseCredential
+  ) async throws {
+    let timestamp = Date().timeIntervalSince1970
+    let request = try Self.editPlaylistTracksRequest(
+      edit,
+      playlistID: playlistID,
+      trackIDs: trackIDs,
+      credential: credential,
+      osVersion: Self.osVersion,
+      buildVersion: String(Int(timestamp)),
+      requestID: Self.requestID(timestamp: timestamp)
+    )
+    let (data, response) = try await urlSession.data(for: request)
+    try Self.classifyWriteAcknowledgement(
+      data: data,
+      response: response as! HTTPURLResponse
+    )
+  }
+
+  package func renamePlaylist(
+    playlistID: Int64,
+    name: String,
+    credential: NeteaseCredential
+  ) async throws {
+    let timestamp = Date().timeIntervalSince1970
+    let request = try Self.renamePlaylistRequest(
+      playlistID: playlistID,
+      name: name,
+      credential: credential,
+      osVersion: Self.osVersion,
+      buildVersion: String(Int(timestamp)),
+      requestID: Self.requestID(timestamp: timestamp)
+    )
+    let (data, response) = try await urlSession.data(for: request)
+    try Self.classifyWriteAcknowledgement(
       data: data,
       response: response as! HTTPURLResponse
     )
@@ -845,6 +940,115 @@ public actor NeteaseSession {
     data: Data,
     response: HTTPURLResponse
   ) throws {
+    try classifyWriteAcknowledgement(data: data, response: response)
+  }
+
+  package static func createPlaylistRequest(
+    name: String,
+    credential: NeteaseCredential,
+    secretKey: String? = nil
+  ) throws -> URLRequest {
+    let encodedName = String(decoding: try JSONEncoder().encode(name), as: UTF8.self)
+    let csrf = try csrfJSONValue(credential)
+    let json =
+      #"{"name":\#(encodedName),"privacy":"0","type":"NORMAL","csrf_token":\#(csrf)}"#
+    return weapiRequest(
+      url: createPlaylistURL,
+      parameters: weapiParameters(json: json, secretKey: secretKey),
+      credential: credential,
+      platformContext: true
+    )
+  }
+
+  package static func deletePlaylistRequest(
+    playlistID: Int64,
+    credential: NeteaseCredential,
+    secretKey: String? = nil
+  ) throws -> URLRequest {
+    let ids = String(
+      decoding: try JSONEncoder().encode("[\(playlistID)]"),
+      as: UTF8.self
+    )
+    let csrf = try csrfJSONValue(credential)
+    let json = #"{"ids":\#(ids),"csrf_token":\#(csrf)}"#
+    return weapiRequest(
+      url: deletePlaylistURL,
+      parameters: weapiParameters(json: json, secretKey: secretKey),
+      credential: credential,
+      platformContext: true
+    )
+  }
+
+  package static func editPlaylistTracksRequest(
+    _ edit: PlaylistTrackEdit,
+    playlistID: Int64,
+    trackIDs: [Int64],
+    credential: NeteaseCredential,
+    osVersion: String,
+    buildVersion: String,
+    requestID: String
+  ) throws -> URLRequest {
+    guard !trackIDs.isEmpty else {
+      throw NeteaseCatalogError.invalidSongDetailRequestCount(0)
+    }
+    let headerFields = eapiHeaderFields(
+      credential: credential,
+      osVersion: osVersion,
+      buildVersion: buildVersion,
+      requestID: requestID
+    )
+    let header = try eapiHeaderJSON(headerFields)
+    let list = "[" + trackIDs.map(String.init).joined(separator: ",") + "]"
+    let encodedList = String(decoding: try JSONEncoder().encode(list), as: UTF8.self)
+    let json =
+      #"{"op":"\#(edit.rawValue)","pid":\#(playlistID),"trackIds":\#(encodedList),"#
+      + #""imme":"true","e_r":false,"header":\#(header)}"#
+    return eapiRequest(
+      endpoint: manipulateTracksEndpoint,
+      json: json,
+      headerFields: headerFields
+    )
+  }
+
+  /// Sends only the name sub-request. The reference implementation always also
+  /// sends desc and tags defaulted to empty strings, which silently wipes an
+  /// existing description and tag list; MacEase must not destroy data the user
+  /// did not ask to change.
+  package static func renamePlaylistRequest(
+    playlistID: Int64,
+    name: String,
+    credential: NeteaseCredential,
+    osVersion: String,
+    buildVersion: String,
+    requestID: String
+  ) throws -> URLRequest {
+    let headerFields = eapiHeaderFields(
+      credential: credential,
+      osVersion: osVersion,
+      buildVersion: buildVersion,
+      requestID: requestID
+    )
+    let header = try eapiHeaderJSON(headerFields)
+    let encodedName = String(decoding: try JSONEncoder().encode(name), as: UTF8.self)
+    let inner = #"{"id":\#(playlistID),"name":\#(encodedName)}"#
+    let encodedInner = String(decoding: try JSONEncoder().encode(inner), as: UTF8.self)
+    let json =
+      #"{"/api/playlist/update/name":\#(encodedInner),"e_r":false,"header":\#(header)}"#
+    return eapiRequest(
+      endpoint: batchEndpoint,
+      json: json,
+      headerFields: headerFields
+    )
+  }
+
+  /// Every write endpoint acknowledges with `code == 200` and carries no other
+  /// field MacEase uses. Anything else is reported and stops; in particular the
+  /// reference implementation's automatic resend on 512 is deliberately not
+  /// copied, since automatic retries are forbidden.
+  package static func classifyWriteAcknowledgement(
+    data: Data,
+    response: HTTPURLResponse
+  ) throws {
     guard (200..<300).contains(response.statusCode) else {
       throw NeteaseServiceError(source: .http, statusCode: response.statusCode)
     }
@@ -1161,6 +1365,15 @@ public actor NeteaseSession {
   ) -> WeAPIParameters {
     secretKey.map { NeteaseCrypto.weapi(json: json, secretKey: $0) }
       ?? NeteaseCrypto.weapi(json: json)
+  }
+
+  private static func csrfJSONValue(
+    _ credential: NeteaseCredential
+  ) throws -> String {
+    String(
+      decoding: try JSONEncoder().encode(credential.csrf?.value ?? ""),
+      as: UTF8.self
+    )
   }
 
   /// MacEase's own platform identity, matching what the already-verified eapi

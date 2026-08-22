@@ -1,0 +1,178 @@
+import Foundation
+import Testing
+
+@testable import NeteaseKit
+
+private let writeCredential = NeteaseCredential(
+  musicU: NeteaseCookie(name: .musicU, value: "music-u-test"),
+  csrf: NeteaseCookie(name: .csrf, value: "csrf-test")
+)
+
+private let okResponse = HTTPURLResponse(
+  url: URL(string: "https://music.163.com")!,
+  statusCode: 200,
+  httpVersion: nil,
+  headerFields: nil
+)!
+
+private func expectWeAPIWriteBody(
+  _ request: URLRequest,
+  json: String,
+  secretKey: String = "0123456789abcdef"
+) {
+  let parameters = NeteaseCrypto.weapi(json: json, secretKey: secretKey)
+  #expect(
+    String(decoding: request.httpBody!, as: UTF8.self)
+      == String(
+        decoding: FormURLEncoder.encode([
+          ("params", parameters.params),
+          ("encSecKey", parameters.encSecKey),
+        ]),
+        as: UTF8.self
+      )
+  )
+}
+
+private let eapiHeader =
+  #"{"osver":"15.5","os":"osx","appver":"0.1","buildver":"1722945678","#
+  + #""__csrf":"csrf-test","channel":"github","#
+  + #""requestId":"1722945678123_0042","MUSIC_U":"music-u-test"}"#
+
+@Test func createPlaylistRequestUsesTheLockedContract() throws {
+  let request = try NeteaseSession.createPlaylistRequest(
+    name: "Test List",
+    credential: writeCredential,
+    secretKey: "0123456789abcdef"
+  )
+
+  #expect(request.url?.absoluteString == "https://music.163.com/weapi/playlist/create")
+  expectWeAPIWriteBody(
+    request,
+    json:
+      #"{"name":"Test List","privacy":"0","type":"NORMAL","csrf_token":"csrf-test"}"#
+  )
+  // Writes carry MacEase's own platform identity, never a fabricated device ID.
+  let cookie = request.value(forHTTPHeaderField: "Cookie") ?? ""
+  #expect(cookie.contains("os=osx"))
+  #expect(!cookie.contains("deviceId"))
+}
+
+@Test func createPlaylistEscapesNamesThatWouldBreakJSON() throws {
+  let request = try NeteaseSession.createPlaylistRequest(
+    name: #"quote " and \ backslash"#,
+    credential: writeCredential,
+    secretKey: "0123456789abcdef"
+  )
+  expectWeAPIWriteBody(
+    request,
+    json:
+      #"{"name":"quote \" and \\ backslash","privacy":"0","type":"NORMAL","csrf_token":"csrf-test"}"#
+  )
+}
+
+@Test func deletePlaylistRequestWrapsTheIDList() throws {
+  let request = try NeteaseSession.deletePlaylistRequest(
+    playlistID: 24_381_616,
+    credential: writeCredential,
+    secretKey: "0123456789abcdef"
+  )
+
+  #expect(request.url?.absoluteString == "https://music.163.com/weapi/playlist/remove")
+  expectWeAPIWriteBody(
+    request,
+    json: #"{"ids":"[24381616]","csrf_token":"csrf-test"}"#
+  )
+}
+
+@Test func editPlaylistTracksSendsOpAndStringifiedIDs() throws {
+  let add = try NeteaseSession.editPlaylistTracksRequest(
+    .add,
+    playlistID: 24_381_616,
+    trackIDs: [33_894_312, 347_230],
+    credential: writeCredential,
+    osVersion: "15.5",
+    buildVersion: "1722945678",
+    requestID: "1722945678123_0042"
+  )
+  let addJSON =
+    #"{"op":"add","pid":24381616,"trackIds":"[33894312,347230]","#
+    + #""imme":"true","e_r":false,"header":\#(eapiHeader)}"#
+
+  #expect(
+    add.url?.absoluteString
+      == "https://interfacepc.music.163.com/eapi/playlist/manipulate/tracks"
+  )
+  #expect(
+    String(decoding: add.httpBody!, as: UTF8.self)
+      == "params="
+      + NeteaseCrypto.eapi(path: "/api/playlist/manipulate/tracks", json: addJSON)
+  )
+
+  let remove = try NeteaseSession.editPlaylistTracksRequest(
+    .del,
+    playlistID: 24_381_616,
+    trackIDs: [33_894_312],
+    credential: writeCredential,
+    osVersion: "15.5",
+    buildVersion: "1722945678",
+    requestID: "1722945678123_0042"
+  )
+  #expect(remove.httpBody != add.httpBody)
+
+  #expect(throws: (any Error).self) {
+    try NeteaseSession.editPlaylistTracksRequest(
+      .add,
+      playlistID: 1,
+      trackIDs: [],
+      credential: writeCredential,
+      osVersion: "15.5",
+      buildVersion: "1",
+      requestID: "1_0001"
+    )
+  }
+}
+
+@Test func renamePlaylistSendsOnlyTheNameSubRequest() throws {
+  let request = try NeteaseSession.renamePlaylistRequest(
+    playlistID: 24_381_616,
+    name: "Renamed",
+    credential: writeCredential,
+    osVersion: "15.5",
+    buildVersion: "1722945678",
+    requestID: "1722945678123_0042"
+  )
+
+  // Body equality is the real guard: the reference implementation also sends
+  // desc and tags defaulted to empty, which wipes them. If MacEase ever added
+  // those sub-requests, this expected body would no longer match.
+  let inner = #"{"id":24381616,"name":"Renamed"}"#
+  let encodedInner = String(decoding: try JSONEncoder().encode(inner), as: UTF8.self)
+  let json =
+    #"{"/api/playlist/update/name":\#(encodedInner),"e_r":false,"header":\#(eapiHeader)}"#
+
+  #expect(request.url?.absoluteString == "https://interfacepc.music.163.com/eapi/batch")
+  #expect(
+    String(decoding: request.httpBody!, as: UTF8.self)
+      == "params=" + NeteaseCrypto.eapi(path: "/api/batch", json: json)
+  )
+}
+
+@Test func writeAcknowledgementAcceptsOnlyCode200() throws {
+  try NeteaseSession.classifyWriteAcknowledgement(
+    data: Data(#"{"code":200}"#.utf8),
+    response: okResponse
+  )
+  // 512 is the reference implementation's retry trigger; MacEase reports it.
+  #expect(throws: NeteaseServiceError(source: .service, statusCode: 512)) {
+    try NeteaseSession.classifyWriteAcknowledgement(
+      data: Data(#"{"code":512}"#.utf8),
+      response: okResponse
+    )
+  }
+  #expect(throws: NeteaseServiceError(source: .service, statusCode: -460)) {
+    try NeteaseSession.classifyWriteAcknowledgement(
+      data: Data(#"{"code":-460}"#.utf8),
+      response: okResponse
+    )
+  }
+}

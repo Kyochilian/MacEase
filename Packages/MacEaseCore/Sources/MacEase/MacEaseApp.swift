@@ -177,6 +177,9 @@ private struct PlaylistLibraryView: View {
   let library: PlaylistLibraryCoordinator
   let discovery: DiscoveryCoordinator
   let playback: PlaybackController
+  @State private var newPlaylistName = ""
+  @State private var renameText = ""
+  @State private var playlistPendingDeletion: UserPlaylist?
 
   private var requestInFlight: Bool {
     session.isBusy || library.isLoading || discovery.isLoading
@@ -207,6 +210,22 @@ private struct PlaylistLibraryView: View {
       }
       .padding(12)
 
+      HStack {
+        TextField("New playlist name", text: $newPlaylistName)
+          .frame(maxWidth: 240)
+        Button("Create · 1 request", systemImage: "plus.rectangle.on.folder") {
+          library.createPlaylist(named: newPlaylistName, loginCoordinator: session)
+          newPlaylistName = ""
+        }
+        .disabled(
+          session.account == nil || requestInFlight
+            || newPlaylistName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        )
+        Spacer()
+      }
+      .padding(.horizontal, 12)
+      .padding(.bottom, 12)
+
       Divider()
 
       if library.playlists.isEmpty && !library.isLoading {
@@ -233,6 +252,16 @@ private struct PlaylistLibraryView: View {
                 Text("Load Tracks · up to 2 requests")
                   .font(.caption)
                   .foregroundStyle(.secondary)
+                if playlist.owned {
+                  Button {
+                    playlistPendingDeletion = playlist
+                  } label: {
+                    Image(systemName: "trash")
+                  }
+                  .buttonStyle(.borderless)
+                  .disabled(requestInFlight)
+                  .help("Delete playlist · 1 request")
+                }
               }
               .padding(.vertical, 3)
             }
@@ -252,6 +281,22 @@ private struct PlaylistLibraryView: View {
                     .foregroundStyle(.secondary)
                 }
                 Spacer()
+                if playlist.owned {
+                  TextField("Rename", text: $renameText)
+                    .frame(maxWidth: 160)
+                  Button("Rename · 1 request") {
+                    library.renameSelectedPlaylist(
+                      to: renameText,
+                      loginCoordinator: session
+                    )
+                  }
+                  .disabled(
+                    requestInFlight
+                      || renameText.trimmingCharacters(in: .whitespacesAndNewlines)
+                        .isEmpty
+                  )
+                  .help("Changes only the name; description and tags are untouched")
+                }
                 if library.hasMoreTracks {
                   Button("Load More Tracks · 1 request", systemImage: "plus") {
                     library.loadMoreTracks(loginCoordinator: session)
@@ -293,6 +338,38 @@ private struct PlaylistLibraryView: View {
                       isLiked
                         ? "Unlike · 1 request" : "Like · 1 request"
                     )
+                    Menu {
+                      ForEach(library.playlists.filter(\.owned), id: \.id) { target in
+                        Button(target.name) {
+                          library.addTrack(
+                            track,
+                            to: target,
+                            loginCoordinator: session
+                          )
+                        }
+                      }
+                    } label: {
+                      Image(systemName: "text.badge.plus")
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                    .disabled(
+                      requestInFlight || !library.playlists.contains(where: \.owned)
+                    )
+                    .help("Add to one of your playlists · 1 request")
+                    if library.selectedPlaylist?.owned == true {
+                      Button {
+                        library.removeSelectedPlaylistTrack(
+                          at: index,
+                          loginCoordinator: session
+                        )
+                      } label: {
+                        Image(systemName: "minus.circle")
+                      }
+                      .buttonStyle(.borderless)
+                      .disabled(requestInFlight)
+                      .help("Remove from this playlist · 1 request")
+                    }
                     Button("Play · 1 request", systemImage: "play.fill") {
                       playback.play(
                         tracks: library.tracks,
@@ -334,6 +411,27 @@ private struct PlaylistLibraryView: View {
         Spacer()
       }
       .padding(12)
+    }
+    .onChange(of: library.selectedPlaylist?.id) {
+      renameText = library.selectedPlaylist?.name ?? ""
+    }
+    .confirmationDialog(
+      playlistPendingDeletion.map { "Delete \($0.name)?" } ?? "Delete playlist?",
+      isPresented: Binding(
+        get: { playlistPendingDeletion != nil },
+        set: { if !$0 { playlistPendingDeletion = nil } }
+      ),
+      titleVisibility: .visible
+    ) {
+      Button("Delete · 1 request", role: .destructive) {
+        if let playlist = playlistPendingDeletion {
+          library.deletePlaylist(playlist, loginCoordinator: session)
+        }
+        playlistPendingDeletion = nil
+      }
+      Button("Cancel", role: .cancel) { playlistPendingDeletion = nil }
+    } message: {
+      Text("This permanently deletes the playlist from your NetEase account.")
     }
   }
 }
