@@ -48,6 +48,32 @@ public struct ResolvedAudioAsset: Equatable, Sendable {
   public let expiresIn: Int?
   public let fee: Int?
   public let trial: Bool
+
+  package init(
+    songID: Int64,
+    url: URL,
+    sourceScheme: String,
+    requestedQuality: PlaybackQuality,
+    actualQuality: String?,
+    format: String?,
+    bitRate: Int?,
+    byteCount: Int64?,
+    expiresIn: Int?,
+    fee: Int?,
+    trial: Bool
+  ) {
+    self.songID = songID
+    self.url = url
+    self.sourceScheme = sourceScheme
+    self.requestedQuality = requestedQuality
+    self.actualQuality = actualQuality
+    self.format = format
+    self.bitRate = bitRate
+    self.byteCount = byteCount
+    self.expiresIn = expiresIn
+    self.fee = fee
+    self.trial = trial
+  }
 }
 
 public enum SongURLResolution: Equatable, Sendable {

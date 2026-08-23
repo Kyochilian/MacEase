@@ -953,10 +953,15 @@ private struct PlaybackBarView: View {
         .help("Applies to the next explicit Play")
         .disabled(arbiter.isBusy)
         if playback.canPlayAgain {
-          Button("Play Again · 1 request", systemImage: "arrow.counterclockwise") {
+          Button(
+            playback.retryResumesPlayback
+              ? "Play Again · 1 request" : "Restore Paused · 1 request",
+            systemImage: "arrow.counterclockwise"
+          ) {
             playback.playAgain(session: session)
           }
           .disabled(session.account == nil || requestInFlight)
+          .help("Re-resolves the song URL; the expired one is never reused")
         }
         if playback.isActive {
           Button("Stop", systemImage: "stop.fill") {

@@ -364,3 +364,86 @@ final class FakeSession: SessionProviding {
     return invalidationResult
   }
 }
+
+// MARK: - Audio
+
+/// Stands in for AVPlayer. Nothing here touches real media, so the recovery
+/// rules can be exercised deterministically.
+@MainActor
+final class FakeAudioOutput: AudioOutput {
+  struct LoadFailure: Error, Equatable {
+    let reason: String
+  }
+
+  var volume: Float = 1
+  var isMuted = false
+  var currentPositionSeconds: Double?
+
+  var onPositionUpdate: (@MainActor (Double) -> Void)?
+  var onPlayedToEnd: (@MainActor () -> Void)?
+  var onFailure: (@MainActor (String) -> Void)?
+
+  /// Programmed answer for the next `prepare`.
+  var prepareResult: Result<AudioAssetInfo, any Error> = .success(
+    AudioAssetInfo(isPlayable: true, durationSeconds: 200)
+  )
+  private(set) var preparedURLs: [URL] = []
+  private(set) var isPlaying = false
+  private(set) var seeks: [Double] = []
+  private(set) var teardownCount = 0
+
+  func prepare(url: URL, userAgent: String) async throws -> AudioAssetInfo {
+    preparedURLs.append(url)
+    return try prepareResult.get()
+  }
+
+  func play() { isPlaying = true }
+
+  func pause() { isPlaying = false }
+
+  func seek(to seconds: Double) async throws {
+    seeks.append(seconds)
+    currentPositionSeconds = seconds
+  }
+
+  func teardown() {
+    isPlaying = false
+    teardownCount += 1
+  }
+
+  // MARK: Test drivers
+
+  func reportPosition(_ seconds: Double) {
+    currentPositionSeconds = seconds
+    onPositionUpdate?(seconds)
+  }
+
+  func reportFailure(_ detail: String) {
+    onFailure?(detail)
+  }
+
+  func reportPlayedToEnd() {
+    onPlayedToEnd?()
+  }
+}
+
+func makeResolvedAsset(
+  songID: Int64,
+  urlString: String = "https://m8.music.126.net/track.mp3"
+) -> SongURLResolution {
+  .resolved(
+    ResolvedAudioAsset(
+      songID: songID,
+      url: URL(string: urlString)!,
+      sourceScheme: "https",
+      requestedQuality: .standard,
+      actualQuality: "standard",
+      format: "mp3",
+      bitRate: 128_000,
+      byteCount: 3_000_000,
+      expiresIn: 1200,
+      fee: 0,
+      trial: false
+    )
+  )
+}

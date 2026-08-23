@@ -1,4 +1,3 @@
-import AVFoundation
 import Foundation
 import NeteaseKit
 import Observation
@@ -34,11 +33,11 @@ package final class PlaybackController {
   @ObservationIgnored private var gate = PlaybackIntentGate()
   @ObservationIgnored private var rng = SystemRandomNumberGenerator()
   @ObservationIgnored private var playTask: Task<Void, Never>?
-  @ObservationIgnored private var player: AVPlayer?
-  @ObservationIgnored private var periodicObserver: Any?
-  @ObservationIgnored private var itemStatusObservation: NSKeyValueObservation?
-  @ObservationIgnored private var playedToEndObserver: NSObjectProtocol?
-  @ObservationIgnored private var recoverySnapshot: PlaybackRecoverySnapshot?
+  @ObservationIgnored private let output: any AudioOutput
+  @ObservationIgnored private var hasLoadedItem = false
+  /// The retry entry point for the track being attempted. Created before the
+  /// resolve request, cleared only by a terminal failure or a new intent.
+  @ObservationIgnored private var attempt: PlaybackAttempt?
   @ObservationIgnored private var currentAssetSummary: String?
   @ObservationIgnored private var activeToken: PlaybackIntentGate.Token?
   @ObservationIgnored private var queueTracks: [PlaylistTrack] = []
@@ -62,20 +61,23 @@ package final class PlaybackController {
 
   package var volume: Float = 1 {
     didSet {
-      player?.volume = volume
+      output.volume = volume
       UserDefaults.standard.set(Double(volume), forKey: Self.volumeDefaultsKey)
     }
   }
 
   package var isMuted = false {
-    didSet { player?.isMuted = isMuted }
+    didSet { output.isMuted = isMuted }
   }
 
   package var isResolving: Bool { phase == .resolving }
   package var isActive: Bool {
     phase == .resolving || phase == .playing || phase == .paused
   }
-  package var canPlayAgain: Bool { phase == .failed && recoverySnapshot != nil }
+  package var canPlayAgain: Bool { phase == .failed && attempt != nil }
+  /// Whether the retry will resume playback or restore a paused track, so the
+  /// button can say which.
+  package var retryResumesPlayback: Bool { attempt?.desiredState != .paused }
   package var canStepNext: Bool { queue?.nextIndex() != nil }
   package var canStepPrevious: Bool { queue?.previousIndex() != nil }
   package var queuePosition: String? {
@@ -92,16 +94,20 @@ package final class PlaybackController {
   package init(
     transport: any NeteaseTransporting,
     vault: any CredentialStoring,
-    arbiter: OperationArbiter
+    arbiter: OperationArbiter,
+    output: any AudioOutput = AVPlayerAudioOutput()
   ) {
     self.transport = transport
     self.vault = vault
     self.arbiter = arbiter
+    self.output = output
     if let stored = UserDefaults.standard.object(forKey: Self.volumeDefaultsKey)
       as? Double
     {
       volume = Float(min(max(stored, 0), 1))
     }
+    output.volume = volume
+    output.isMuted = isMuted
   }
 
   /// Wires the session auto-advance needs for its preflight check.
@@ -153,19 +159,22 @@ package final class PlaybackController {
       status = "Validate the session before playback"
       return
     }
-    guard let snapshot = recoverySnapshot else { return }
+    guard let retry = attempt else { return }
 
     let token = beginIntent()
     guard let operation = claimResolution() else { return }
+    // The attempt survives `beginIntent`, which is what makes an explicit
+    // retry possible after a failure that never produced a player item.
+    attempt = retry
+    _ = queue?.moveTo(retry.queueIndex)
     clearPendingSleepStop()
     phase = .resolving
     status = "Re-resolving song URL (1 request)"
     playTask = Task {
       await resolveAndPlay(
-        songID: snapshot.songID,
-        quality: snapshot.quality,
+        songID: retry.songID,
+        quality: retry.quality,
         account: account,
-        recovery: snapshot,
         session: session,
         token: token,
         operation: operation
@@ -173,23 +182,25 @@ package final class PlaybackController {
     }
   }
 
-    /// Test seam: awaits the task the last explicit action started, so a test
+  /// Test seam: awaits the task the last explicit action started, so a test
   /// can assert on settled state without polling.
   package func settleForTesting() async {
     await playTask?.value
   }
 
-package func pause() {
-    guard phase == .playing, let player else { return }
-    player.pause()
+  package func pause() {
+    guard phase == .playing, hasLoadedItem else { return }
+    output.pause()
     phase = .paused
+    attempt?.desiredState = .paused
     status = "Paused"
   }
 
   package func resume() {
-    guard phase == .paused, let player else { return }
-    player.play()
+    guard phase == .paused, hasLoadedItem else { return }
+    output.play()
     phase = .playing
+    attempt?.desiredState = .playing
     status = currentAssetSummary.map { "Playing: " + $0 } ?? "Playing"
   }
 
@@ -197,16 +208,17 @@ package func pause() {
   package func seek(to seconds: Double) {
     guard
       phase == .playing || phase == .paused,
-      let player,
+      hasLoadedItem,
       let duration = durationSeconds,
       let token = activeToken
     else { return }
 
     let target = min(max(seconds, 0), duration)
     positionSeconds = target
+    attempt?.resumePosition = target
     Task {
       do {
-        try await seek(player, to: target)
+        try await output.seek(to: target)
         try checkCurrent(token)
       } catch {
         // Superseded by a newer seek or intent; the newer owner updates state.
@@ -222,7 +234,8 @@ package func pause() {
       // A song-URL resolve is a read: abandoning it has no server effect.
       releaseResolution(operationToken, outcome: .cancelled)
     }
-    recoverySnapshot = nil
+    // An explicit Stop retires the retry entry point.
+    attempt = nil
     queue = nil
     queueTracks = []
     clearPendingSleepStop()
@@ -294,22 +307,27 @@ package func pause() {
   ) {
     guard queueTracks.indices.contains(index) else { return }
     let track = queueTracks[index]
+    let requestedQuality = quality
     let token = beginIntent()
     guard let operation = claimResolution() else { return }
-    recoverySnapshot = nil
+    // Created before the request leaves, so a resolve that never answers
+    // still has a Play Again entry point.
+    attempt = PlaybackAttempt(
+      songID: track.id,
+      quality: requestedQuality,
+      queueIndex: index
+    )
     trackName = track.name
     phase = .resolving
     status =
       auto
       ? "Auto-playing the next track (1 request)"
       : "Resolving song URL (1 request)"
-    let requestedQuality = quality
     playTask = Task {
       await resolveAndPlay(
         songID: track.id,
         quality: requestedQuality,
         account: account,
-        recovery: nil,
         session: session,
         token: token,
         operation: operation
@@ -344,7 +362,6 @@ package func pause() {
     songID: Int64,
     quality: PlaybackQuality,
     account: NeteaseAccount,
-    recovery: PlaybackRecoverySnapshot?,
     session: any SessionProviding,
     token: PlaybackIntentGate.Token,
     operation: OperationToken
@@ -388,13 +405,15 @@ package func pause() {
       outcome = .applied
       switch resolution {
       case .unavailable(let itemCode, let fee):
-        recoverySnapshot = nil
+        // An explicit catalogue or rights refusal: asking again changes
+        // nothing, so no retry is offered.
+        attempt = nil
         phase = .failed
         status =
           "Track unavailable: itemCode=\(itemCode), "
           + "fee=\(fee.map(String.init) ?? "none"); the queue is not skipped"
       case .resolved(let resolved):
-        try await startPlayback(asset: resolved, recovery: recovery, token: token)
+        try await startPlayback(asset: resolved, token: token)
       }
     } catch {
       outcome = Task.isCancelled ? .cancelled : .failed
@@ -410,98 +429,73 @@ package func pause() {
 
   private func startPlayback(
     asset resolved: ResolvedAudioAsset,
-    recovery: PlaybackRecoverySnapshot?,
     token: PlaybackIntentGate.Token
   ) async throws {
-    let asset = AVURLAsset(
+    // A throw here means the asset could not be loaded at all, most often
+    // because the URL expired. The attempt survives so Play Again can
+    // re-resolve; it is never reused with the stale URL.
+    let info = try await output.prepare(
       url: resolved.url,
-      options: [AVURLAssetHTTPUserAgentKey: "MacEasePhase0/0.1 (macOS 15)"]
+      userAgent: "MacEasePhase0/0.1 (macOS 15)"
     )
-    let (isPlayable, duration) = try await asset.load(.isPlayable, .duration)
     try checkCurrent(token)
-    guard isPlayable else {
-      recoverySnapshot = nil
+    guard info.isPlayable else {
+      output.teardown()
       phase = .failed
       status = "Resolved asset is not playable: " + assetSummary(resolved)
       return
     }
 
-    let item = AVPlayerItem(asset: asset)
-    let player = AVPlayer(playerItem: item)
-    player.volume = volume
-    player.isMuted = isMuted
-    self.player = player
-    observe(item: item, of: player, token: token)
+    hasLoadedItem = true
+    observeOutput(token: token)
 
-    let resumePosition = recovery?.position ?? 0
-    recoverySnapshot = PlaybackRecoverySnapshot(
-      songID: resolved.songID,
-      quality: resolved.requestedQuality,
-      position: resumePosition,
-      shouldResume: true
-    )
+    let resumePosition = attempt?.resumePosition ?? 0
+    let desiredState = attempt?.desiredState ?? .playing
     if resumePosition > 0 {
-      try await seek(player, to: resumePosition)
+      try await output.seek(to: resumePosition)
       try checkCurrent(token)
     }
-    player.play()
     positionSeconds = resumePosition
-    let durationInSeconds = duration.seconds
-    durationSeconds =
-      durationInSeconds.isFinite && durationInSeconds > 0 ? durationInSeconds : nil
+    durationSeconds = info.durationSeconds
     currentAssetSummary = assetSummary(resolved)
-    phase = .playing
-    status = "Playing: " + assetSummary(resolved)
+    switch desiredState {
+    case .playing:
+      output.play()
+      phase = .playing
+      status = "Playing: " + assetSummary(resolved)
+    case .paused:
+      // It failed while paused; restoring it must not start playback.
+      phase = .paused
+      status = "Restored paused: " + assetSummary(resolved)
+    }
   }
 
-  private func observe(
-    item: AVPlayerItem,
-    of player: AVPlayer,
+  private func observeOutput(token: PlaybackIntentGate.Token) {
+    output.onPositionUpdate = { [weak self] seconds in
+      guard let self, self.gate.accepts(token) else { return }
+      self.positionSeconds = seconds
+      self.attempt?.resumePosition = seconds
+    }
+    output.onPlayedToEnd = { [weak self] in
+      self?.handlePlayedToEnd(token: token)
+    }
+    output.onFailure = { [weak self] detail in
+      self?.handleItemFailure(detail: detail, token: token)
+    }
+  }
+
+  private func handleItemFailure(
+    detail: String,
     token: PlaybackIntentGate.Token
   ) {
-    itemStatusObservation = item.observe(\.status, options: [.new]) {
-      [weak self] item, _ in
-      guard item.status == .failed else { return }
-      Task { @MainActor [weak self] in
-        self?.handleItemFailure(token: token)
-      }
-    }
-    playedToEndObserver = NotificationCenter.default.addObserver(
-      forName: AVPlayerItem.didPlayToEndTimeNotification,
-      object: item,
-      queue: .main
-    ) { [weak self] _ in
-      Task { @MainActor [weak self] in
-        self?.handlePlayedToEnd(token: token)
-      }
-    }
-    periodicObserver = player.addPeriodicTimeObserver(
-      forInterval: CMTime(seconds: 0.5, preferredTimescale: 600),
-      queue: .main
-    ) { [weak self] time in
-      Task { @MainActor [weak self] in
-        guard let self, self.gate.accepts(token) else { return }
-        let seconds = time.seconds
-        if seconds.isFinite, seconds >= 0 {
-          self.positionSeconds = seconds
-        }
-      }
-    }
-  }
-
-  private func handleItemFailure(token: PlaybackIntentGate.Token) {
     guard gate.accepts(token) else { return }
     gate.cancel()
-    let position = currentPosition()
-    let detail = player?.currentItem?.error.map(Self.failureDetail) ?? "unknown"
-    recoverySnapshot = recoverySnapshot.map {
-      PlaybackRecoverySnapshot(
-        songID: $0.songID,
-        quality: $0.quality,
-        position: position,
-        shouldResume: true
-      )
-    }
+    // Keep where the user was and whether they were listening, so the retry
+    // restores the same thing rather than restarting the track.
+    attempt = attempt?.checkpointed(
+      at: currentPosition(),
+      desiredState: phase == .paused ? .paused : .playing
+    )
     releasePlayback()
     phase = .failed
     status = "Playback failed (\(detail)); Play Again re-resolves the URL"
@@ -540,26 +534,28 @@ package func pause() {
 
   private func finishQueue(status: String) {
     gate.cancel()
-    recoverySnapshot = nil
+    // A queue that ended on its own has nothing to retry.
+    attempt = nil
     releasePlayback()
     phase = .finished
     self.status = status
   }
 
   private func replayCurrentItem(token: PlaybackIntentGate.Token) {
-    guard let player else {
+    guard hasLoadedItem else {
       finishQueue(status: "Playback finished")
       return
     }
     positionSeconds = 0
+    attempt?.resumePosition = 0
     status = "Repeating the current track (no request)"
     Task {
       // A cancelled seek here only means a same-intent user seek superseded
       // seek(0); replay still owns the player unless the intent changed or
       // the user paused during the gap.
-      _ = try? await seek(player, to: 0)
+      _ = try? await output.seek(to: 0)
       guard gate.accepts(token), !Task.isCancelled, phase == .playing else { return }
-      player.play()
+      output.play()
     }
   }
 
@@ -609,6 +605,9 @@ package func pause() {
     token: PlaybackIntentGate.Token
   ) async {
     releasePlayback()
+    if PlaybackFailureClassifier.kind(for: error) == .terminal {
+      attempt = nil
+    }
     switch error {
     case let error as NeteaseServiceError
     where error.source == .service && error.statusCode == 301:
@@ -636,11 +635,11 @@ package func pause() {
       phase = .failed
       status = "Song URL \(error.source.rawValue) error \(error.statusCode)"
     case NeteasePlaybackError.nonHTTPSURL(let host):
-      recoverySnapshot = nil
+      attempt = nil
       phase = .failed
       status = "Rejected non-HTTPS playback host \(host)"
     case NeteasePlaybackError.unapprovedHost(let host):
-      recoverySnapshot = nil
+      attempt = nil
       phase = .failed
       status = "Rejected unapproved playback host \(host)"
     case NeteasePlaybackError.invalidResponse:
@@ -656,7 +655,7 @@ package func pause() {
   }
 
   private func abandonPlayback(status: String) {
-    recoverySnapshot = nil
+    attempt = nil
     queue = nil
     queueTracks = []
     clearPendingSleepStop()
@@ -673,6 +672,8 @@ package func pause() {
     }
   }
 
+  /// Starts a new user intent. It deliberately does not touch `attempt`: the
+  /// caller decides whether this is a new track or a retry of the old one.
   private func beginIntent() -> PlaybackIntentGate.Token {
     let token = gate.begin()
     activeToken = token
@@ -684,40 +685,17 @@ package func pause() {
   }
 
   private func releasePlayback() {
-    itemStatusObservation?.invalidate()
-    itemStatusObservation = nil
-    if let playedToEndObserver {
-      NotificationCenter.default.removeObserver(playedToEndObserver)
-      self.playedToEndObserver = nil
-    }
-    if let periodicObserver, let player {
-      player.removeTimeObserver(periodicObserver)
-    }
-    periodicObserver = nil
+    output.onPositionUpdate = nil
+    output.onPlayedToEnd = nil
+    output.onFailure = nil
     currentAssetSummary = nil
     durationSeconds = nil
-    player?.currentItem?.cancelPendingSeeks()
-    player?.pause()
-    player = nil
+    hasLoadedItem = false
+    output.teardown()
   }
 
   private func currentPosition() -> Double {
-    guard
-      let seconds = player?.currentTime().seconds, seconds.isFinite, seconds >= 0
-    else {
-      return recoverySnapshot?.position ?? 0
-    }
-    return seconds
-  }
-
-  private func seek(_ player: AVPlayer, to seconds: Double) async throws {
-    let time = CMTime(seconds: seconds, preferredTimescale: 600)
-    let finished = await withCheckedContinuation { continuation in
-      player.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero) {
-        continuation.resume(returning: $0)
-      }
-    }
-    guard finished else { throw CancellationError() }
+    output.currentPositionSeconds ?? attempt?.resumePosition ?? 0
   }
 
   private func checkCurrent(_ token: PlaybackIntentGate.Token) throws {
@@ -732,10 +710,5 @@ package func pause() {
       + "bitRate=\(asset.bitRate.map(String.init) ?? "none"), "
       + "trial=\(asset.trial), "
       + "scheme=\(asset.url.scheme ?? "none")"
-  }
-
-  private static func failureDetail(_ error: Error) -> String {
-    let error = error as NSError
-    return "\(error.domain) \(error.code)"
   }
 }
