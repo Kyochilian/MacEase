@@ -104,7 +104,7 @@ private func makeLibrary(
   await library.settleForTesting()
 
   #expect(library.playlists.isEmpty)
-  #expect(!library.hasMore)
+  #expect(!library.canLoadMore)
   #expect(!library.isLoading)
   #expect(library.status == "Validate the session before loading playlists")
 }

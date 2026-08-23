@@ -237,7 +237,7 @@ private struct Rig {
   await rig.library.settleForTesting()
 
   #expect(rig.library.playlists.isEmpty)
-  #expect(rig.library.status == "Deleted playlist-11")
+  #expect(rig.library.status == "Deleted playlist-11; Load Playlists before paging again")
   #expect(rig.arbiter.unresolvedOutcomes.isEmpty)
 }
 

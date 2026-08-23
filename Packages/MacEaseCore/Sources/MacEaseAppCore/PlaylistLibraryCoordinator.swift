@@ -12,8 +12,6 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
   @ObservationIgnored private let arbiter: OperationArbiter
   @ObservationIgnored package private(set) var generation = 0
   @ObservationIgnored private var loadTask: Task<Void, Never>?
-  @ObservationIgnored private var trackIDs: [Int64] = []
-  @ObservationIgnored private var loadedTrackIDCount = 0
 
   package var noStoredSessionStatus: String { "No stored session to load library" }
 
@@ -21,14 +19,22 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
     clearLibrary()
   }
 
-  package var playlists: [UserPlaylist] = []
+  package private(set) var collection = PlaylistCollection()
+  package private(set) var detail = PlaylistTrackCollection()
   package var selectedPlaylist: UserPlaylist?
-  package var tracks: [PlaylistTrack] = []
   package var likedIDs: Set<Int64>?
-  package var hasMore = false
-  package var hasMoreTracks = false
   package var isLoading = false
   package var status = "Validate the session before loading playlists"
+
+  package var playlists: [UserPlaylist] { collection.playlists }
+  package var tracks: [PlaylistTrack] { detail.tracks }
+  /// Only true when the cursor still names the same server position.
+  package var canLoadMore: Bool { collection.canLoadMore }
+  package var canLoadMoreTracks: Bool { detail.canLoadMore }
+  /// A write moved the server-side collection under the local cursor, so
+  /// paging cannot continue and the user is asked to reload explicitly.
+  package var playlistsNeedReload: Bool { collection.needsExplicitReload }
+  package var tracksNeedReload: Bool { detail.needsExplicitReload }
 
   package init(
     transport: any NeteaseTransporting,
@@ -41,7 +47,7 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
   }
 
   package func load(reset: Bool, session: any SessionProviding) {
-    guard reset || hasMore else { return }
+    guard reset || collection.canLoadMore else { return }
     guard
       let claim = claim(
         "Playlist",
@@ -53,7 +59,7 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
 
     if reset { clearDetail() }
     let currentGeneration = generation
-    let offset = reset ? 0 : playlists.count
+    let offset = reset ? 0 : collection.nextOffset
     let account = claim.account
     isLoading = true
     status = "Loading playlists (1 request)"
@@ -80,13 +86,10 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
           )
         else { return false }
 
-        if reset {
-          self.playlists = page.playlists
-        } else {
-          self.playlists.append(contentsOf: page.playlists)
-        }
-        self.hasMore = page.more
-        self.status = "Loaded \(self.playlists.count) playlists"
+        let duplicates = self.collection.apply(page: page, replacingAll: reset)
+        self.status =
+          "Loaded \(self.collection.playlists.count) playlists"
+          + (duplicates > 0 ? "; dropped \(duplicates) duplicate rows" : "")
         return true
       }
     }
@@ -132,13 +135,18 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
             session: session
           )
         else { return false }
-        self.selectedPlaylist = UserPlaylist(
+        let opened = UserPlaylist(
           id: playlist.id,
           name: detail.name,
           trackCount: detail.trackIDs.count,
           owned: playlist.owned
         )
+        self.selectedPlaylist = opened
+        // The detail is authoritative for the name and count, so the row in
+        // the list cannot be left saying something different.
+        self.collection.replace(opened)
         guard !detail.trackIDs.isEmpty else {
+          self.detail.begin(trackIDs: [])
           self.status = "Loaded an empty playlist (1 request)"
           return true
         }
@@ -160,10 +168,8 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
           )
         else { return false }
 
-        self.trackIDs = detail.trackIDs
-        self.loadedTrackIDCount = batchIDs.count
-        self.tracks = batch
-        self.hasMoreTracks = batchIDs.count < detail.trackIDs.count
+        self.detail.begin(trackIDs: detail.trackIDs)
+        self.detail.appendBatch(batch, requestedCount: batchIDs.count)
         self.status =
           "Loaded \(batch.count) tracks from \(batchIDs.count) "
           + "of \(detail.trackIDs.count) IDs"
@@ -173,7 +179,7 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
   }
 
   package func loadMoreTracks(session: any SessionProviding) {
-    guard hasMoreTracks else { return }
+    guard detail.canLoadMore else { return }
     guard
       let claim = claim(
         "Song detail",
@@ -195,11 +201,10 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
         invalidateOnService301: false,
         operation: "Song detail"
       ) { credential in
-        let end = min(
-          self.loadedTrackIDCount + NeteaseSession.songDetailRequestLimit,
-          self.trackIDs.count
+        let batchIDs = self.detail.nextBatch(
+          limit: NeteaseSession.songDetailRequestLimit
         )
-        let batchIDs = Array(self.trackIDs[self.loadedTrackIDCount..<end])
+        guard !batchIDs.isEmpty else { return true }
         let batch = try await self.transport.songDetails(
           songIDs: batchIDs,
           credential: credential
@@ -213,12 +218,10 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
           )
         else { return false }
 
-        self.tracks.append(contentsOf: batch)
-        self.loadedTrackIDCount = end
-        self.hasMoreTracks = end < self.trackIDs.count
+        self.detail.appendBatch(batch, requestedCount: batchIDs.count)
         self.status =
-          "Loaded \(self.tracks.count) tracks from \(end) "
-          + "of \(self.trackIDs.count) IDs"
+          "Loaded \(self.detail.tracks.count) tracks from "
+          + "\(self.detail.loadedIDCount) of \(self.detail.trackIDs.count) IDs"
         return true
       }
     }
@@ -313,7 +316,12 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
       session: session
     ) { credential in
       try await self.transport.createPlaylist(name: trimmed, credential: credential)
-      return { "Created \(trimmed); Load Playlists to see it" }
+      return {
+        // The new playlist changes the server-side set and its ordering, so
+        // the page cursor no longer names the same position.
+        self.collection.markStaleAfterMutation()
+        return "Created \(trimmed); Load Playlists to see it"
+      }
     }
   }
 
@@ -331,11 +339,12 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
         credential: credential
       )
       return {
-        self.playlists.removeAll { $0.id == playlist.id }
+        self.collection.remove(id: playlist.id)
+        self.collection.markStaleAfterMutation()
         if self.selectedPlaylist?.id == playlist.id {
           self.clearDetail()
         }
-        return "Deleted \(playlist.name)"
+        return "Deleted \(playlist.name); Load Playlists before paging again"
       }
     }
   }
@@ -366,9 +375,9 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
           owned: playlist.owned
         )
         self.selectedPlaylist = renamed
-        if let index = self.playlists.firstIndex(where: { $0.id == playlist.id }) {
-          self.playlists[index] = renamed
-        }
+        // A rename changes neither membership nor the page cursor, so the
+        // row is updated in place and paging stays usable.
+        self.collection.replace(renamed)
         return "Renamed to \(trimmed)"
       }
     }
@@ -390,20 +399,40 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
         trackIDs: [track.id],
         credential: credential
       )
-      return { "Added \(track.name) to \(playlist.name)" }
+      return {
+        self.collection.adjustTrackCount(playlistID: playlist.id, by: 1)
+        guard self.selectedPlaylist?.id == playlist.id else {
+          return "Added \(track.name) to \(playlist.name)"
+        }
+        // The server chooses where the track lands, so the id order held
+        // here is no longer authoritative for the open playlist.
+        self.detail.markStaleAfterMutation()
+        self.selectedPlaylist = self.selectedPlaylist.map {
+          UserPlaylist(
+            id: $0.id,
+            name: $0.name,
+            trackCount: $0.trackCount + 1,
+            owned: $0.owned
+          )
+        }
+        return
+          "Added \(track.name) to \(playlist.name); "
+          + "reload the playlist to see it in order"
+      }
     }
   }
 
-  /// Removes from the currently selected playlist and drops the row locally;
-  /// the detail list is not refetched.
+  /// Removes one track from the open playlist and applies the removal to
+  /// every piece of local state at once. The track is named by id, never by
+  /// row position, so a list that changed in the meantime cannot make the
+  /// write land on a different row.
   package func removeSelectedPlaylistTrack(
-    at index: Int,
+    id trackID: Int64,
     session: any SessionProviding
   ) {
-    guard let playlist = selectedPlaylist, tracks.indices.contains(index) else {
-      return
-    }
-    let track = tracks[index]
+    guard let playlist = selectedPlaylist,
+      let track = detail.tracks.first(where: { $0.id == trackID })
+    else { return }
     write(
       loadingStatus: "Removing the track (1 request)",
       operation: "Remove track",
@@ -412,12 +441,26 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
       try await self.transport.editPlaylistTracks(
         .del,
         playlistID: playlist.id,
-        trackIDs: [track.id],
+        trackIDs: [trackID],
         credential: credential
       )
       return {
-        if self.tracks.indices.contains(index), self.tracks[index].id == track.id {
-          self.tracks.remove(at: index)
+        guard self.selectedPlaylist?.id == playlist.id,
+          self.detail.removeTrack(id: trackID)
+        else {
+          // The open playlist changed while the write was in flight; the
+          // server did remove the track, so say so without editing a list it
+          // no longer belongs to.
+          return "Removed \(track.name) from \(playlist.name); reload to refresh"
+        }
+        self.collection.adjustTrackCount(playlistID: playlist.id, by: -1)
+        self.selectedPlaylist = self.selectedPlaylist.map {
+          UserPlaylist(
+            id: $0.id,
+            name: $0.name,
+            trackCount: max(0, $0.trackCount - 1),
+            owned: $0.owned
+          )
         }
         return "Removed \(track.name) from \(playlist.name)"
       }
@@ -446,7 +489,16 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
         credential: credential
       )
       return {
-        (subscribed ? "Subscribed to " : "Unsubscribed from ") + playlistName
+        if !subscribed {
+          self.collection.remove(id: playlistID)
+          if self.selectedPlaylist?.id == playlistID {
+            self.clearDetail()
+          }
+        }
+        // Either direction changes which playlists the account has.
+        self.collection.markStaleAfterMutation()
+        return
+          (subscribed ? "Subscribed to " : "Unsubscribed from ") + playlistName
           + "; Load Playlists to refresh"
       }
     }
@@ -634,17 +686,13 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
   }
 
   private func clearLibrary() {
-    playlists = []
-    hasMore = false
+    collection.reset()
     likedIDs = nil
     clearDetail()
   }
 
   private func clearDetail() {
     selectedPlaylist = nil
-    trackIDs = []
-    loadedTrackIDCount = 0
-    tracks = []
-    hasMoreTracks = false
+    detail.reset()
   }
 }

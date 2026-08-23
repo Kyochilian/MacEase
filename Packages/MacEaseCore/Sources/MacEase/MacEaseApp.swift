@@ -244,43 +244,8 @@ private struct PlaylistLibraryView: View {
 
   var body: some View {
     VStack(spacing: 0) {
-      HStack {
-        Text("Your Playlists")
-          .font(.headline)
-        Spacer()
-        Button("Load Playlists · 1 request", systemImage: "arrow.clockwise") {
-          library.load(reset: true, session: session)
-        }
-        .disabled(session.account == nil || requestInFlight)
-        Button("Load Liked IDs · 1 request", systemImage: "heart") {
-          library.loadLikedIDs(session: session)
-        }
-        .disabled(session.account == nil || requestInFlight)
-        .help("Marks loaded track rows that are in your liked songs")
-        if library.hasMore {
-          Button("Load More · 1 request", systemImage: "plus") {
-            library.load(reset: false, session: session)
-          }
-          .disabled(requestInFlight)
-        }
-      }
-      .padding(12)
-
-      HStack {
-        TextField("New playlist name", text: $newPlaylistName)
-          .frame(maxWidth: 240)
-        Button("Create · 1 request", systemImage: "plus.rectangle.on.folder") {
-          library.createPlaylist(named: newPlaylistName, session: session)
-          newPlaylistName = ""
-        }
-        .disabled(
-          session.account == nil || requestInFlight
-            || newPlaylistName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        )
-        Spacer()
-      }
-      .padding(.horizontal, 12)
-      .padding(.bottom, 12)
+      toolbar
+      createRow
 
       Divider()
 
@@ -290,182 +255,8 @@ private struct PlaylistLibraryView: View {
           .frame(maxWidth: .infinity, maxHeight: .infinity)
       } else {
         HSplitView {
-          List(library.playlists, id: \.id) { playlist in
-            Button {
-              library.loadTracks(for: playlist, session: session)
-            } label: {
-              HStack {
-                VStack(alignment: .leading, spacing: 3) {
-                  Text(playlist.name)
-                  Text(
-                    "\(playlist.trackCount) tracks · "
-                      + (playlist.owned ? "Created" : "Saved")
-                  )
-                  .font(.caption)
-                  .foregroundStyle(.secondary)
-                }
-                Spacer()
-                Text("Load Tracks · up to 2 requests")
-                  .font(.caption)
-                  .foregroundStyle(.secondary)
-                if playlist.owned {
-                  Button {
-                    playlistPendingDeletion = playlist
-                  } label: {
-                    Image(systemName: "trash")
-                  }
-                  .buttonStyle(.borderless)
-                  .disabled(requestInFlight)
-                  .help("Delete playlist · 1 request")
-                } else {
-                  Button {
-                    library.setSubscribed(
-                      false,
-                      playlistID: playlist.id,
-                      playlistName: playlist.name,
-                      session: session
-                    )
-                  } label: {
-                    Image(systemName: "minus.circle")
-                  }
-                  .buttonStyle(.borderless)
-                  .disabled(requestInFlight)
-                  .help("Unsubscribe from this saved playlist · 1 request")
-                }
-              }
-              .padding(.vertical, 3)
-            }
-            .buttonStyle(.plain)
-            .disabled(requestInFlight)
-          }
-          .frame(minWidth: 340)
-
-          VStack(spacing: 0) {
-            if let playlist = library.selectedPlaylist {
-              HStack {
-                VStack(alignment: .leading, spacing: 3) {
-                  Text(playlist.name)
-                    .font(.headline)
-                  Text("\(playlist.trackCount) tracks")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                }
-                Spacer()
-                if playlist.owned {
-                  TextField("Rename", text: $renameText)
-                    .frame(maxWidth: 160)
-                  Button("Rename · 1 request") {
-                    library.renameSelectedPlaylist(
-                      to: renameText,
-                      session: session
-                    )
-                  }
-                  .disabled(
-                    requestInFlight
-                      || renameText.trimmingCharacters(in: .whitespacesAndNewlines)
-                        .isEmpty
-                  )
-                  .help("Changes only the name; description and tags are untouched")
-                }
-                if library.hasMoreTracks {
-                  Button("Load More Tracks · 1 request", systemImage: "plus") {
-                    library.loadMoreTracks(session: session)
-                  }
-                  .disabled(requestInFlight)
-                }
-              }
-              .padding(12)
-
-              Divider()
-
-              if library.tracks.isEmpty {
-                Text(library.status)
-                  .foregroundStyle(.secondary)
-                  .frame(maxWidth: .infinity, maxHeight: .infinity)
-              } else {
-                List(library.tracks.indices, id: \.self) { index in
-                  let track = library.tracks[index]
-                  HStack {
-                    VStack(alignment: .leading, spacing: 3) {
-                      Text(track.name)
-                      if !track.artists.isEmpty {
-                        Text(track.artists.joined(separator: ", "))
-                          .font(.caption)
-                          .foregroundStyle(.secondary)
-                      }
-                    }
-                    Spacer()
-                    let isLiked = library.likedIDs?.contains(track.id) == true
-                    Button {
-                      library.setLiked(!isLiked, for: track, session: session)
-                    } label: {
-                      Image(systemName: isLiked ? "heart.fill" : "heart")
-                        .foregroundStyle(isLiked ? .red : .secondary)
-                    }
-                    .buttonStyle(.borderless)
-                    .disabled(session.account == nil || requestInFlight)
-                    .help(
-                      isLiked
-                        ? "Unlike · 1 request" : "Like · 1 request"
-                    )
-                    Menu {
-                      ForEach(library.playlists.filter(\.owned), id: \.id) { target in
-                        Button(target.name) {
-                          library.addTrack(
-                            track,
-                            to: target,
-                            session: session
-                          )
-                        }
-                      }
-                    } label: {
-                      Image(systemName: "text.badge.plus")
-                    }
-                    .menuStyle(.borderlessButton)
-                    .fixedSize()
-                    .disabled(
-                      requestInFlight || !library.playlists.contains(where: \.owned)
-                    )
-                    .help("Add to one of your playlists · 1 request")
-                    if library.selectedPlaylist?.owned == true {
-                      Button {
-                        library.removeSelectedPlaylistTrack(
-                          at: index,
-                          session: session
-                        )
-                      } label: {
-                        Image(systemName: "minus.circle")
-                      }
-                      .buttonStyle(.borderless)
-                      .disabled(requestInFlight)
-                      .help("Remove from this playlist · 1 request")
-                    }
-                    Button("Play · 1 request", systemImage: "play.fill") {
-                      playback.play(
-                        tracks: library.tracks,
-                        startIndex: index,
-                        session: session
-                      )
-                    }
-                    .buttonStyle(.borderless)
-                    .disabled(session.account == nil || requestInFlight)
-                    .help("Starts the queue from this track over the loaded list")
-                  }
-                  .padding(.vertical, 3)
-                }
-              }
-            } else {
-              Text(
-                "Choose Load Tracks. The first batch uses one playlist-detail request "
-                  + "and, for a nonempty playlist, one song-detail request."
-              )
-              .foregroundStyle(.secondary)
-              .multilineTextAlignment(.center)
-              .padding(24)
-              .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
-          }
-          .frame(minWidth: 340)
+          playlistList
+          detailPane
         }
       }
 
@@ -503,6 +294,258 @@ private struct PlaylistLibraryView: View {
     } message: {
       Text("This permanently deletes the playlist from your NetEase account.")
     }
+  }
+
+  @ViewBuilder private var toolbar: some View {
+    HStack {
+      Text("Your Playlists")
+        .font(.headline)
+      Spacer()
+      Button("Load Playlists · 1 request", systemImage: "arrow.clockwise") {
+        library.load(reset: true, session: session)
+      }
+      .disabled(session.account == nil || requestInFlight)
+      Button("Load Liked IDs · 1 request", systemImage: "heart") {
+        library.loadLikedIDs(session: session)
+      }
+      .disabled(session.account == nil || requestInFlight)
+      .help("Marks loaded track rows that are in your liked songs")
+      if library.canLoadMore {
+        Button("Load More · 1 request", systemImage: "plus") {
+          library.load(reset: false, session: session)
+        }
+        .disabled(requestInFlight)
+      } else if library.playlistsNeedReload {
+        // The page cursor no longer names the same server position, so
+        // continuing from it could skip or repeat rows.
+        Label("Reload to page further", systemImage: "exclamationmark.circle")
+          .font(.caption)
+          .foregroundStyle(.secondary)
+          .help("A write changed your playlists; Load Playlists starts over")
+      }
+    }
+    .padding(12)
+  }
+
+  @ViewBuilder private var createRow: some View {
+    HStack {
+      TextField("New playlist name", text: $newPlaylistName)
+        .frame(maxWidth: 240)
+      Button("Create · 1 request", systemImage: "plus.rectangle.on.folder") {
+        library.createPlaylist(named: newPlaylistName, session: session)
+        newPlaylistName = ""
+      }
+      .disabled(
+        session.account == nil || requestInFlight
+          || newPlaylistName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+      )
+      Spacer()
+    }
+    .padding(.horizontal, 12)
+    .padding(.bottom, 12)
+  }
+
+  @ViewBuilder private var playlistList: some View {
+    List(
+      library.playlists,
+      id: \.id,
+      selection: Binding(
+        get: { library.selectedPlaylist?.id },
+        set: { id in
+          guard let playlist = library.playlists.first(where: { $0.id == id })
+          else { return }
+          library.loadTracks(for: playlist, session: session)
+        }
+      )
+    ) { playlist in
+      // Selection opens the playlist, so the row is not itself a button and
+      // the trailing control is not nested inside one.
+      HStack {
+        VStack(alignment: .leading, spacing: 3) {
+          Text(playlist.name)
+          Text(
+            "\(playlist.trackCount) tracks · "
+              + (playlist.owned ? "Created" : "Saved")
+          )
+          .font(.caption)
+          .foregroundStyle(.secondary)
+        }
+        Spacer()
+        if playlist.owned {
+          Button {
+            playlistPendingDeletion = playlist
+          } label: {
+            Image(systemName: "trash")
+          }
+          .buttonStyle(.borderless)
+          .disabled(requestInFlight)
+          .help("Delete playlist · 1 request")
+          .accessibilityLabel("Delete \(playlist.name)")
+        } else {
+          Button {
+            library.setSubscribed(
+              false,
+              playlistID: playlist.id,
+              playlistName: playlist.name,
+              session: session
+            )
+          } label: {
+            Image(systemName: "minus.circle")
+          }
+          .buttonStyle(.borderless)
+          .disabled(requestInFlight)
+          .help("Unsubscribe from this saved playlist · 1 request")
+          .accessibilityLabel("Unsubscribe from \(playlist.name)")
+        }
+      }
+      .padding(.vertical, 3)
+      .tag(playlist.id)
+    }
+    .frame(minWidth: 340)
+  }
+
+  @ViewBuilder private var detailPane: some View {
+    VStack(spacing: 0) {
+      if let playlist = library.selectedPlaylist {
+        detailHeader(playlist)
+
+        Divider()
+
+        if library.tracks.isEmpty {
+          Text(library.status)
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+          List(library.tracks, id: \.id) { track in
+            trackRow(track)
+          }
+        }
+      } else {
+        Text(
+          "Choose a playlist. The first batch uses one playlist-detail request "
+            + "and, for a nonempty playlist, one song-detail request."
+        )
+        .foregroundStyle(.secondary)
+        .multilineTextAlignment(.center)
+        .padding(24)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+      }
+    }
+    .frame(minWidth: 340)
+  }
+
+  @ViewBuilder private func detailHeader(_ playlist: UserPlaylist) -> some View {
+    HStack {
+      VStack(alignment: .leading, spacing: 3) {
+        Text(playlist.name)
+          .font(.headline)
+        Text("\(playlist.trackCount) tracks")
+          .font(.caption)
+          .foregroundStyle(.secondary)
+      }
+      Spacer()
+      if playlist.owned {
+        TextField("Rename", text: $renameText)
+          .frame(maxWidth: 160)
+        Button("Rename · 1 request") {
+          library.renameSelectedPlaylist(to: renameText, session: session)
+        }
+        .disabled(
+          requestInFlight
+            || renameText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        )
+        .help("Changes only the name; description and tags are untouched")
+      }
+      if library.canLoadMoreTracks {
+        Button("Load More Tracks · 1 request", systemImage: "plus") {
+          library.loadMoreTracks(session: session)
+        }
+        .disabled(requestInFlight)
+      } else if library.tracksNeedReload {
+        Label("Reload to page further", systemImage: "exclamationmark.circle")
+          .font(.caption)
+          .foregroundStyle(.secondary)
+          .help("A track was added; open the playlist again to page further")
+      }
+    }
+    .padding(12)
+  }
+
+  @ViewBuilder private func trackRow(_ track: PlaylistTrack) -> some View {
+    HStack {
+      VStack(alignment: .leading, spacing: 3) {
+        Text(track.name)
+        if !track.artists.isEmpty {
+          Text(track.artists.joined(separator: ", "))
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+      }
+      Spacer()
+      let isLiked = library.likedIDs?.contains(track.id) == true
+      Button {
+        library.setLiked(!isLiked, for: track, session: session)
+      } label: {
+        Image(systemName: isLiked ? "heart.fill" : "heart")
+          .foregroundStyle(isLiked ? .red : .secondary)
+      }
+      .buttonStyle(.borderless)
+      .disabled(session.account == nil || requestInFlight)
+      .help(isLiked ? "Unlike · 1 request" : "Like · 1 request")
+      AddToPlaylistMenu(
+        track: track,
+        library: library,
+        session: session,
+        disabled: requestInFlight
+      )
+      if library.selectedPlaylist?.owned == true {
+        Button {
+          // Named by id: a list that changed cannot make this land on a
+          // different row.
+          library.removeSelectedPlaylistTrack(id: track.id, session: session)
+        } label: {
+          Image(systemName: "minus.circle")
+        }
+        .buttonStyle(.borderless)
+        .disabled(requestInFlight)
+        .help("Remove from this playlist · 1 request")
+        .accessibilityLabel("Remove \(track.name)")
+      }
+      Button("Play · 1 request", systemImage: "play.fill") {
+        guard let index = library.tracks.firstIndex(where: { $0.id == track.id })
+        else { return }
+        playback.play(tracks: library.tracks, startIndex: index, session: session)
+      }
+      .buttonStyle(.borderless)
+      .disabled(session.account == nil || requestInFlight)
+      .help("Starts the queue from this track over the loaded list")
+    }
+    .padding(.vertical, 3)
+  }
+}
+
+/// Shared by the library and search rows so both add through the same path.
+private struct AddToPlaylistMenu: View {
+  let track: PlaylistTrack
+  let library: PlaylistLibraryCoordinator
+  let session: LoginCoordinator
+  let disabled: Bool
+
+  var body: some View {
+    Menu {
+      ForEach(library.playlists.filter(\.owned), id: \.id) { target in
+        Button(target.name) {
+          library.addTrack(track, to: target, session: session)
+        }
+      }
+    } label: {
+      Image(systemName: "text.badge.plus")
+    }
+    .menuStyle(.borderlessButton)
+    .fixedSize()
+    .disabled(disabled || !library.playlists.contains(where: \.owned))
+    .help("Add to one of your playlists · 1 request")
+    .accessibilityLabel("Add \(track.name) to a playlist")
   }
 }
 
