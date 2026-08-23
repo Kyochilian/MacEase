@@ -1,5 +1,4 @@
 import Foundation
-import MacEaseSession
 import NeteaseKit
 
 /// Shared preflight/postflight session checks for the read coordinators.
@@ -9,8 +8,8 @@ import NeteaseKit
 /// demands a new Validate. Generation guards drop late writes from a
 /// superseded task.
 @MainActor
-protocol SessionGuardedCoordinator: AnyObject {
-  var vault: CredentialVault { get }
+package protocol SessionGuardedCoordinator: AnyObject {
+  var vault: any CredentialStoring { get }
   var generation: Int { get }
   var status: String { get set }
   /// Shown when the Keychain item vanished while this coordinator was idle.
@@ -24,22 +23,18 @@ extension SessionGuardedCoordinator {
   func currentCredential(
     account: NeteaseAccount,
     generation: Int,
-    loginCoordinator: LoginCoordinator
+    session: any SessionProviding
   ) async throws -> NeteaseCredential? {
     guard let credential = try await vault.load() else {
       guard self.generation == generation else { return nil }
-      loginCoordinator.hasStoredSession = false
-      loginCoordinator.account = nil
-      loginCoordinator.status = "No stored session to validate"
+      session.reportDivergence(.storedSessionMissing)
       clearSessionScopedData()
       status = noStoredSessionStatus
       return nil
     }
     guard self.generation == generation else { return nil }
-    guard loginCoordinator.matchesValidatedSession(credential, account: account) else {
-      loginCoordinator.hasStoredSession = true
-      loginCoordinator.account = nil
-      loginCoordinator.status = "Stored session changed; validate again"
+    guard session.matchesValidatedSession(credential, account: account) else {
+      session.reportDivergence(.storedSessionChanged(hasStoredItem: true))
       clearSessionScopedData()
       status = "Session changed; validate again"
       return nil
@@ -52,18 +47,18 @@ extension SessionGuardedCoordinator {
     account: NeteaseAccount,
     credential: NeteaseCredential,
     generation: Int,
-    loginCoordinator: LoginCoordinator
+    session: any SessionProviding
   ) async throws -> Bool {
     guard self.generation == generation else { return false }
     let storedCredential = try await vault.load()
     guard self.generation == generation else { return false }
     guard
       storedCredential == credential,
-      loginCoordinator.matchesValidatedSession(credential, account: account)
+      session.matchesValidatedSession(credential, account: account)
     else {
-      loginCoordinator.hasStoredSession = storedCredential != nil
-      loginCoordinator.account = nil
-      loginCoordinator.status = "Stored session changed; validate again"
+      session.reportDivergence(
+        .storedSessionChanged(hasStoredItem: storedCredential != nil)
+      )
       clearSessionScopedData()
       status = "Session changed; validate again"
       return false

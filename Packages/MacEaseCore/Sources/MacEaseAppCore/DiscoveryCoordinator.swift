@@ -1,5 +1,4 @@
 import Foundation
-import MacEaseSession
 import NeteaseKit
 import Observation
 
@@ -11,44 +10,45 @@ import Observation
 /// and stops.
 @MainActor
 @Observable
-final class DiscoveryCoordinator: SessionGuardedCoordinator {
-  @ObservationIgnored private let session: NeteaseSession
-  @ObservationIgnored let vault = CredentialVault()
-  @ObservationIgnored private(set) var generation = 0
+package final class DiscoveryCoordinator: SessionGuardedCoordinator {
+  @ObservationIgnored private let transport: any NeteaseTransporting
+  @ObservationIgnored package let vault: any CredentialStoring
+  @ObservationIgnored package private(set) var generation = 0
   @ObservationIgnored private var loadTask: Task<Void, Never>?
   @ObservationIgnored private var hasPrefetched = false
 
-  var noStoredSessionStatus: String { "No stored session to load Discover" }
+  package var noStoredSessionStatus: String { "No stored session to load Discover" }
 
-  func clearSessionScopedData() {
+  package func clearSessionScopedData() {
     clearAll()
   }
 
-  var dailySongs: [PlaylistTrack] = []
-  var dailyPlaylists: [DiscoveredPlaylist] = []
-  var personalized: [DiscoveredPlaylist] = []
-  var toplists: [DiscoveredPlaylist] = []
-  var records: [PlayRecordEntry] = []
-  var similarSongs: [PlaylistTrack] = []
-  var similarSeedName: String?
-  var searchResults: [PlaylistTrack] = []
-  var searchQuery = ""
-  var recordScope: PlayRecordScope = .allTime
-  var isLoading = false
-  var status = "Validate the session, then load each section explicitly"
+  package var dailySongs: [PlaylistTrack] = []
+  package var dailyPlaylists: [DiscoveredPlaylist] = []
+  package var personalized: [DiscoveredPlaylist] = []
+  package var toplists: [DiscoveredPlaylist] = []
+  package var records: [PlayRecordEntry] = []
+  package var similarSongs: [PlaylistTrack] = []
+  package var similarSeedName: String?
+  package var searchResults: [PlaylistTrack] = []
+  package var searchQuery = ""
+  package var recordScope: PlayRecordScope = .allTime
+  package var isLoading = false
+  package var status = "Validate the session, then load each section explicitly"
 
-  init(session: NeteaseSession) {
-    self.session = session
+  package init(transport: any NeteaseTransporting, vault: any CredentialStoring) {
+    self.transport = transport
+    self.vault = vault
   }
 
   /// One-time prefetch of the four Discover sections after the first
   /// successful validation of this app run: one request per section in
   /// sequence, stopping at the first error, with no retry. Later refreshes
   /// remain explicit user actions.
-  func prefetch(loginCoordinator: LoginCoordinator) {
+  package func prefetch(session: any SessionProviding) {
     guard
-      !hasPrefetched, !loginCoordinator.isBusy, !isLoading,
-      let account = loginCoordinator.account
+      !hasPrefetched, !session.isBusy, !isLoading,
+      let account = session.account
     else { return }
     hasPrefetched = true
     let currentGeneration = generation
@@ -57,56 +57,56 @@ final class DiscoveryCoordinator: SessionGuardedCoordinator {
     loadTask = Task {
       defer { finish(generation: currentGeneration) }
       for step in [runDailySongs, runDailyPlaylists, runPersonalized, runToplists] {
-        guard await step(account, currentGeneration, loginCoordinator) else { return }
+        guard await step(account, currentGeneration, session) else { return }
       }
     }
   }
 
-  func loadDailySongs(loginCoordinator: LoginCoordinator) {
+  package func loadDailySongs(session: any SessionProviding) {
     load(
       loadingStatus: "Loading daily recommended songs (1 request)",
-      loginCoordinator: loginCoordinator,
+      session: session,
       run: runDailySongs
     )
   }
 
-  func loadDailyPlaylists(loginCoordinator: LoginCoordinator) {
+  package func loadDailyPlaylists(session: any SessionProviding) {
     load(
       loadingStatus: "Loading daily recommended playlists (1 request)",
-      loginCoordinator: loginCoordinator,
+      session: session,
       run: runDailyPlaylists
     )
   }
 
-  func loadPersonalized(loginCoordinator: LoginCoordinator) {
+  package func loadPersonalized(session: any SessionProviding) {
     load(
       loadingStatus: "Loading recommended playlists (1 request)",
-      loginCoordinator: loginCoordinator,
+      session: session,
       run: runPersonalized
     )
   }
 
-  func loadToplists(loginCoordinator: LoginCoordinator) {
+  package func loadToplists(session: any SessionProviding) {
     load(
       loadingStatus: "Loading toplists (1 request)",
-      loginCoordinator: loginCoordinator,
+      session: session,
       run: runToplists
     )
   }
 
-  func loadRecords(loginCoordinator: LoginCoordinator) {
+  package func loadRecords(session: any SessionProviding) {
     let scope = recordScope
     load(
       loadingStatus: "Loading listening rankings (1 request)",
-      loginCoordinator: loginCoordinator,
-      run: { account, generation, loginCoordinator in
+      session: session,
+      run: { account, generation, session in
         await self.run(
           operation: "Listening rankings",
           account: account,
           generation: generation,
-          loginCoordinator: loginCoordinator,
+          session: session,
           fetch: { credential, account in
-            try await self.session.playRecords(
+            try await self.transport.playRecords(
               userID: account.userID,
               scope: scope,
               credential: credential
@@ -122,21 +122,21 @@ final class DiscoveryCoordinator: SessionGuardedCoordinator {
   }
 
   /// Similar songs for one explicitly chosen seed track (1 request).
-  func loadSimilarSongs(
+  package func loadSimilarSongs(
     seed: PlaylistTrack,
-    loginCoordinator: LoginCoordinator
+    session: any SessionProviding
   ) {
     load(
       loadingStatus: "Loading similar songs (1 request)",
-      loginCoordinator: loginCoordinator,
-      run: { account, generation, loginCoordinator in
+      session: session,
+      run: { account, generation, session in
         await self.run(
           operation: "Similar songs",
           account: account,
           generation: generation,
-          loginCoordinator: loginCoordinator,
+          session: session,
           fetch: { credential, _ in
-            try await self.session.similarSongs(
+            try await self.transport.similarSongs(
               songID: seed.id,
               credential: credential
             )
@@ -153,20 +153,20 @@ final class DiscoveryCoordinator: SessionGuardedCoordinator {
 
   /// Song search (1 request). Runs only from an explicit Search action; there
   /// is no as-you-type querying.
-  func search(loginCoordinator: LoginCoordinator) {
+  package func search(session: any SessionProviding) {
     let keywords = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !keywords.isEmpty else { return }
     load(
       loadingStatus: "Searching (1 request)",
-      loginCoordinator: loginCoordinator,
-      run: { account, generation, loginCoordinator in
+      session: session,
+      run: { account, generation, session in
         await self.run(
           operation: "Search",
           account: account,
           generation: generation,
-          loginCoordinator: loginCoordinator,
+          session: session,
           fetch: { credential, _ in
-            try await self.session.searchSongs(
+            try await self.transport.searchSongs(
               keywords: keywords,
               credential: credential
             )
@@ -180,7 +180,13 @@ final class DiscoveryCoordinator: SessionGuardedCoordinator {
     )
   }
 
-  func reset() {
+    /// Test seam: awaits the task the last explicit action started, so a test
+  /// can assert on settled state without polling.
+  package func settleForTesting() async {
+    await loadTask?.value
+  }
+
+package func reset() {
     generation += 1
     loadTask?.cancel()
     loadTask = nil
@@ -191,11 +197,11 @@ final class DiscoveryCoordinator: SessionGuardedCoordinator {
 
   private func load(
     loadingStatus: String,
-    loginCoordinator: LoginCoordinator,
-    run: @escaping @MainActor (NeteaseAccount, Int, LoginCoordinator) async -> Bool
+    session: any SessionProviding,
+    run: @escaping @MainActor (NeteaseAccount, Int, any SessionProviding) async -> Bool
   ) {
-    guard !loginCoordinator.isBusy, !isLoading else { return }
-    guard let account = loginCoordinator.account else {
+    guard !session.isBusy, !isLoading else { return }
+    guard let account = session.account else {
       status = "Validate the session before loading"
       return
     }
@@ -205,22 +211,22 @@ final class DiscoveryCoordinator: SessionGuardedCoordinator {
     status = loadingStatus
     loadTask = Task {
       defer { finish(generation: currentGeneration) }
-      _ = await run(account, currentGeneration, loginCoordinator)
+      _ = await run(account, currentGeneration, session)
     }
   }
 
   private func runDailySongs(
     account: NeteaseAccount,
     generation: Int,
-    loginCoordinator: LoginCoordinator
+    session: any SessionProviding
   ) async -> Bool {
     await run(
       operation: "Daily songs",
       account: account,
       generation: generation,
-      loginCoordinator: loginCoordinator,
+      session: session,
       fetch: { credential, _ in
-        try await self.session.dailyRecommendedSongs(credential: credential)
+        try await self.transport.dailyRecommendedSongs(credential: credential)
       },
       apply: { songs in
         self.dailySongs = songs
@@ -232,15 +238,15 @@ final class DiscoveryCoordinator: SessionGuardedCoordinator {
   private func runDailyPlaylists(
     account: NeteaseAccount,
     generation: Int,
-    loginCoordinator: LoginCoordinator
+    session: any SessionProviding
   ) async -> Bool {
     await run(
       operation: "Daily playlists",
       account: account,
       generation: generation,
-      loginCoordinator: loginCoordinator,
+      session: session,
       fetch: { credential, _ in
-        try await self.session.dailyRecommendedPlaylists(credential: credential)
+        try await self.transport.dailyRecommendedPlaylists(credential: credential)
       },
       apply: { playlists in
         self.dailyPlaylists = playlists
@@ -252,15 +258,15 @@ final class DiscoveryCoordinator: SessionGuardedCoordinator {
   private func runPersonalized(
     account: NeteaseAccount,
     generation: Int,
-    loginCoordinator: LoginCoordinator
+    session: any SessionProviding
   ) async -> Bool {
     await run(
       operation: "Recommended playlists",
       account: account,
       generation: generation,
-      loginCoordinator: loginCoordinator,
+      session: session,
       fetch: { credential, _ in
-        try await self.session.personalizedPlaylists(credential: credential)
+        try await self.transport.personalizedPlaylists(credential: credential)
       },
       apply: { playlists in
         self.personalized = playlists
@@ -272,15 +278,15 @@ final class DiscoveryCoordinator: SessionGuardedCoordinator {
   private func runToplists(
     account: NeteaseAccount,
     generation: Int,
-    loginCoordinator: LoginCoordinator
+    session: any SessionProviding
   ) async -> Bool {
     await run(
       operation: "Toplists",
       account: account,
       generation: generation,
-      loginCoordinator: loginCoordinator,
+      session: session,
       fetch: { credential, _ in
-        try await self.session.toplists(credential: credential)
+        try await self.transport.toplists(credential: credential)
       },
       apply: { toplists in
         self.toplists = toplists
@@ -293,7 +299,7 @@ final class DiscoveryCoordinator: SessionGuardedCoordinator {
     operation: String,
     account: NeteaseAccount,
     generation: Int,
-    loginCoordinator: LoginCoordinator,
+    session: any SessionProviding,
     fetch: @MainActor (NeteaseCredential, NeteaseAccount) async throws -> Value,
     apply: @MainActor (Value) -> String
   ) async -> Bool {
@@ -302,7 +308,7 @@ final class DiscoveryCoordinator: SessionGuardedCoordinator {
         let credential = try await currentCredential(
           account: account,
           generation: generation,
-          loginCoordinator: loginCoordinator
+          session: session
         )
       else { return false }
       let value = try await fetch(credential, account)
@@ -311,7 +317,7 @@ final class DiscoveryCoordinator: SessionGuardedCoordinator {
           account: account,
           credential: credential,
           generation: generation,
-          loginCoordinator: loginCoordinator
+          session: session
         )
       else { return false }
       status = apply(value)

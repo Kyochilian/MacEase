@@ -2,6 +2,10 @@ import Foundation
 
 public struct NeteaseAccount: Equatable, Sendable {
   public let userID: Int64
+
+  package init(userID: Int64) {
+    self.userID = userID
+  }
 }
 
 public enum AccountSessionState: Equatable, Sendable {
@@ -68,18 +72,35 @@ public struct UserPlaylist: Equatable, Sendable {
 public struct UserPlaylistPage: Equatable, Sendable {
   public let playlists: [UserPlaylist]
   public let more: Bool
+
+  package init(playlists: [UserPlaylist], more: Bool) {
+    self.playlists = playlists
+    self.more = more
+  }
 }
 
 package struct PlaylistDetail: Equatable, Sendable {
   package let id: Int64
   package let name: String
   package let trackIDs: [Int64]
+
+  package init(id: Int64, name: String, trackIDs: [Int64]) {
+    self.id = id
+    self.name = name
+    self.trackIDs = trackIDs
+  }
 }
 
 package struct PlaylistTrack: Equatable, Sendable {
   package let id: Int64
   package let name: String
   package let artists: [String]
+
+  package init(id: Int64, name: String, artists: [String]) {
+    self.id = id
+    self.name = name
+    self.artists = artists
+  }
 }
 
 package enum PlayRecordScope: Int, CaseIterable, Sendable {
@@ -90,11 +111,21 @@ package enum PlayRecordScope: Int, CaseIterable, Sendable {
 package struct PlayRecordEntry: Equatable, Sendable {
   package let track: PlaylistTrack
   package let playCount: Int
+
+  package init(track: PlaylistTrack, playCount: Int) {
+    self.track = track
+    self.playCount = playCount
+  }
 }
 
 package struct DiscoveredPlaylist: Equatable, Sendable {
   package let id: Int64
   package let name: String
+
+  package init(id: Int64, name: String) {
+    self.id = id
+    self.name = name
+  }
 }
 
 package enum NeteaseCatalogError: Error, Equatable, Sendable {

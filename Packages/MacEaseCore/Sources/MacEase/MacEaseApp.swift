@@ -1,3 +1,4 @@
+import MacEaseAppCore
 import MacEaseSession
 import NeteaseKit
 import SwiftUI
@@ -21,12 +22,15 @@ struct MacEaseApp: App {
   @State private var selectedTab: MainTab = .session
 
   init() {
-    let netease = NeteaseSession()
-    let login = LoginCoordinator(session: netease)
-    let library = PlaylistLibraryCoordinator(session: netease)
-    let discovery = DiscoveryCoordinator(session: netease)
-    let playback = PlaybackController(session: netease)
-    playback.attach(loginCoordinator: login) {
+    // One transport and one credential store for the whole app: every
+    // coordinator shares them instead of constructing its own.
+    let transport = NeteaseSession()
+    let vault = CredentialVault()
+    let login = LoginCoordinator(transport: transport, vault: vault)
+    let library = PlaylistLibraryCoordinator(transport: transport, vault: vault)
+    let discovery = DiscoveryCoordinator(transport: transport, vault: vault)
+    let playback = PlaybackController(transport: transport, vault: vault)
+    playback.attach(session: login) {
       library.isLoading || discovery.isLoading
     }
     _session = State(initialValue: login)
@@ -68,7 +72,7 @@ struct MacEaseApp: App {
                   trackCount: 0,
                   owned: false
                 ),
-                loginCoordinator: session
+                session: session
               )
               selectedTab = .library
             }
@@ -176,7 +180,7 @@ private struct SessionView: View {
       await operation()
       // Roadmap decision: one launch-scoped Discover prefetch after the
       // first successful validation; refreshes stay user-triggered.
-      discovery.prefetch(loginCoordinator: session)
+      discovery.prefetch(session: session)
     }
   }
 }
@@ -202,17 +206,17 @@ private struct PlaylistLibraryView: View {
           .font(.headline)
         Spacer()
         Button("Load Playlists · 1 request", systemImage: "arrow.clockwise") {
-          library.load(reset: true, loginCoordinator: session)
+          library.load(reset: true, session: session)
         }
         .disabled(session.account == nil || requestInFlight)
         Button("Load Liked IDs · 1 request", systemImage: "heart") {
-          library.loadLikedIDs(loginCoordinator: session)
+          library.loadLikedIDs(session: session)
         }
         .disabled(session.account == nil || requestInFlight)
         .help("Marks loaded track rows that are in your liked songs")
         if library.hasMore {
           Button("Load More · 1 request", systemImage: "plus") {
-            library.load(reset: false, loginCoordinator: session)
+            library.load(reset: false, session: session)
           }
           .disabled(requestInFlight)
         }
@@ -223,7 +227,7 @@ private struct PlaylistLibraryView: View {
         TextField("New playlist name", text: $newPlaylistName)
           .frame(maxWidth: 240)
         Button("Create · 1 request", systemImage: "plus.rectangle.on.folder") {
-          library.createPlaylist(named: newPlaylistName, loginCoordinator: session)
+          library.createPlaylist(named: newPlaylistName, session: session)
           newPlaylistName = ""
         }
         .disabled(
@@ -245,7 +249,7 @@ private struct PlaylistLibraryView: View {
         HSplitView {
           List(library.playlists, id: \.id) { playlist in
             Button {
-              library.loadTracks(for: playlist, loginCoordinator: session)
+              library.loadTracks(for: playlist, session: session)
             } label: {
               HStack {
                 VStack(alignment: .leading, spacing: 3) {
@@ -276,7 +280,7 @@ private struct PlaylistLibraryView: View {
                       false,
                       playlistID: playlist.id,
                       playlistName: playlist.name,
-                      loginCoordinator: session
+                      session: session
                     )
                   } label: {
                     Image(systemName: "minus.circle")
@@ -310,7 +314,7 @@ private struct PlaylistLibraryView: View {
                   Button("Rename · 1 request") {
                     library.renameSelectedPlaylist(
                       to: renameText,
-                      loginCoordinator: session
+                      session: session
                     )
                   }
                   .disabled(
@@ -322,7 +326,7 @@ private struct PlaylistLibraryView: View {
                 }
                 if library.hasMoreTracks {
                   Button("Load More Tracks · 1 request", systemImage: "plus") {
-                    library.loadMoreTracks(loginCoordinator: session)
+                    library.loadMoreTracks(session: session)
                   }
                   .disabled(requestInFlight)
                 }
@@ -350,7 +354,7 @@ private struct PlaylistLibraryView: View {
                     Spacer()
                     let isLiked = library.likedIDs?.contains(track.id) == true
                     Button {
-                      library.setLiked(!isLiked, for: track, loginCoordinator: session)
+                      library.setLiked(!isLiked, for: track, session: session)
                     } label: {
                       Image(systemName: isLiked ? "heart.fill" : "heart")
                         .foregroundStyle(isLiked ? .red : .secondary)
@@ -367,7 +371,7 @@ private struct PlaylistLibraryView: View {
                           library.addTrack(
                             track,
                             to: target,
-                            loginCoordinator: session
+                            session: session
                           )
                         }
                       }
@@ -384,7 +388,7 @@ private struct PlaylistLibraryView: View {
                       Button {
                         library.removeSelectedPlaylistTrack(
                           at: index,
-                          loginCoordinator: session
+                          session: session
                         )
                       } label: {
                         Image(systemName: "minus.circle")
@@ -397,7 +401,7 @@ private struct PlaylistLibraryView: View {
                       playback.play(
                         tracks: library.tracks,
                         startIndex: index,
-                        loginCoordinator: session
+                        session: session
                       )
                     }
                     .buttonStyle(.borderless)
@@ -448,7 +452,7 @@ private struct PlaylistLibraryView: View {
     ) {
       Button("Delete · 1 request", role: .destructive) {
         if let playlist = playlistPendingDeletion {
-          library.deletePlaylist(playlist, loginCoordinator: session)
+          library.deletePlaylist(playlist, session: session)
         }
         playlistPendingDeletion = nil
       }
@@ -495,7 +499,7 @@ private struct DiscoverView: View {
                 playback.play(
                   tracks: discovery.dailySongs,
                   startIndex: index,
-                  loginCoordinator: session
+                  session: session
                 )
               }
               .buttonStyle(.borderless)
@@ -504,7 +508,7 @@ private struct DiscoverView: View {
           }
         } header: {
           sectionHeader("Daily Songs") {
-            discovery.loadDailySongs(loginCoordinator: session)
+            discovery.loadDailySongs(session: session)
           }
         }
 
@@ -512,7 +516,7 @@ private struct DiscoverView: View {
           playlistRows(discovery.dailyPlaylists)
         } header: {
           sectionHeader("Daily Playlists") {
-            discovery.loadDailyPlaylists(loginCoordinator: session)
+            discovery.loadDailyPlaylists(session: session)
           }
         }
 
@@ -520,7 +524,7 @@ private struct DiscoverView: View {
           playlistRows(discovery.personalized)
         } header: {
           sectionHeader("Recommended Playlists") {
-            discovery.loadPersonalized(loginCoordinator: session)
+            discovery.loadPersonalized(session: session)
           }
         }
 
@@ -528,7 +532,7 @@ private struct DiscoverView: View {
           playlistRows(discovery.toplists)
         } header: {
           sectionHeader("Toplists") {
-            discovery.loadToplists(loginCoordinator: session)
+            discovery.loadToplists(session: session)
           }
         }
 
@@ -549,7 +553,7 @@ private struct DiscoverView: View {
                 playback.play(
                   tracks: discovery.similarSongs,
                   startIndex: index,
-                  loginCoordinator: session
+                  session: session
                 )
               }
               .buttonStyle(.borderless)
@@ -565,7 +569,7 @@ private struct DiscoverView: View {
             Spacer()
             Button("Load · 1 request", systemImage: "arrow.clockwise") {
               if let seed = playback.currentTrack {
-                discovery.loadSimilarSongs(seed: seed, loginCoordinator: session)
+                discovery.loadSimilarSongs(seed: seed, session: session)
               }
             }
             .buttonStyle(.borderless)
@@ -619,7 +623,7 @@ private struct DiscoverView: View {
             true,
             playlistID: playlist.id,
             playlistName: playlist.name,
-            loginCoordinator: session
+            session: session
           )
         } label: {
           Image(systemName: "plus.circle")
@@ -654,10 +658,10 @@ private struct SearchView: View {
       HStack {
         TextField("Search songs", text: $discovery.searchQuery)
           .onSubmit {
-            if !searchDisabled { discovery.search(loginCoordinator: session) }
+            if !searchDisabled { discovery.search(session: session) }
           }
         Button("Search · 1 request", systemImage: "magnifyingglass") {
-          discovery.search(loginCoordinator: session)
+          discovery.search(session: session)
         }
         .disabled(searchDisabled)
       }
@@ -684,7 +688,7 @@ private struct SearchView: View {
             Spacer()
             let isLiked = library.likedIDs?.contains(track.id) == true
             Button {
-              library.setLiked(!isLiked, for: track, loginCoordinator: session)
+              library.setLiked(!isLiked, for: track, session: session)
             } label: {
               Image(systemName: isLiked ? "heart.fill" : "heart")
                 .foregroundStyle(isLiked ? .red : .secondary)
@@ -695,7 +699,7 @@ private struct SearchView: View {
             Menu {
               ForEach(library.playlists.filter(\.owned), id: \.id) { target in
                 Button(target.name) {
-                  library.addTrack(track, to: target, loginCoordinator: session)
+                  library.addTrack(track, to: target, session: session)
                 }
               }
             } label: {
@@ -711,7 +715,7 @@ private struct SearchView: View {
               playback.play(
                 tracks: discovery.searchResults,
                 startIndex: index,
-                loginCoordinator: session
+                session: session
               )
             }
             .buttonStyle(.borderless)
@@ -751,7 +755,7 @@ private struct PlayRecordsView: View {
         .fixedSize()
         .disabled(requestInFlight)
         Button("Load · 1 request", systemImage: "arrow.clockwise") {
-          discovery.loadRecords(loginCoordinator: session)
+          discovery.loadRecords(session: session)
         }
         .disabled(session.account == nil || requestInFlight)
       }
@@ -787,7 +791,7 @@ private struct PlayRecordsView: View {
               playback.play(
                 tracks: discovery.records.map(\.track),
                 startIndex: index,
-                loginCoordinator: session
+                session: session
               )
             }
             .buttonStyle(.borderless)
@@ -872,7 +876,7 @@ private struct PlaybackBarView: View {
         .disabled(playback.isResolving)
         if playback.canPlayAgain {
           Button("Play Again · 1 request", systemImage: "arrow.counterclockwise") {
-            playback.playAgain(loginCoordinator: session)
+            playback.playAgain(session: session)
           }
           .disabled(session.account == nil || requestInFlight)
         }
@@ -888,7 +892,7 @@ private struct PlaybackBarView: View {
 
       HStack(spacing: 10) {
         Button("Previous · 1 request", systemImage: "backward.end.fill") {
-          playback.playPrevious(loginCoordinator: session)
+          playback.playPrevious(session: session)
         }
         .disabled(!playback.canStepPrevious || stepDisabled)
         if playback.phase == .paused {
@@ -902,7 +906,7 @@ private struct PlaybackBarView: View {
           .disabled(playback.phase != .playing)
         }
         Button("Next · 1 request", systemImage: "forward.end.fill") {
-          playback.playNext(loginCoordinator: session)
+          playback.playNext(session: session)
         }
         .disabled(!playback.canStepNext || stepDisabled)
 

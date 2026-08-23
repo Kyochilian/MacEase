@@ -7,6 +7,7 @@ let package = Package(
   platforms: [.macOS(.v15)],
   products: [
     .library(name: "NeteaseKit", targets: ["NeteaseKit"]),
+    .library(name: "MacEaseAppCore", targets: ["MacEaseAppCore"]),
     .executable(name: "MacEase", targets: ["MacEase"]),
     .executable(name: "GateALyricsProbe", targets: ["GateALyricsProbe"]),
     .executable(name: "GateBLoginHarness", targets: ["GateBLoginHarness"]),
@@ -15,13 +16,19 @@ let package = Package(
   ],
   targets: [
     .target(name: "NeteaseKit"),
+    // App state, coordinators and the operation arbiter. Deliberately free
+    // of AppKit and WebKit so its tests run without a GUI stack.
+    .target(
+      name: "MacEaseAppCore",
+      dependencies: ["NeteaseKit"]
+    ),
     .target(
       name: "MacEaseSession",
-      dependencies: ["NeteaseKit"]
+      dependencies: ["NeteaseKit", "MacEaseAppCore"]
     ),
     .executableTarget(
       name: "MacEase",
-      dependencies: ["MacEaseSession", "NeteaseKit"]
+      dependencies: ["MacEaseSession", "MacEaseAppCore", "NeteaseKit"]
     ),
     .executableTarget(
       name: "GateALyricsProbe",
@@ -42,6 +49,10 @@ let package = Package(
     .testTarget(
       name: "NeteaseKitTests",
       dependencies: ["NeteaseKit"]
+    ),
+    .testTarget(
+      name: "MacEaseAppCoreTests",
+      dependencies: ["MacEaseAppCore", "NeteaseKit"]
     ),
   ],
   swiftLanguageModes: [.v6]

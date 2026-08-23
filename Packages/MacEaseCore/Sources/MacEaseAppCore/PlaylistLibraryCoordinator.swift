@@ -1,43 +1,43 @@
 import Foundation
-import MacEaseSession
 import NeteaseKit
 import Observation
 
 @MainActor
 @Observable
-final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
+package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
   private static let playlistPageSize = 30
 
-  @ObservationIgnored private let session: NeteaseSession
-  @ObservationIgnored let vault = CredentialVault()
-  @ObservationIgnored private(set) var generation = 0
+  @ObservationIgnored private let transport: any NeteaseTransporting
+  @ObservationIgnored package let vault: any CredentialStoring
+  @ObservationIgnored package private(set) var generation = 0
   @ObservationIgnored private var loadTask: Task<Void, Never>?
   @ObservationIgnored private var trackIDs: [Int64] = []
   @ObservationIgnored private var loadedTrackIDCount = 0
 
-  var noStoredSessionStatus: String { "No stored session to load library" }
+  package var noStoredSessionStatus: String { "No stored session to load library" }
 
-  func clearSessionScopedData() {
+  package func clearSessionScopedData() {
     clearLibrary()
   }
 
-  var playlists: [UserPlaylist] = []
-  var selectedPlaylist: UserPlaylist?
-  var tracks: [PlaylistTrack] = []
-  var likedIDs: Set<Int64>?
-  var hasMore = false
-  var hasMoreTracks = false
-  var isLoading = false
-  var status = "Validate the session before loading playlists"
+  package var playlists: [UserPlaylist] = []
+  package var selectedPlaylist: UserPlaylist?
+  package var tracks: [PlaylistTrack] = []
+  package var likedIDs: Set<Int64>?
+  package var hasMore = false
+  package var hasMoreTracks = false
+  package var isLoading = false
+  package var status = "Validate the session before loading playlists"
 
-  init(session: NeteaseSession) {
-    self.session = session
+  package init(transport: any NeteaseTransporting, vault: any CredentialStoring) {
+    self.transport = transport
+    self.vault = vault
   }
 
-  func load(reset: Bool, loginCoordinator: LoginCoordinator) {
-    guard !loginCoordinator.isBusy, !isLoading else { return }
+  package func load(reset: Bool, session: any SessionProviding) {
+    guard !session.isBusy, !isLoading else { return }
     guard reset || hasMore else { return }
-    guard let account = loginCoordinator.account else {
+    guard let account = session.account else {
       status = "Validate the session before loading playlists"
       return
     }
@@ -51,11 +51,11 @@ final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
       await perform(
         account: account,
         generation: currentGeneration,
-        loginCoordinator: loginCoordinator,
+        session: session,
         invalidateOnService301: true,
         operation: "Playlist"
       ) { credential in
-        let page = try await self.session.userPlaylists(
+        let page = try await self.transport.userPlaylists(
           userID: account.userID,
           limit: Self.playlistPageSize,
           offset: offset,
@@ -66,7 +66,7 @@ final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
             account: account,
             credential: credential,
             generation: currentGeneration,
-            loginCoordinator: loginCoordinator
+            session: session
           )
         else { return }
 
@@ -81,12 +81,12 @@ final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
     }
   }
 
-  func loadTracks(
+  package func loadTracks(
     for playlist: UserPlaylist,
-    loginCoordinator: LoginCoordinator
+    session: any SessionProviding
   ) {
-    guard !loginCoordinator.isBusy, !isLoading else { return }
-    guard let account = loginCoordinator.account else {
+    guard !session.isBusy, !isLoading else { return }
+    guard let account = session.account else {
       status = "Validate the session before loading tracks"
       return
     }
@@ -101,11 +101,11 @@ final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
       await perform(
         account: account,
         generation: currentGeneration,
-        loginCoordinator: loginCoordinator,
+        session: session,
         invalidateOnService301: false,
         operation: "Playlist/song detail"
       ) { credential in
-        let detail = try await self.session.playlistDetail(
+        let detail = try await self.transport.playlistDetail(
           playlistID: playlist.id,
           credential: credential
         )
@@ -114,7 +114,7 @@ final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
             account: account,
             credential: credential,
             generation: currentGeneration,
-            loginCoordinator: loginCoordinator
+            session: session
           )
         else { return }
         self.selectedPlaylist = UserPlaylist(
@@ -132,7 +132,7 @@ final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
           detail.trackIDs.prefix(NeteaseSession.songDetailRequestLimit)
         )
         self.status = "Loading song metadata (request 2 of 2)"
-        let batch = try await self.session.songDetails(
+        let batch = try await self.transport.songDetails(
           songIDs: batchIDs,
           credential: credential
         )
@@ -141,7 +141,7 @@ final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
             account: account,
             credential: credential,
             generation: currentGeneration,
-            loginCoordinator: loginCoordinator
+            session: session
           )
         else { return }
 
@@ -156,9 +156,9 @@ final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
     }
   }
 
-  func loadMoreTracks(loginCoordinator: LoginCoordinator) {
-    guard !loginCoordinator.isBusy, !isLoading, hasMoreTracks else { return }
-    guard let account = loginCoordinator.account else {
+  package func loadMoreTracks(session: any SessionProviding) {
+    guard !session.isBusy, !isLoading, hasMoreTracks else { return }
+    guard let account = session.account else {
       status = "Validate the session before loading tracks"
       return
     }
@@ -170,7 +170,7 @@ final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
       await perform(
         account: account,
         generation: currentGeneration,
-        loginCoordinator: loginCoordinator,
+        session: session,
         invalidateOnService301: false,
         operation: "Song detail"
       ) { credential in
@@ -179,7 +179,7 @@ final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
           self.trackIDs.count
         )
         let batchIDs = Array(self.trackIDs[self.loadedTrackIDCount..<end])
-        let batch = try await self.session.songDetails(
+        let batch = try await self.transport.songDetails(
           songIDs: batchIDs,
           credential: credential
         )
@@ -188,7 +188,7 @@ final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
             account: account,
             credential: credential,
             generation: currentGeneration,
-            loginCoordinator: loginCoordinator
+            session: session
           )
         else { return }
 
@@ -202,9 +202,9 @@ final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
     }
   }
 
-  func loadLikedIDs(loginCoordinator: LoginCoordinator) {
-    guard !loginCoordinator.isBusy, !isLoading else { return }
-    guard let account = loginCoordinator.account else {
+  package func loadLikedIDs(session: any SessionProviding) {
+    guard !session.isBusy, !isLoading else { return }
+    guard let account = session.account else {
       status = "Validate the session before loading liked songs"
       return
     }
@@ -216,11 +216,11 @@ final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
       await perform(
         account: account,
         generation: currentGeneration,
-        loginCoordinator: loginCoordinator,
+        session: session,
         invalidateOnService301: false,
         operation: "Liked songs"
       ) { credential in
-        let ids = try await self.session.likedSongIDs(
+        let ids = try await self.transport.likedSongIDs(
           userID: account.userID,
           credential: credential
         )
@@ -229,7 +229,7 @@ final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
             account: account,
             credential: credential,
             generation: currentGeneration,
-            loginCoordinator: loginCoordinator
+            session: session
           )
         else { return }
 
@@ -242,13 +242,13 @@ final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
   /// The first write action: toggles the server-side liked state for one
   /// track (1 request). On success only `likedIDs` is updated locally; the
   /// liked list is never auto-refreshed. Any failure is reported and stops.
-  func setLiked(
+  package func setLiked(
     _ liked: Bool,
     for track: PlaylistTrack,
-    loginCoordinator: LoginCoordinator
+    session: any SessionProviding
   ) {
-    guard !loginCoordinator.isBusy, !isLoading else { return }
-    guard let account = loginCoordinator.account else {
+    guard !session.isBusy, !isLoading else { return }
+    guard let account = session.account else {
       status = "Validate the session before changing liked songs"
       return
     }
@@ -260,11 +260,11 @@ final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
       await perform(
         account: account,
         generation: currentGeneration,
-        loginCoordinator: loginCoordinator,
+        session: session,
         invalidateOnService301: false,
         operation: liked ? "Like" : "Unlike"
       ) { credential in
-        try await self.session.setSongLiked(
+        try await self.transport.setSongLiked(
           songID: track.id,
           liked: liked,
           credential: credential
@@ -274,7 +274,7 @@ final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
             account: account,
             credential: credential,
             generation: currentGeneration,
-            loginCoordinator: loginCoordinator
+            session: session
           )
         else { return }
 
@@ -295,26 +295,26 @@ final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
   /// Playlist write actions (1 request each). None of them triggers an
   /// automatic reload: the user reloads explicitly, so the request count stays
   /// exactly what the button promises.
-  func createPlaylist(named name: String, loginCoordinator: LoginCoordinator) {
+  package func createPlaylist(named name: String, session: any SessionProviding) {
     let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !trimmed.isEmpty else { return }
     write(
       loadingStatus: "Creating the playlist (1 request)",
       operation: "Create playlist",
-      loginCoordinator: loginCoordinator
+      session: session
     ) { credential in
-      try await self.session.createPlaylist(name: trimmed, credential: credential)
+      try await self.transport.createPlaylist(name: trimmed, credential: credential)
       return { "Created \(trimmed); Load Playlists to see it" }
     }
   }
 
-  func deletePlaylist(_ playlist: UserPlaylist, loginCoordinator: LoginCoordinator) {
+  package func deletePlaylist(_ playlist: UserPlaylist, session: any SessionProviding) {
     write(
       loadingStatus: "Deleting the playlist (1 request)",
       operation: "Delete playlist",
-      loginCoordinator: loginCoordinator
+      session: session
     ) { credential in
-      try await self.session.deletePlaylist(
+      try await self.transport.deletePlaylist(
         playlistID: playlist.id,
         credential: credential
       )
@@ -328,7 +328,7 @@ final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
     }
   }
 
-  func renameSelectedPlaylist(to name: String, loginCoordinator: LoginCoordinator) {
+  package func renameSelectedPlaylist(to name: String, session: any SessionProviding) {
     let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
     guard let playlist = selectedPlaylist, !trimmed.isEmpty,
       trimmed != playlist.name
@@ -336,9 +336,9 @@ final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
     write(
       loadingStatus: "Renaming the playlist (1 request)",
       operation: "Rename playlist",
-      loginCoordinator: loginCoordinator
+      session: session
     ) { credential in
-      try await self.session.renamePlaylist(
+      try await self.transport.renamePlaylist(
         playlistID: playlist.id,
         name: trimmed,
         credential: credential
@@ -359,17 +359,17 @@ final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
     }
   }
 
-  func addTrack(
+  package func addTrack(
     _ track: PlaylistTrack,
     to playlist: UserPlaylist,
-    loginCoordinator: LoginCoordinator
+    session: any SessionProviding
   ) {
     write(
       loadingStatus: "Adding the track (1 request)",
       operation: "Add track",
-      loginCoordinator: loginCoordinator
+      session: session
     ) { credential in
-      try await self.session.editPlaylistTracks(
+      try await self.transport.editPlaylistTracks(
         .add,
         playlistID: playlist.id,
         trackIDs: [track.id],
@@ -381,7 +381,7 @@ final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
 
   /// Removes from the currently selected playlist and drops the row locally;
   /// the detail list is not refetched.
-  func removeSelectedPlaylistTrack(at index: Int, loginCoordinator: LoginCoordinator) {
+  package func removeSelectedPlaylistTrack(at index: Int, session: any SessionProviding) {
     guard let playlist = selectedPlaylist, tracks.indices.contains(index) else {
       return
     }
@@ -389,9 +389,9 @@ final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
     write(
       loadingStatus: "Removing the track (1 request)",
       operation: "Remove track",
-      loginCoordinator: loginCoordinator
+      session: session
     ) { credential in
-      try await self.session.editPlaylistTracks(
+      try await self.transport.editPlaylistTracks(
         .del,
         playlistID: playlist.id,
         trackIDs: [track.id],
@@ -409,20 +409,20 @@ final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
   /// Subscribes to a playlist discovered elsewhere (1 request). See
   /// `NeteaseSession.setPlaylistSubscribed` for the anti-cheat token note: a
   /// `-460` here means the endpoint demands one and the action simply stops.
-  func setSubscribed(
+  package func setSubscribed(
     _ subscribed: Bool,
     playlistID: Int64,
     playlistName: String,
-    loginCoordinator: LoginCoordinator
+    session: any SessionProviding
   ) {
     write(
       loadingStatus: subscribed
         ? "Subscribing to the playlist (1 request)"
         : "Unsubscribing from the playlist (1 request)",
       operation: subscribed ? "Subscribe" : "Unsubscribe",
-      loginCoordinator: loginCoordinator
+      session: session
     ) { credential in
-      try await self.session.setPlaylistSubscribed(
+      try await self.transport.setPlaylistSubscribed(
         subscribed,
         playlistID: playlistID,
         credential: credential
@@ -439,11 +439,11 @@ final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
   private func write(
     loadingStatus: String,
     operation: String,
-    loginCoordinator: LoginCoordinator,
+    session: any SessionProviding,
     body: @escaping @MainActor (NeteaseCredential) async throws -> @MainActor () -> String
   ) {
-    guard !loginCoordinator.isBusy, !isLoading else { return }
-    guard let account = loginCoordinator.account else {
+    guard !session.isBusy, !isLoading else { return }
+    guard let account = session.account else {
       status = "Validate the session before changing playlists"
       return
     }
@@ -455,7 +455,7 @@ final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
       await perform(
         account: account,
         generation: currentGeneration,
-        loginCoordinator: loginCoordinator,
+        session: session,
         invalidateOnService301: false,
         operation: operation
       ) { credential in
@@ -465,7 +465,7 @@ final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
             account: account,
             credential: credential,
             generation: currentGeneration,
-            loginCoordinator: loginCoordinator
+            session: session
           )
         else { return }
         self.status = apply()
@@ -473,7 +473,13 @@ final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
     }
   }
 
-  func reset() {
+    /// Test seam: awaits the task the last explicit action started, so a test
+  /// can assert on settled state without polling.
+  package func settleForTesting() async {
+    await loadTask?.value
+  }
+
+package func reset() {
     generation += 1
     loadTask?.cancel()
     loadTask = nil
@@ -485,7 +491,7 @@ final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
   private func perform(
     account: NeteaseAccount,
     generation: Int,
-    loginCoordinator: LoginCoordinator,
+    session: any SessionProviding,
     invalidateOnService301: Bool,
     operation: String,
     body: @MainActor (NeteaseCredential) async throws -> Void
@@ -497,7 +503,7 @@ final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
       credential = try await currentCredential(
         account: account,
         generation: generation,
-        loginCoordinator: loginCoordinator
+        session: session
       )
       guard let credential else { return }
       try await body(credential)
@@ -506,7 +512,7 @@ final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
         error,
         credential: credential,
         generation: generation,
-        loginCoordinator: loginCoordinator,
+        session: session,
         invalidateOnService301: invalidateOnService301,
         operation: operation
       )
@@ -517,7 +523,7 @@ final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
     _ error: Error,
     credential: NeteaseCredential?,
     generation: Int,
-    loginCoordinator: LoginCoordinator,
+    session: any SessionProviding,
     invalidateOnService301: Bool,
     operation: String
   ) async {
@@ -528,7 +534,7 @@ final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
         serviceError.statusCode == 301,
         let credential
       {
-        let invalidation = await loginCoordinator.invalidateStoredSession(
+        let invalidation = await session.invalidateStoredSession(
           matching: credential,
           message: "Stored session expired; sign in again"
         )

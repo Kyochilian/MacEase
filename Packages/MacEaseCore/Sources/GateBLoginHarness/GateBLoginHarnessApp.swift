@@ -7,7 +7,10 @@ import WebKit
 @main
 @MainActor
 struct GateBLoginHarnessApp: App {
-  @State private var coordinator = LoginCoordinator()
+  @State private var coordinator = LoginCoordinator(
+    transport: NeteaseSession(),
+    vault: CredentialVault()
+  )
   @State private var playback = PlaybackProbeCoordinator()
   @State private var probes = SandboxProbeCoordinator()
 

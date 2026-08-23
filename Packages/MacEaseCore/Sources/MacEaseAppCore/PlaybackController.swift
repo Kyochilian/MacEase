@@ -1,6 +1,5 @@
 import AVFoundation
 import Foundation
-import MacEaseSession
 import NeteaseKit
 import Observation
 
@@ -10,8 +9,8 @@ import Observation
 /// no automatic retry or skip. There is no prefetch and no background refresh.
 @MainActor
 @Observable
-final class PlaybackController {
-  enum Phase: Equatable {
+package final class PlaybackController {
+  package enum Phase: Equatable {
     case idle
     case resolving
     case playing
@@ -20,7 +19,7 @@ final class PlaybackController {
     case failed
   }
 
-  enum SleepTimerState: Equatable {
+  package enum SleepTimerState: Equatable {
     case off
     case armed(Date)
     case finishingTrack
@@ -28,8 +27,8 @@ final class PlaybackController {
 
   private static let volumeDefaultsKey = "playback.volume"
 
-  @ObservationIgnored private let session: NeteaseSession
-  @ObservationIgnored private let vault = CredentialVault()
+  @ObservationIgnored private let transport: any NeteaseTransporting
+  @ObservationIgnored private let vault: any CredentialStoring
   @ObservationIgnored private var gate = PlaybackIntentGate()
   @ObservationIgnored private var rng = SystemRandomNumberGenerator()
   @ObservationIgnored private var playTask: Task<Void, Never>?
@@ -41,56 +40,57 @@ final class PlaybackController {
   @ObservationIgnored private var currentAssetSummary: String?
   @ObservationIgnored private var activeToken: PlaybackIntentGate.Token?
   @ObservationIgnored private var queueTracks: [PlaylistTrack] = []
-  @ObservationIgnored private weak var attachedLogin: LoginCoordinator?
+  @ObservationIgnored private weak var attachedSession: (any SessionProviding)?
   @ObservationIgnored private var libraryBusy: (@MainActor () -> Bool)?
   @ObservationIgnored private var sleepTask: Task<Void, Never>?
   @ObservationIgnored private var sleepGeneration = 0
 
-  private(set) var phase: Phase = .idle
-  private(set) var queue: PlaybackQueue?
-  private(set) var sleepTimer: SleepTimerState = .off
-  private(set) var trackName: String?
-  private(set) var positionSeconds: Double = 0
-  private(set) var durationSeconds: Double?
-  private(set) var status = "Play a track from the library"
-  var quality: PlaybackQuality = .standard
-  var sleepStopsImmediately = false
+  package private(set) var phase: Phase = .idle
+  package private(set) var queue: PlaybackQueue?
+  package private(set) var sleepTimer: SleepTimerState = .off
+  package private(set) var trackName: String?
+  package private(set) var positionSeconds: Double = 0
+  package private(set) var durationSeconds: Double?
+  package private(set) var status = "Play a track from the library"
+  package var quality: PlaybackQuality = .standard
+  package var sleepStopsImmediately = false
 
-  var playbackMode: PlaybackMode = .sequential {
+  package var playbackMode: PlaybackMode = .sequential {
     didSet { queue?.setMode(playbackMode, using: &rng) }
   }
 
-  var volume: Float = 1 {
+  package var volume: Float = 1 {
     didSet {
       player?.volume = volume
       UserDefaults.standard.set(Double(volume), forKey: Self.volumeDefaultsKey)
     }
   }
 
-  var isMuted = false {
+  package var isMuted = false {
     didSet { player?.isMuted = isMuted }
   }
 
-  var isResolving: Bool { phase == .resolving }
-  var isActive: Bool {
+  package var isResolving: Bool { phase == .resolving }
+  package var isActive: Bool {
     phase == .resolving || phase == .playing || phase == .paused
   }
-  var canPlayAgain: Bool { phase == .failed && recoverySnapshot != nil }
-  var canStepNext: Bool { queue?.nextIndex() != nil }
-  var canStepPrevious: Bool { queue?.previousIndex() != nil }
-  var queuePosition: String? {
+  package var canPlayAgain: Bool { phase == .failed && recoverySnapshot != nil }
+  package var canStepNext: Bool { queue?.nextIndex() != nil }
+  package var canStepPrevious: Bool { queue?.previousIndex() != nil }
+  package var queuePosition: String? {
     queue.map { "\($0.currentIndex + 1) of \($0.count)" }
   }
   /// The entry a similar-songs seed refers to, when a queue is active.
-  var currentTrack: PlaylistTrack? {
+  package var currentTrack: PlaylistTrack? {
     guard let index = queue?.currentIndex, queueTracks.indices.contains(index) else {
       return nil
     }
     return queueTracks[index]
   }
 
-  init(session: NeteaseSession) {
-    self.session = session
+  package init(transport: any NeteaseTransporting, vault: any CredentialStoring) {
+    self.transport = transport
+    self.vault = vault
     if let stored = UserDefaults.standard.object(forKey: Self.volumeDefaultsKey)
       as? Double
     {
@@ -99,17 +99,17 @@ final class PlaybackController {
   }
 
   /// Wires the references auto-advance needs for its preflight checks.
-  func attach(
-    loginCoordinator: LoginCoordinator,
+  package func attach(
+    session: any SessionProviding,
     libraryBusy: @escaping @MainActor () -> Bool
   ) {
-    attachedLogin = loginCoordinator
+    attachedSession = session
     self.libraryBusy = libraryBusy
   }
 
-  func play(tracks: [PlaylistTrack], startIndex: Int, loginCoordinator: LoginCoordinator) {
-    guard !loginCoordinator.isBusy else { return }
-    guard let account = loginCoordinator.account else {
+  package func play(tracks: [PlaylistTrack], startIndex: Int, session: any SessionProviding) {
+    guard !session.isBusy else { return }
+    guard let account = session.account else {
       status = "Validate the session before playback"
       return
     }
@@ -128,22 +128,22 @@ final class PlaybackController {
     startEntry(
       at: startIndex,
       account: account,
-      loginCoordinator: loginCoordinator,
+      session: session,
       auto: false
     )
   }
 
-  func playNext(loginCoordinator: LoginCoordinator) {
-    step(to: queue?.nextIndex(), loginCoordinator: loginCoordinator)
+  package func playNext(session: any SessionProviding) {
+    step(to: queue?.nextIndex(), session: session)
   }
 
-  func playPrevious(loginCoordinator: LoginCoordinator) {
-    step(to: queue?.previousIndex(), loginCoordinator: loginCoordinator)
+  package func playPrevious(session: any SessionProviding) {
+    step(to: queue?.previousIndex(), session: session)
   }
 
-  func playAgain(loginCoordinator: LoginCoordinator) {
-    guard !loginCoordinator.isBusy else { return }
-    guard let account = loginCoordinator.account else {
+  package func playAgain(session: any SessionProviding) {
+    guard !session.isBusy else { return }
+    guard let account = session.account else {
       status = "Validate the session before playback"
       return
     }
@@ -159,20 +159,26 @@ final class PlaybackController {
         quality: snapshot.quality,
         account: account,
         recovery: snapshot,
-        loginCoordinator: loginCoordinator,
+        session: session,
         token: token
       )
     }
   }
 
-  func pause() {
+    /// Test seam: awaits the task the last explicit action started, so a test
+  /// can assert on settled state without polling.
+  package func settleForTesting() async {
+    await playTask?.value
+  }
+
+package func pause() {
     guard phase == .playing, let player else { return }
     player.pause()
     phase = .paused
     status = "Paused"
   }
 
-  func resume() {
+  package func resume() {
     guard phase == .paused, let player else { return }
     player.play()
     phase = .playing
@@ -180,7 +186,7 @@ final class PlaybackController {
   }
 
   /// Local AVPlayer seek; it never issues a NetEase request.
-  func seek(to seconds: Double) {
+  package func seek(to seconds: Double) {
     guard
       phase == .playing || phase == .paused,
       let player,
@@ -200,7 +206,7 @@ final class PlaybackController {
     }
   }
 
-  func stop() {
+  package func stop() {
     gate.cancel()
     playTask?.cancel()
     playTask = nil
@@ -217,7 +223,7 @@ final class PlaybackController {
 
   /// A local timer; it never issues requests. Zero minutes cancels it,
   /// including a pending stop-after-track.
-  func setSleepTimer(minutes: Int) {
+  package func setSleepTimer(minutes: Int) {
     sleepGeneration += 1
     sleepTask?.cancel()
     sleepTask = nil
@@ -251,9 +257,9 @@ final class PlaybackController {
     }
   }
 
-  private func step(to target: Int?, loginCoordinator: LoginCoordinator) {
-    guard !loginCoordinator.isBusy else { return }
-    guard let account = loginCoordinator.account else {
+  private func step(to target: Int?, session: any SessionProviding) {
+    guard !session.isBusy else { return }
+    guard let account = session.account else {
       status = "Validate the session before playback"
       return
     }
@@ -263,7 +269,7 @@ final class PlaybackController {
     startEntry(
       at: target,
       account: account,
-      loginCoordinator: loginCoordinator,
+      session: session,
       auto: false
     )
   }
@@ -271,7 +277,7 @@ final class PlaybackController {
   private func startEntry(
     at index: Int,
     account: NeteaseAccount,
-    loginCoordinator: LoginCoordinator,
+    session: any SessionProviding,
     auto: Bool
   ) {
     guard queueTracks.indices.contains(index) else { return }
@@ -291,7 +297,7 @@ final class PlaybackController {
         quality: requestedQuality,
         account: account,
         recovery: nil,
-        loginCoordinator: loginCoordinator,
+        session: session,
         token: token
       )
     }
@@ -302,7 +308,7 @@ final class PlaybackController {
     quality: PlaybackQuality,
     account: NeteaseAccount,
     recovery: PlaybackRecoverySnapshot?,
-    loginCoordinator: LoginCoordinator,
+    session: any SessionProviding,
     token: PlaybackIntentGate.Token
   ) async {
     defer {
@@ -316,13 +322,13 @@ final class PlaybackController {
       guard
         let credential = try await currentCredential(
           account: account,
-          loginCoordinator: loginCoordinator,
+          session: session,
           token: token
         )
       else { return }
       requestCredential = credential
 
-      let resolution = try await session.resolveSongURL(
+      let resolution = try await transport.resolveSongURL(
         songID: songID,
         quality: quality,
         credential: credential
@@ -332,7 +338,7 @@ final class PlaybackController {
         try await sessionRemainsCurrent(
           account: account,
           credential: credential,
-          loginCoordinator: loginCoordinator,
+          session: session,
           token: token
         )
       else { return }
@@ -352,7 +358,7 @@ final class PlaybackController {
       await handle(
         error,
         credential: requestCredential,
-        loginCoordinator: loginCoordinator,
+        session: session,
         token: token
       )
     }
@@ -476,7 +482,7 @@ final class PlaybackController {
       finishQueue(status: "Queue finished; no automatic repeat")
     case .play(let index):
       guard
-        let login = attachedLogin,
+        let login = attachedSession,
         !login.isBusy,
         let account = login.account,
         libraryBusy?() != true,
@@ -485,7 +491,7 @@ final class PlaybackController {
         finishQueue(status: "Track finished; press Next to continue the queue")
         return
       }
-      startEntry(at: index, account: account, loginCoordinator: login, auto: true)
+      startEntry(at: index, account: account, session: login, auto: true)
     }
   }
 
@@ -516,22 +522,18 @@ final class PlaybackController {
 
   private func currentCredential(
     account: NeteaseAccount,
-    loginCoordinator: LoginCoordinator,
+    session: any SessionProviding,
     token: PlaybackIntentGate.Token
   ) async throws -> NeteaseCredential? {
     let credential = try await vault.load()
     try checkCurrent(token)
     guard let credential else {
-      loginCoordinator.hasStoredSession = false
-      loginCoordinator.account = nil
-      loginCoordinator.status = "No stored session to validate"
+      session.reportDivergence(.storedSessionMissing)
       abandonPlayback(status: "No stored session for playback")
       return nil
     }
-    guard loginCoordinator.matchesValidatedSession(credential, account: account) else {
-      loginCoordinator.hasStoredSession = true
-      loginCoordinator.account = nil
-      loginCoordinator.status = "Stored session changed; validate again"
+    guard session.matchesValidatedSession(credential, account: account) else {
+      session.reportDivergence(.storedSessionChanged(hasStoredItem: true))
       abandonPlayback(status: "Session changed; validate again")
       return nil
     }
@@ -541,18 +543,16 @@ final class PlaybackController {
   private func sessionRemainsCurrent(
     account: NeteaseAccount,
     credential: NeteaseCredential,
-    loginCoordinator: LoginCoordinator,
+    session: any SessionProviding,
     token: PlaybackIntentGate.Token
   ) async throws -> Bool {
     let stored = try await vault.load()
     try checkCurrent(token)
     guard
       stored == credential,
-      loginCoordinator.matchesValidatedSession(credential, account: account)
+      session.matchesValidatedSession(credential, account: account)
     else {
-      loginCoordinator.hasStoredSession = stored != nil
-      loginCoordinator.account = nil
-      loginCoordinator.status = "Stored session changed; validate again"
+      session.reportDivergence(.storedSessionChanged(hasStoredItem: stored != nil))
       abandonPlayback(status: "Session changed; validate again")
       return false
     }
@@ -562,7 +562,7 @@ final class PlaybackController {
   private func handle(
     _ error: Error,
     credential: NeteaseCredential?,
-    loginCoordinator: LoginCoordinator,
+    session: any SessionProviding,
     token: PlaybackIntentGate.Token
   ) async {
     releasePlayback()
@@ -574,7 +574,7 @@ final class PlaybackController {
         status = "Song URL service error 301"
         return
       }
-      let invalidation = await loginCoordinator.invalidateStoredSession(
+      let invalidation = await session.invalidateStoredSession(
         matching: credential,
         message: "Stored session expired; sign in again"
       )

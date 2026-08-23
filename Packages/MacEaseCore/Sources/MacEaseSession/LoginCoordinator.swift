@@ -1,24 +1,20 @@
 import AppKit
 import Foundation
+import MacEaseAppCore
 import NeteaseKit
 import Observation
 import WebKit
 
-package enum SessionInvalidationResult {
-  case deleted
-  case notCurrent
-  case busy
-  case failed
-}
-
 @MainActor
 @Observable
-package final class LoginCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
+package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDelegate,
+  WKUIDelegate
+{
   private static let loginURL = URL(string: "https://music.163.com/login")!
 
   @ObservationIgnored private let dataStore: WKWebsiteDataStore
-  @ObservationIgnored private let session: NeteaseSession
-  @ObservationIgnored private let vault: CredentialVault
+  @ObservationIgnored private let transport: any NeteaseTransporting
+  @ObservationIgnored private let vault: any CredentialStoring
   @ObservationIgnored private var validatedCredential: NeteaseCredential?
   @ObservationIgnored package let webView: WKWebView
 
@@ -28,14 +24,17 @@ package final class LoginCoordinator: NSObject, WKNavigationDelegate, WKUIDelega
   package var manualCookieHeader = ""
   package var account: NeteaseAccount?
 
-  package init(session: NeteaseSession = NeteaseSession()) {
+  package init(
+    transport: any NeteaseTransporting,
+    vault: any CredentialStoring
+  ) {
     let dataStore = WKWebsiteDataStore.nonPersistent()
     let configuration = WKWebViewConfiguration()
     configuration.websiteDataStore = dataStore
 
     self.dataStore = dataStore
-    self.session = session
-    self.vault = CredentialVault()
+    self.transport = transport
+    self.vault = vault
     self.webView = WKWebView(frame: .zero, configuration: configuration)
     super.init()
 
@@ -139,7 +138,7 @@ package final class LoginCoordinator: NSObject, WKNavigationDelegate, WKUIDelega
 
     let state: AccountSessionState
     do {
-      state = try await session.accountStatus(credential: credential)
+      state = try await transport.accountStatus(credential: credential)
     } catch let error as NeteaseServiceError {
       status = "Manual Cookie validation \(error.source.rawValue) error \(error.statusCode)"
       return
@@ -180,7 +179,7 @@ package final class LoginCoordinator: NSObject, WKNavigationDelegate, WKUIDelega
       credential = loaded
       hasStoredSession = true
 
-      switch try await session.accountStatus(credential: loaded) {
+      switch try await transport.accountStatus(credential: loaded) {
       case .authenticated(let account):
         let currentCredential = try await vault.load()
         guard currentCredential == loaded else {
@@ -227,6 +226,21 @@ package final class LoginCoordinator: NSObject, WKNavigationDelegate, WKUIDelega
     account: NeteaseAccount
   ) -> Bool {
     self.account == account && validatedCredential == credential
+  }
+
+  /// The single place a coordinator's observation of the stored item is
+  /// committed to session state. Coordinators never write these fields.
+  package func reportDivergence(_ divergence: SessionDivergence) {
+    account = nil
+    validatedCredential = nil
+    switch divergence {
+    case .storedSessionMissing:
+      hasStoredSession = false
+      status = "No stored session to validate"
+    case .storedSessionChanged(let hasStoredItem):
+      hasStoredSession = hasStoredItem
+      status = "Stored session changed; validate again"
+    }
   }
 
   private func deleteStoredSession(
