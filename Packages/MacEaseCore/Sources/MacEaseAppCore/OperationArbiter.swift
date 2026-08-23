@@ -32,22 +32,41 @@ package struct ActiveOperation: Equatable, Sendable {
 package enum OperationOutcome: Equatable, Sendable {
   /// Finished and its result was published.
   case applied
-  /// Finished with a classified failure.
+  /// Finished with a classified failure. The server either did not act, or
+  /// acted and said so.
   case failed
   /// Abandoned by the client.
   case cancelled
-  /// Produced by the arbiter, never passed in: a write stopped being tracked
-  /// after its request left the client, so whether the server executed it is
-  /// unknown.
+  /// The server acknowledged the write, but the result could not be published
+  /// locally, typically because the session changed between the response and
+  /// the postflight check. The account did change; the visible list did not.
+  case appliedRemotelyOnly
+  /// The request left the client and no answer arrived, so whether the server
+  /// executed it cannot be determined.
   case outcomeUnknown
 }
 
-/// A write whose server-side result the client cannot determine. It is never
-/// reported as success or failure, and it is never resolved by an automatic
-/// follow-up request — only the user can decide to go and look.
+/// A write the user cannot read off the screen. It is never reported as a
+/// plain success or failure, and it is never resolved by an automatic
+/// follow-up request: only the user can decide to go and look.
 package struct UnresolvedOutcome: Equatable, Identifiable, Sendable {
+  package enum Kind: Equatable, Sendable {
+    /// Sent, no answer: the server may or may not have executed it.
+    case unknown
+    /// Acknowledged by the server, not reflected in what is on screen.
+    case appliedRemotelyOnly
+  }
+
   package let id: UUID
   package let name: String
+  package let kind: Kind
+
+  package var advice: String {
+    switch kind {
+    case .unknown: "outcome unknown, reload to check"
+    case .appliedRemotelyOnly: "applied on the server, reload to see it"
+    }
+  }
 }
 
 /// The single owner of "a NetEase request is in flight".
@@ -106,10 +125,19 @@ package final class OperationArbiter {
   }
 
   /// Whether abandoning this operation right now would leave the server
-  /// result unknown. Callers use it to refuse to cancel rather than to guess.
+  /// result unknown. Only a write whose request is still in flight qualifies:
+  /// once the response is in hand the phase is `.settling` and the server's
+  /// answer is known even if the local apply never runs.
   package func abandoningLosesTheOutcome(_ token: OperationToken) -> Bool {
     guard let operation = active, operation.id == token.id else { return false }
-    return operation.effect == .write && operation.phase != .preparing
+    return operation.effect == .write && operation.phase == .requestSent
+  }
+
+  /// True when a write's request is in flight. A module reset consults this
+  /// to refuse to cancel rather than to guess what the server did.
+  package var activeWriteIsInFlight: Bool {
+    guard let operation = active else { return false }
+    return operation.effect == .write && operation.phase == .requestSent
   }
 
   @discardableResult
@@ -119,9 +147,9 @@ package final class OperationArbiter {
   ) -> OperationOutcome? {
     guard let operation = active, operation.id == token.id else { return nil }
     let resolved = Self.resolve(outcome, for: operation)
-    if resolved == .outcomeUnknown {
+    if let kind = resolved.unresolvedKind {
       unresolvedOutcomes.append(
-        UnresolvedOutcome(id: operation.id, name: operation.name)
+        UnresolvedOutcome(id: operation.id, name: operation.name, kind: kind)
       )
     }
     active = nil
@@ -133,16 +161,35 @@ package final class OperationArbiter {
     unresolvedOutcomes.removeAll()
   }
 
+  /// Cancellation is the only outcome the arbiter reinterprets, and only for
+  /// a write. A dropped read costs nothing; a write that was sent and never
+  /// answered leaves the account in a state this client cannot infer.
   private static func resolve(
     _ outcome: OperationOutcome,
     for operation: ActiveOperation
   ) -> OperationOutcome {
-    guard outcome == .cancelled || outcome == .outcomeUnknown else {
+    guard outcome == .cancelled, operation.effect == .write else {
       return outcome
     }
-    if operation.effect == .write && operation.phase != .preparing {
+    switch operation.phase {
+    case .preparing:
+      return .cancelled
+    case .requestSent:
       return .outcomeUnknown
+    case .settling:
+      // The response was already in hand, so the answer is known.
+      return .appliedRemotelyOnly
     }
-    return outcome == .outcomeUnknown ? .cancelled : outcome
+  }
+}
+
+extension OperationOutcome {
+  /// Which outcomes the user has to reconcile by hand.
+  fileprivate var unresolvedKind: UnresolvedOutcome.Kind? {
+    switch self {
+    case .outcomeUnknown: .unknown
+    case .appliedRemotelyOnly: .appliedRemotelyOnly
+    case .applied, .failed, .cancelled: nil
+    }
   }
 }

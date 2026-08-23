@@ -391,7 +391,13 @@ private struct LibraryRig {
   await rig.library.settleForTesting()
 
   #expect(rig.arbiter.unresolvedOutcomes.map(\.name) == ["Remove track"])
+  #expect(rig.arbiter.unresolvedOutcomes.map(\.kind) == [.appliedRemotelyOnly])
   #expect(rig.library.status == "Session changed; validate again")
+  // The removal is not applied as a local edit. The session changed, so the
+  // whole session-scoped view is dropped rather than half-updated.
+  #expect(rig.library.tracks.isEmpty)
+  #expect(rig.library.playlists.isEmpty)
+  #expect(rig.library.selectedPlaylist == nil)
 }
 
 @Test @MainActor func duplicateRowsFromTheServerAreReportedNotShownTwice() async {

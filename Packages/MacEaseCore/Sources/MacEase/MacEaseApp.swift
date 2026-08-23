@@ -46,6 +46,13 @@ struct MacEaseApp: App {
       arbiter: arbiter
     )
     playback.attach(session: login)
+    // A divergence found by any coordinator invalidates the identity for all
+    // of them, so the session owner clears everything, not just the reporter.
+    login.onIdentityChanged = { [weak playback, weak library, weak discovery] in
+      playback?.stop()
+      library?.reset()
+      discovery?.reset()
+    }
     _session = State(initialValue: login)
     _library = State(initialValue: library)
     _discovery = State(initialValue: discovery)
@@ -1089,10 +1096,9 @@ private struct UnresolvedOutcomeBanner: View {
         Image(systemName: "exclamationmark.triangle.fill")
           .foregroundStyle(.orange)
         Text(
-          "Outcome unknown for "
-            + arbiter.unresolvedOutcomes.map(\.name).joined(separator: ", ")
-            + ". The request reached the server but its result was lost; "
-            + "reload the affected list to check before retrying."
+          arbiter.unresolvedOutcomes
+            .map { "\($0.name): \($0.advice)" }
+            .joined(separator: "; ")
         )
         .font(.caption)
         Spacer()

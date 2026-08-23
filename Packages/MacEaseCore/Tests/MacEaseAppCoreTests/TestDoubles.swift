@@ -291,7 +291,6 @@ actor FakeTransport: NeteaseTransporting {
   }
 }
 
-extension PlaylistTrackEdit: @retroactive Equatable {}
 
 // MARK: - Credential store
 

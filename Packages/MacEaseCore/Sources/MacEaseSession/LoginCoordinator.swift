@@ -207,9 +207,10 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
 
       switch try await transport.accountStatus(credential: loaded) {
       case .authenticated(let account):
-        guard try await vault.load() == loaded else {
+        let current = try await vault.load()
+        guard current == loaded else {
           status = "Stored session changed; validate again"
-          return commit(.storedItemChanged(hasStoredItem: true))
+          return commit(.storedItemChanged(hasStoredItem: current != nil))
         }
         status = "Account status authenticated"
         return commit(.validated(account, loaded))
@@ -256,15 +257,23 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
     snapshot.account == account && snapshot.validatedCredential == credential
   }
 
+  /// Called by the app to clear every module's session-scoped data when the
+  /// identity in effect changes. It is set once at wiring time.
+  @ObservationIgnored package var onIdentityChanged: (@MainActor () -> Void)?
+
   /// The single place a coordinator's observation of the stored item is
   /// committed to session state. Coordinators never write these fields.
   package func reportDivergence(_ divergence: SessionDivergence) {
-    switch commit(SessionReducer.event(for: divergence)) {
+    let result = commit(SessionReducer.event(for: divergence))
+    switch result {
     case .signedOut:
       status = "No stored session to validate"
     default:
       status = "Stored session changed; validate again"
     }
+    // The reporting coordinator clears itself; its siblings still hold data
+    // for an identity that is no longer in effect.
+    onIdentityChanged?()
   }
 
   private func deleteStoredSession(
@@ -273,14 +282,25 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
   ) async -> (invalidation: SessionInvalidationResult, result: SessionMutationResult) {
     do {
       guard try await vault.delete(matching: credential) else {
-        // A different credential is stored now; it must not be deleted.
-        let remaining = (try? await vault.load()) != nil
+        // A different credential is stored now; it must not be deleted. If the
+        // confirming read itself fails, the item's presence is unknown, so
+        // assume it is still there rather than reporting a clean slate.
+        let remaining: Bool
+        do {
+          remaining = try await vault.load() != nil
+        } catch {
+          remaining = true
+        }
         status = "Stored session changed; validate again"
         return (.notCurrent, commit(.storedItemChanged(hasStoredItem: remaining)))
       }
     } catch {
-      status = keychainErrorMessage(error)
-      return (.failed, commit(.inconclusive(failure(error))))
+      // The service confirmed this credential is dead, so it must stop being
+      // treated as validated even though the item may still be on disk.
+      status =
+        keychainErrorMessage(error)
+        + "; the session is no longer valid but may remain stored"
+      return (.failed, commit(.storedItemChanged(hasStoredItem: true)))
     }
     status = message
     load(Self.loginURL)

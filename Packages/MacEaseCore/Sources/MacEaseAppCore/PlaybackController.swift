@@ -674,11 +674,20 @@ package final class PlaybackController {
 
   /// Starts a new user intent. It deliberately does not touch `attempt`: the
   /// caller decides whether this is a new track or a retry of the old one.
+  ///
+  /// It also gives back the arbiter slot this controller holds, so that
+  /// superseding one's own in-flight resolve (play A, then immediately play B)
+  /// can claim it again. Without this the old playback was cancelled and the
+  /// new claim returned nil, leaving nothing playing.
   private func beginIntent() -> PlaybackIntentGate.Token {
     let token = gate.begin()
     activeToken = token
     playTask?.cancel()
     playTask = nil
+    if let operationToken {
+      // A song-URL resolve is a read: abandoning it has no server effect.
+      releaseResolution(operationToken, outcome: .cancelled)
+    }
     releasePlayback()
     positionSeconds = 0
     return token

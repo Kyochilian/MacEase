@@ -253,7 +253,9 @@ private struct Rig {
   await rig.transport.gate.open()
   await rig.library.settleForTesting()
 
+  // The server acknowledged it; only the local view is stale.
   #expect(rig.arbiter.unresolvedOutcomes.map(\.name) == ["Like"])
+  #expect(rig.arbiter.unresolvedOutcomes.map(\.kind) == [.appliedRemotelyOnly])
   #expect(rig.library.status == "Session changed; validate again")
   #expect(rig.library.likedIDs == nil)
 }

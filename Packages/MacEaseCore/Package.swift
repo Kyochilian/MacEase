@@ -7,7 +7,6 @@ let package = Package(
   platforms: [.macOS(.v15)],
   products: [
     .library(name: "NeteaseKit", targets: ["NeteaseKit"]),
-    .library(name: "MacEaseAppCore", targets: ["MacEaseAppCore"]),
     .executable(name: "MacEase", targets: ["MacEase"]),
     .executable(name: "GateALyricsProbe", targets: ["GateALyricsProbe"]),
     .executable(name: "GateBLoginHarness", targets: ["GateBLoginHarness"]),

@@ -91,7 +91,8 @@ private func makeLibrary(
   let transport = FakeTransport()
   let vault = FakeVault(stored: credential)
   let session = FakeSession(credential: credential)
-  let library = makeLibrary(transport: transport, vault: vault)
+  let arbiter = OperationArbiter()
+  let library = makeLibrary(transport: transport, vault: vault, arbiter: arbiter)
   await transport.setPlaylistPages([
     UserPlaylistPage(playlists: makePlaylists([1, 2]), more: true)
   ])
@@ -101,7 +102,9 @@ private func makeLibrary(
   while await transport.gate.arrivalCount() == 0 { await Task.yield() }
   library.reset()
   await transport.gate.open()
-  await library.settleForTesting()
+  // `reset` clears the task handle, so settling on it would prove nothing.
+  // Wait until the arbiter slot the superseded task held is actually free.
+  while !arbiter.canStart() { await Task.yield() }
 
   #expect(library.playlists.isEmpty)
   #expect(!library.canLoadMore)

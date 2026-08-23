@@ -83,6 +83,9 @@ package enum PlaybackFailureClassifier {
     case NeteasePlaybackError.nonHTTPSURL, NeteasePlaybackError.unapprovedHost:
       // A host MacEase refuses will be refused again.
       .terminal
+    case is CancellationError:
+      // Not a failure: a newer intent superseded this one and owns the state.
+      .terminal
     default:
       .recoverable
     }

@@ -527,14 +527,25 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
     isLoading = true
     status = loadingStatus
     loadTask = Task {
-      await perform(
-        claim: claim,
-        generation: currentGeneration,
-        session: session,
-        invalidateOnService301: false,
-        operation: operation
-      ) { credential in
+      var outcome = OperationOutcome.failed
+      defer {
+        arbiter.end(claim.token, outcome: outcome)
+        finish(generation: currentGeneration)
+      }
+
+      var credential: NeteaseCredential?
+      do {
+        credential = try await currentCredential(
+          account: claim.account,
+          generation: currentGeneration,
+          session: session
+        )
+        guard let credential else { return }
+        arbiter.markRequestSent(claim.token)
         let apply = try await body(credential)
+        // The response is in hand: whatever happens next is a local-display
+        // problem, not an unknown server state.
+        arbiter.markSettling(claim.token)
         guard
           try await self.sessionRemainsCurrent(
             account: account,
@@ -543,24 +554,39 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
             session: session
           )
         else {
-          // The request reached the server but the session it belonged to is
-          // gone, so the local change must not be applied and the server
-          // result cannot be reported either way.
-          return false
+          // The server did execute it; the session it belonged to is gone, so
+          // the local change must not be applied.
+          outcome = .appliedRemotelyOnly
+          return
         }
         self.status = apply()
-        return true
+        outcome = .applied
+      } catch is CancellationError {
+        outcome = .cancelled
+      } catch {
+        outcome = Task.isCancelled ? .cancelled : .failed
+        await handle(
+          error,
+          credential: credential,
+          generation: currentGeneration,
+          session: session,
+          invalidateOnService301: false,
+          operation: operation
+        )
       }
     }
   }
 
   /// Clears this coordinator's own state only. It never cancels another
-  /// module's work, and it never cancels a write whose request has already
-  /// been sent: that decision belongs to the arbiter.
+  /// module's work, and it never cancels a write whose request is already in
+  /// flight: that request is left to finish so the arbiter can classify what
+  /// the server did, instead of the client guessing.
   package func reset() {
     generation += 1
-    loadTask?.cancel()
-    loadTask = nil
+    if !arbiter.activeWriteIsInFlight {
+      loadTask?.cancel()
+      loadTask = nil
+    }
     clearLibrary()
     isLoading = false
     status = "Validate the session before loading playlists"
@@ -622,7 +648,8 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
       arbiter.markRequestSent(claim.token)
       let published = try await body(credential)
       arbiter.markSettling(claim.token)
-      outcome = published ? .applied : .outcomeUnknown
+      // A read that could not be published changed nothing on the server.
+      outcome = published ? .applied : .cancelled
     } catch is CancellationError {
       outcome = .cancelled
     } catch {
