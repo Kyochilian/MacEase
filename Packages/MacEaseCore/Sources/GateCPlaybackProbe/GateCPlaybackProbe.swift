@@ -132,7 +132,7 @@ struct GateCPlaybackProbe {
         exit(1)
       }
     } catch let error as CredentialVaultError {
-      print("result=keychainError status=\(error.status)")
+      print("result=keychainError \(error.diagnostic)")
       exit(5)
     } catch {
       print("result=credentialDecodeError")

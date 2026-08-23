@@ -2,11 +2,25 @@ import Foundation
 import Security
 import Synchronization
 
-public struct CredentialVaultError: Error, Equatable, Sendable {
-  public let status: OSStatus
+/// Keychain contents are an untrusted boundary: an item can be absent, of the
+/// wrong class, or hold bytes that are not a credential. Each case is
+/// classified rather than trapped, and none of them falls back to an
+/// anonymous request.
+public enum CredentialVaultError: Error, Equatable, Sendable {
+  /// A Security framework call failed with this `OSStatus`.
+  case keychain(OSStatus)
+  /// The item exists but its value is not `Data`.
+  case invalidPayloadType
+  /// The bytes are not a credential that satisfies its own invariants.
+  case corruptPayload
 
-  public init(status: OSStatus) {
-    self.status = status
+  /// Short, credential-free label for status text and probe output.
+  public var diagnostic: String {
+    switch self {
+    case .keychain(let status): "status=\(status)"
+    case .invalidPayloadType: "invalidPayloadType"
+    case .corruptPayload: "corruptPayload"
+    }
   }
 }
 
@@ -61,7 +75,7 @@ public actor CredentialVault {
       return
     }
     if updateStatus != errSecItemNotFound {
-      throw CredentialVaultError(status: updateStatus)
+      throw CredentialVaultError.keychain(updateStatus)
     }
 
     var item = query
@@ -69,7 +83,7 @@ public actor CredentialVault {
 
     let status = SecItemAdd(item as CFDictionary, nil)
     if status != errSecSuccess {
-      throw CredentialVaultError(status: status)
+      throw CredentialVaultError.keychain(status)
     }
   }
 
@@ -84,16 +98,26 @@ public actor CredentialVault {
       return nil
     }
     if status != errSecSuccess {
-      throw CredentialVaultError(status: status)
+      throw CredentialVaultError.keychain(status)
     }
-
-    return try JSONDecoder().decode(NeteaseCredential.self, from: result as! Data)
+    guard let data = result as? Data else {
+      throw CredentialVaultError.invalidPayloadType
+    }
+    guard
+      let credential = try? JSONDecoder().decode(
+        NeteaseCredential.self,
+        from: data
+      )
+    else {
+      throw CredentialVaultError.corruptPayload
+    }
+    return credential
   }
 
   private func deleteUnlocked() throws {
     let status = SecItemDelete(baseQuery as CFDictionary)
     if status != errSecSuccess && status != errSecItemNotFound {
-      throw CredentialVaultError(status: status)
+      throw CredentialVaultError.keychain(status)
     }
   }
 

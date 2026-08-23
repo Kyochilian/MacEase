@@ -3,8 +3,8 @@ import Testing
 
 @testable import NeteaseKit
 
-@Test func lyricsProbeRequestGoldenVector() {
-  let request = NeteaseSession.lyricsProbeRequest(songID: 347_230)
+@Test func lyricsProbeRequestGoldenVector() throws {
+  let request = try NeteaseSession.lyricsProbeRequest(songID: 347_230)
 
   #expect(request.url?.absoluteString == "https://interfacepc.music.163.com/eapi/song/lyric/v1")
   #expect(request.httpMethod == "POST")

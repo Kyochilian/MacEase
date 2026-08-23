@@ -412,7 +412,7 @@ final class PlaybackProbeCoordinator {
         operation: operation,
         result: "keychainError",
         quality: quality,
-        detail: "status=\(error.status)"
+        detail: error.diagnostic
       )
     case is DecodingError:
       status = failureStatus(

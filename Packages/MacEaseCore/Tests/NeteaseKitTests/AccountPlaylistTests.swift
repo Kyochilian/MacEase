@@ -13,7 +13,7 @@ private let accountCredential = NeteaseCredential(
     credential: accountCredential,
     secretKey: "0123456789abcdef"
   )
-  let parameters = NeteaseCrypto.weapi(
+  let parameters = try NeteaseCrypto.weapi(
     json: #"{"csrf_token":"csrf-test"}"#,
     secretKey: "0123456789abcdef"
   )
@@ -56,7 +56,7 @@ private let accountCredential = NeteaseCredential(
   #expect(signedOut == .signedOut)
 }
 
-@Test func accountStatusRejectsMissingProfile() {
+@Test func accountStatusRejectsMissingProfile() throws {
   let response = HTTPURLResponse(
     url: URL(string: "https://music.163.com")!,
     statusCode: 200,
@@ -72,7 +72,7 @@ private let accountCredential = NeteaseCredential(
   }
 }
 
-@Test func accountStatusDistinguishesServiceAndHTTPRedirects() {
+@Test func accountStatusDistinguishesServiceAndHTTPRedirects() throws {
   let successfulHTTPResponse = HTTPURLResponse(
     url: URL(string: "https://music.163.com")!,
     statusCode: 200,
@@ -108,7 +108,7 @@ private let accountCredential = NeteaseCredential(
     credential: accountCredential,
     secretKey: "0123456789abcdef"
   )
-  let parameters = NeteaseCrypto.weapi(
+  let parameters = try NeteaseCrypto.weapi(
     json:
       #"{"uid":"987654321","limit":30,"offset":60,"includeVideo":true,"csrf_token":"csrf-test"}"#,
     secretKey: "0123456789abcdef"
@@ -156,7 +156,7 @@ private let accountCredential = NeteaseCredential(
   )
 }
 
-@Test func userPlaylistsDistinguishesServiceAndHTTPRedirects() {
+@Test func userPlaylistsDistinguishesServiceAndHTTPRedirects() throws {
   let successfulHTTPResponse = HTTPURLResponse(
     url: URL(string: "https://music.163.com")!,
     statusCode: 200,
@@ -212,10 +212,9 @@ private let accountCredential = NeteaseCredential(
     request.value(forHTTPHeaderField: "Cookie")
       == "osver=15.5; os=osx; appver=0.1; buildver=1722945678; __csrf=csrf-test; channel=github; requestId=1722945678123_0042; MUSIC_U=music-u-test"
   )
+  let params = try NeteaseCrypto.eapi(path: "/api/v6/playlist/detail", json: json)
   #expect(
-    String(decoding: request.httpBody!, as: UTF8.self)
-      == "params="
-      + NeteaseCrypto.eapi(path: "/api/v6/playlist/detail", json: json)
+    String(decoding: request.httpBody!, as: UTF8.self) == "params=\(params)"
   )
 }
 
@@ -253,7 +252,7 @@ private let accountCredential = NeteaseCredential(
   )
   let json =
     #"{"c":"[{\"id\":3},{\"id\":1},{\"id\":2}]","csrf_token":"csrf-test"}"#
-  let parameters = NeteaseCrypto.weapi(
+  let parameters = try NeteaseCrypto.weapi(
     json: json,
     secretKey: "0123456789abcdef"
   )
@@ -326,7 +325,7 @@ private let accountCredential = NeteaseCredential(
   )
 }
 
-@Test func playlistDetailRejectsMismatchedIdentity() {
+@Test func playlistDetailRejectsMismatchedIdentity() throws {
   let response = HTTPURLResponse(
     url: URL(string: "https://music.163.com")!,
     statusCode: 200,
@@ -363,7 +362,7 @@ private let accountCredential = NeteaseCredential(
   #expect(tracks == [PlaylistTrack(id: 3, name: "Third", artists: [])])
 }
 
-@Test func playlistAndSongDetailsDistinguishHTTPAndServiceErrors() {
+@Test func playlistAndSongDetailsDistinguishHTTPAndServiceErrors() throws {
   let failedHTTPResponse = HTTPURLResponse(
     url: URL(string: "https://music.163.com")!,
     statusCode: 503,

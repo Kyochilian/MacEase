@@ -16,7 +16,7 @@ private let likedCredential = NeteaseCredential(
     secretKey: "0123456789abcdef"
   )
   // `like` is a JSON boolean and `time` a string, per the locked like.js.
-  let likedParameters = NeteaseCrypto.weapi(
+  let likedParameters = try NeteaseCrypto.weapi(
     json:
       #"{"alg":"itembased","trackId":33894312,"like":true,"time":"3","csrf_token":"csrf-test"}"#,
     secretKey: "0123456789abcdef"
@@ -51,7 +51,7 @@ private let likedCredential = NeteaseCredential(
     credential: likedCredential,
     secretKey: "0123456789abcdef"
   )
-  let unlikedParameters = NeteaseCrypto.weapi(
+  let unlikedParameters = try NeteaseCrypto.weapi(
     json:
       #"{"alg":"itembased","trackId":33894312,"like":false,"time":"3","csrf_token":"csrf-test"}"#,
     secretKey: "0123456789abcdef"
@@ -104,7 +104,7 @@ private let likedCredential = NeteaseCredential(
     credential: likedCredential,
     secretKey: "0123456789abcdef"
   )
-  let parameters = NeteaseCrypto.weapi(
+  let parameters = try NeteaseCrypto.weapi(
     json: #"{"uid":"987654321","csrf_token":"csrf-test"}"#,
     secretKey: "0123456789abcdef"
   )
@@ -147,7 +147,7 @@ private let likedCredential = NeteaseCredential(
   #expect(empty.isEmpty)
 }
 
-@Test func likedSongIDsRejectsAMissingIDList() {
+@Test func likedSongIDsRejectsAMissingIDList() throws {
   let response = HTTPURLResponse(
     url: URL(string: "https://music.163.com")!,
     statusCode: 200,
@@ -163,7 +163,7 @@ private let likedCredential = NeteaseCredential(
   }
 }
 
-@Test func likedSongIDsDistinguishesServiceAndHTTPErrors() {
+@Test func likedSongIDsDistinguishesServiceAndHTTPErrors() throws {
   let failedHTTPResponse = HTTPURLResponse(
     url: URL(string: "https://music.163.com")!,
     statusCode: 503,

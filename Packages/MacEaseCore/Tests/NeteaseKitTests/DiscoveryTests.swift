@@ -19,8 +19,8 @@ private func expectWeAPIBody(
   _ request: URLRequest,
   json: String,
   secretKey: String = "0123456789abcdef"
-) {
-  let parameters = NeteaseCrypto.weapi(json: json, secretKey: secretKey)
+) throws {
+  let parameters = try NeteaseCrypto.weapi(json: json, secretKey: secretKey)
   #expect(
     String(decoding: request.httpBody!, as: UTF8.self)
       == String(
@@ -44,7 +44,7 @@ private func expectWeAPIBody(
   #expect(allTime.url?.absoluteString == "https://music.163.com/weapi/v1/play/record")
   #expect(allTime.httpMethod == "POST")
   #expect(allTime.value(forHTTPHeaderField: "Cookie") == "MUSIC_U=music-u-test; __csrf=csrf-test")
-  expectWeAPIBody(
+  try expectWeAPIBody(
     allTime,
     json: #"{"uid":"987654321","type":0,"csrf_token":"csrf-test"}"#
   )
@@ -55,7 +55,7 @@ private func expectWeAPIBody(
     credential: discoveryCredential,
     secretKey: "0123456789abcdef"
   )
-  expectWeAPIBody(
+  try expectWeAPIBody(
     lastWeek,
     json: #"{"uid":"987654321","type":1,"csrf_token":"csrf-test"}"#
   )
@@ -100,7 +100,7 @@ private func expectWeAPIBody(
     request.url?.absoluteString
       == "https://music.163.com/weapi/v3/discovery/recommend/songs"
   )
-  expectWeAPIBody(request, json: #"{"csrf_token":"csrf-test"}"#)
+  try expectWeAPIBody(request, json: #"{"csrf_token":"csrf-test"}"#)
 }
 
 @Test func dailyRecommendedSongsDecodeDailySongs() throws {
@@ -125,7 +125,7 @@ private func expectWeAPIBody(
     request.url?.absoluteString
       == "https://music.163.com/weapi/v1/discovery/recommend/resource"
   )
-  expectWeAPIBody(request, json: #"{"csrf_token":"csrf-test"}"#)
+  try expectWeAPIBody(request, json: #"{"csrf_token":"csrf-test"}"#)
 
   let playlists = try NeteaseSession.classifyDailyRecommendedPlaylists(
     data: Data(#"{"code":200,"recommend":[{"id":11,"name":"Morning"}]}"#.utf8),
@@ -143,7 +143,7 @@ private func expectWeAPIBody(
   #expect(
     request.url?.absoluteString == "https://music.163.com/weapi/personalized/playlist"
   )
-  expectWeAPIBody(
+  try expectWeAPIBody(
     request,
     json: #"{"limit":30,"total":true,"n":1000,"csrf_token":"csrf-test"}"#
   )
@@ -176,9 +176,9 @@ private func expectWeAPIBody(
     request.value(forHTTPHeaderField: "Cookie")
       == "osver=15.5; os=osx; appver=0.1; buildver=1722945678; __csrf=csrf-test; channel=github; requestId=1722945678123_0042; MUSIC_U=music-u-test"
   )
+  let params = try NeteaseCrypto.eapi(path: "/api/toplist", json: json)
   #expect(
-    String(decoding: request.httpBody!, as: UTF8.self)
-      == "params=" + NeteaseCrypto.eapi(path: "/api/toplist", json: json)
+    String(decoding: request.httpBody!, as: UTF8.self) == "params=\(params)"
   )
 }
 
@@ -216,7 +216,7 @@ private func expectWeAPIBody(
   #expect(
     request.value(forHTTPHeaderField: "Cookie") == "MUSIC_U=music-u-test; __csrf=csrf-test"
   )
-  expectWeAPIBody(
+  try expectWeAPIBody(
     request,
     json: #"{"songid":347230,"limit":50,"offset":0,"csrf_token":"csrf-test"}"#
   )
@@ -235,7 +235,7 @@ private func expectWeAPIBody(
   #expect(tracks == [PlaylistTrack(id: 33_894_312, name: "Later", artists: ["A", "B"])])
 }
 
-@Test func similarSongsRejectAnArResponseShape() {
+@Test func similarSongsRejectAnArResponseShape() throws {
   // Guards the `artists` vs `ar` distinction: an `ar`-shaped payload must
   // fail loudly rather than silently decode to empty artists.
   #expect(throws: (any Error).self) {
@@ -266,9 +266,9 @@ private func expectWeAPIBody(
     request.url?.absoluteString
       == "https://interfacepc.music.163.com/eapi/cloudsearch/pc"
   )
+  let params = try NeteaseCrypto.eapi(path: "/api/cloudsearch/pc", json: json)
   #expect(
-    String(decoding: request.httpBody!, as: UTF8.self)
-      == "params=" + NeteaseCrypto.eapi(path: "/api/cloudsearch/pc", json: json)
+    String(decoding: request.httpBody!, as: UTF8.self) == "params=\(params)"
   )
 }
 
@@ -289,7 +289,7 @@ private func expectWeAPIBody(
   )
 }
 
-@Test func searchSongsRejectALegacyArtistsShape() {
+@Test func searchSongsRejectALegacyArtistsShape() throws {
   #expect(throws: (any Error).self) {
     try NeteaseSession.classifySearchSongs(
       data: Data(
@@ -301,7 +301,7 @@ private func expectWeAPIBody(
   }
 }
 
-@Test func discoveryClassifiersDistinguishServiceAndHTTPErrors() {
+@Test func discoveryClassifiersDistinguishServiceAndHTTPErrors() throws {
   let failedHTTPResponse = HTTPURLResponse(
     url: URL(string: "https://music.163.com")!,
     statusCode: 503,

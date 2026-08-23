@@ -19,8 +19,8 @@ private func expectWeAPIWriteBody(
   _ request: URLRequest,
   json: String,
   secretKey: String = "0123456789abcdef"
-) {
-  let parameters = NeteaseCrypto.weapi(json: json, secretKey: secretKey)
+) throws {
+  let parameters = try NeteaseCrypto.weapi(json: json, secretKey: secretKey)
   #expect(
     String(decoding: request.httpBody!, as: UTF8.self)
       == String(
@@ -46,7 +46,7 @@ private let eapiHeader =
   )
 
   #expect(request.url?.absoluteString == "https://music.163.com/weapi/playlist/create")
-  expectWeAPIWriteBody(
+  try expectWeAPIWriteBody(
     request,
     json:
       #"{"name":"Test List","privacy":"0","type":"NORMAL","csrf_token":"csrf-test"}"#
@@ -63,7 +63,7 @@ private let eapiHeader =
     credential: writeCredential,
     secretKey: "0123456789abcdef"
   )
-  expectWeAPIWriteBody(
+  try expectWeAPIWriteBody(
     request,
     json:
       #"{"name":"quote \" and \\ backslash","privacy":"0","type":"NORMAL","csrf_token":"csrf-test"}"#
@@ -78,7 +78,7 @@ private let eapiHeader =
   )
 
   #expect(request.url?.absoluteString == "https://music.163.com/weapi/playlist/remove")
-  expectWeAPIWriteBody(
+  try expectWeAPIWriteBody(
     request,
     json: #"{"ids":"[24381616]","csrf_token":"csrf-test"}"#
   )
@@ -102,10 +102,12 @@ private let eapiHeader =
     add.url?.absoluteString
       == "https://interfacepc.music.163.com/eapi/playlist/manipulate/tracks"
   )
+  let addParams = try NeteaseCrypto.eapi(
+    path: "/api/playlist/manipulate/tracks",
+    json: addJSON
+  )
   #expect(
-    String(decoding: add.httpBody!, as: UTF8.self)
-      == "params="
-      + NeteaseCrypto.eapi(path: "/api/playlist/manipulate/tracks", json: addJSON)
+    String(decoding: add.httpBody!, as: UTF8.self) == "params=\(addParams)"
   )
 
   let remove = try NeteaseSession.editPlaylistTracksRequest(
@@ -151,9 +153,9 @@ private let eapiHeader =
     #"{"/api/playlist/update/name":\#(encodedInner),"e_r":false,"header":\#(eapiHeader)}"#
 
   #expect(request.url?.absoluteString == "https://interfacepc.music.163.com/eapi/batch")
+  let batchParams = try NeteaseCrypto.eapi(path: "/api/batch", json: json)
   #expect(
-    String(decoding: request.httpBody!, as: UTF8.self)
-      == "params=" + NeteaseCrypto.eapi(path: "/api/batch", json: json)
+    String(decoding: request.httpBody!, as: UTF8.self) == "params=\(batchParams)"
   )
 }
 
@@ -172,9 +174,13 @@ private let eapiHeader =
     subscribe.url?.absoluteString
       == "https://interfacepc.music.163.com/eapi/playlist/subscribe"
   )
+  let subscribeParams = try NeteaseCrypto.eapi(
+    path: "/api/playlist/subscribe",
+    json: json
+  )
   #expect(
     String(decoding: subscribe.httpBody!, as: UTF8.self)
-      == "params=" + NeteaseCrypto.eapi(path: "/api/playlist/subscribe", json: json)
+      == "params=\(subscribeParams)"
   )
 
   let unsubscribe = try NeteaseSession.subscribePlaylistRequest(

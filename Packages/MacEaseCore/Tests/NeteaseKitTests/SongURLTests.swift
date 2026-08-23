@@ -79,7 +79,7 @@ private let playbackCredential = NeteaseCredential(
     )
     let json =
       #"{"ids":"[347230]","level":"\#(expectedLevel)","encodeType":"flac","e_r":false,"header":\#(header)}"#
-    let expectedParams = NeteaseCrypto.eapi(
+    let expectedParams = try NeteaseCrypto.eapi(
       path: "/api/song/enhance/player/url/v1",
       json: json
     )
@@ -171,7 +171,7 @@ private let playbackCredential = NeteaseCredential(
   #expect(asset.trial)
 }
 
-@Test func songURLRejectsInvalidAndNonHTTPSResponses() {
+@Test func songURLRejectsInvalidAndNonHTTPSResponses() throws {
   let response = HTTPURLResponse(
     url: URL(string: "https://interfacepc.music.163.com")!,
     statusCode: 200,
@@ -281,7 +281,7 @@ private let playbackCredential = NeteaseCredential(
   }
 }
 
-@Test func songURLPreservesServiceStatus() {
+@Test func songURLPreservesServiceStatus() throws {
   let failedHTTPResponse = HTTPURLResponse(
     url: URL(string: "https://interfacepc.music.163.com")!,
     statusCode: 503,

@@ -108,6 +108,13 @@ public enum NeteasePlaybackError: Error, Equatable, Sendable {
   case unapprovedHost(String)
 }
 
+/// Transport-level refusals that carry no service code of their own.
+public enum NeteaseTransportError: Error, Equatable, Sendable {
+  /// The task completed with a response that is not HTTP, so there is no
+  /// status line to classify. Never a reason to terminate the process.
+  case nonHTTPResponse
+}
+
 public struct AudioURLProbeResult: Equatable, Sendable {
   public let statusCode: Int
   public let rangeResponse: Bool
@@ -224,7 +231,13 @@ public actor NeteaseSession {
   private let urlSession: URLSession
 
   public init() {
-    let configuration = URLSessionConfiguration.ephemeral
+    self.init(configuration: URLSessionConfiguration.ephemeral)
+  }
+
+  /// Package-scoped so tests can install a `URLProtocol` stub. Callers cannot
+  /// widen the cookie or cache policy: both are pinned here regardless of the
+  /// configuration passed in.
+  package init(configuration: URLSessionConfiguration) {
     configuration.httpCookieStorage = nil
     configuration.httpShouldSetCookies = false
     configuration.urlCache = nil
@@ -237,14 +250,27 @@ public actor NeteaseSession {
     )
   }
 
+  /// Every endpoint funnels its `URLResponse` through here. A non-HTTP
+  /// response is a transport fault with no status code to classify, and the
+  /// network is an untrusted boundary, so it is never force-cast.
+  private static func requireHTTPResponse(
+    _ response: URLResponse
+  ) throws -> HTTPURLResponse {
+    guard let http = response as? HTTPURLResponse else {
+      throw NeteaseTransportError.nonHTTPResponse
+    }
+    return http
+  }
+
   public func accountStatus(
     credential: NeteaseCredential
   ) async throws -> AccountSessionState {
     let request = try Self.accountStatusRequest(credential: credential)
     let (data, response) = try await urlSession.data(for: request)
+    let httpResponse = try Self.requireHTTPResponse(response)
     return try Self.classifyAccountStatus(
       data: data,
-      response: response as! HTTPURLResponse
+      response: httpResponse
     )
   }
 
@@ -261,9 +287,10 @@ public actor NeteaseSession {
       credential: credential
     )
     let (data, response) = try await urlSession.data(for: request)
+    let httpResponse = try Self.requireHTTPResponse(response)
     return try Self.classifyUserPlaylists(
       data: data,
-      response: response as! HTTPURLResponse,
+      response: httpResponse,
       userID: userID
     )
   }
@@ -281,9 +308,10 @@ public actor NeteaseSession {
       requestID: Self.requestID(timestamp: timestamp)
     )
     let (data, response) = try await urlSession.data(for: request)
+    let httpResponse = try Self.requireHTTPResponse(response)
     return try Self.classifyPlaylistDetail(
       data: data,
-      response: response as! HTTPURLResponse,
+      response: httpResponse,
       playlistID: playlistID
     )
   }
@@ -297,9 +325,10 @@ public actor NeteaseSession {
       credential: credential
     )
     let (data, response) = try await urlSession.data(for: request)
+    let httpResponse = try Self.requireHTTPResponse(response)
     return try Self.classifySongDetails(
       data: data,
-      response: response as! HTTPURLResponse,
+      response: httpResponse,
       songIDs: songIDs
     )
   }
@@ -313,9 +342,10 @@ public actor NeteaseSession {
       credential: credential
     )
     let (data, response) = try await urlSession.data(for: request)
+    let httpResponse = try Self.requireHTTPResponse(response)
     return try Self.classifyLikedSongIDs(
       data: data,
-      response: response as! HTTPURLResponse
+      response: httpResponse
     )
   }
 
@@ -330,9 +360,10 @@ public actor NeteaseSession {
       credential: credential
     )
     let (data, response) = try await urlSession.data(for: request)
+    let httpResponse = try Self.requireHTTPResponse(response)
     return try Self.classifyPlayRecords(
       data: data,
-      response: response as! HTTPURLResponse,
+      response: httpResponse,
       scope: scope
     )
   }
@@ -342,9 +373,10 @@ public actor NeteaseSession {
   ) async throws -> [PlaylistTrack] {
     let request = try Self.dailyRecommendedSongsRequest(credential: credential)
     let (data, response) = try await urlSession.data(for: request)
+    let httpResponse = try Self.requireHTTPResponse(response)
     return try Self.classifyDailyRecommendedSongs(
       data: data,
-      response: response as! HTTPURLResponse
+      response: httpResponse
     )
   }
 
@@ -353,9 +385,10 @@ public actor NeteaseSession {
   ) async throws -> [DiscoveredPlaylist] {
     let request = try Self.dailyRecommendedPlaylistsRequest(credential: credential)
     let (data, response) = try await urlSession.data(for: request)
+    let httpResponse = try Self.requireHTTPResponse(response)
     return try Self.classifyDailyRecommendedPlaylists(
       data: data,
-      response: response as! HTTPURLResponse
+      response: httpResponse
     )
   }
 
@@ -364,9 +397,10 @@ public actor NeteaseSession {
   ) async throws -> [DiscoveredPlaylist] {
     let request = try Self.personalizedPlaylistsRequest(credential: credential)
     let (data, response) = try await urlSession.data(for: request)
+    let httpResponse = try Self.requireHTTPResponse(response)
     return try Self.classifyPersonalizedPlaylists(
       data: data,
-      response: response as! HTTPURLResponse
+      response: httpResponse
     )
   }
 
@@ -381,9 +415,10 @@ public actor NeteaseSession {
       requestID: Self.requestID(timestamp: timestamp)
     )
     let (data, response) = try await urlSession.data(for: request)
+    let httpResponse = try Self.requireHTTPResponse(response)
     return try Self.classifyToplists(
       data: data,
-      response: response as! HTTPURLResponse
+      response: httpResponse
     )
   }
 
@@ -396,9 +431,10 @@ public actor NeteaseSession {
       credential: credential
     )
     let (data, response) = try await urlSession.data(for: request)
+    let httpResponse = try Self.requireHTTPResponse(response)
     return try Self.classifySimilarSongs(
       data: data,
-      response: response as! HTTPURLResponse
+      response: httpResponse
     )
   }
 
@@ -416,9 +452,10 @@ public actor NeteaseSession {
       credential: credential
     )
     let (data, response) = try await urlSession.data(for: request)
+    let httpResponse = try Self.requireHTTPResponse(response)
     try Self.classifyLikeSong(
       data: data,
-      response: response as! HTTPURLResponse
+      response: httpResponse
     )
   }
 
@@ -431,9 +468,10 @@ public actor NeteaseSession {
   ) async throws {
     let request = try Self.createPlaylistRequest(name: name, credential: credential)
     let (data, response) = try await urlSession.data(for: request)
+    let httpResponse = try Self.requireHTTPResponse(response)
     try Self.classifyWriteAcknowledgement(
       data: data,
-      response: response as! HTTPURLResponse
+      response: httpResponse
     )
   }
 
@@ -446,9 +484,10 @@ public actor NeteaseSession {
       credential: credential
     )
     let (data, response) = try await urlSession.data(for: request)
+    let httpResponse = try Self.requireHTTPResponse(response)
     try Self.classifyWriteAcknowledgement(
       data: data,
-      response: response as! HTTPURLResponse
+      response: httpResponse
     )
   }
 
@@ -469,9 +508,10 @@ public actor NeteaseSession {
       requestID: Self.requestID(timestamp: timestamp)
     )
     let (data, response) = try await urlSession.data(for: request)
+    let httpResponse = try Self.requireHTTPResponse(response)
     try Self.classifyWriteAcknowledgement(
       data: data,
-      response: response as! HTTPURLResponse
+      response: httpResponse
     )
   }
 
@@ -490,9 +530,10 @@ public actor NeteaseSession {
       requestID: Self.requestID(timestamp: timestamp)
     )
     let (data, response) = try await urlSession.data(for: request)
+    let httpResponse = try Self.requireHTTPResponse(response)
     try Self.classifyWriteAcknowledgement(
       data: data,
-      response: response as! HTTPURLResponse
+      response: httpResponse
     )
   }
 
@@ -519,9 +560,10 @@ public actor NeteaseSession {
       requestID: Self.requestID(timestamp: timestamp)
     )
     let (data, response) = try await urlSession.data(for: request)
+    let httpResponse = try Self.requireHTTPResponse(response)
     try Self.classifyWriteAcknowledgement(
       data: data,
-      response: response as! HTTPURLResponse
+      response: httpResponse
     )
   }
 
@@ -540,9 +582,10 @@ public actor NeteaseSession {
       requestID: Self.requestID(timestamp: timestamp)
     )
     let (data, response) = try await urlSession.data(for: request)
+    let httpResponse = try Self.requireHTTPResponse(response)
     return try Self.classifySearchSongs(
       data: data,
-      response: response as! HTTPURLResponse
+      response: httpResponse
     )
   }
 
@@ -561,9 +604,10 @@ public actor NeteaseSession {
       requestID: Self.requestID(timestamp: timestamp)
     )
     let (data, response) = try await urlSession.data(for: request)
+    let httpResponse = try Self.requireHTTPResponse(response)
     return try Self.classifySongURL(
       data: data,
-      response: response as! HTTPURLResponse,
+      response: httpResponse,
       songID: songID,
       requestedQuality: quality
     )
@@ -574,7 +618,7 @@ public actor NeteaseSession {
       for: Self.audioProbeRequest(asset: asset)
     )
     bytes.task.cancel()
-    return Self.classifyAudioProbe(response: response as! HTTPURLResponse)
+    return Self.classifyAudioProbe(response: try Self.requireHTTPResponse(response))
   }
 
   package static func audioProbeRequest(asset: ResolvedAudioAsset) -> URLRequest {
@@ -593,7 +637,7 @@ public actor NeteaseSession {
     let json = try csrfOnlyJSON(credential: credential)
     return weapiRequest(
       url: accountStatusURL,
-      parameters: weapiParameters(json: json, secretKey: secretKey),
+      parameters: try weapiParameters(json: json, secretKey: secretKey),
       credential: credential
     )
   }
@@ -632,7 +676,7 @@ public actor NeteaseSession {
     )
     return weapiRequest(
       url: userPlaylistsURL,
-      parameters: weapiParameters(json: json, secretKey: secretKey),
+      parameters: try weapiParameters(json: json, secretKey: secretKey),
       credential: credential
     )
   }
@@ -680,7 +724,7 @@ public actor NeteaseSession {
     let header = try eapiHeaderJSON(headerFields)
     let json =
       #"{"id":\#(playlistID),"n":100000,"s":8,"e_r":false,"header":\#(header)}"#
-    return eapiRequest(
+    return try eapiRequest(
       endpoint: playlistDetailEndpoint,
       json: json,
       headerFields: headerFields
@@ -719,7 +763,7 @@ public actor NeteaseSession {
     let json = try songDetailsJSON(songIDs: songIDs, credential: credential)
     return weapiRequest(
       url: songDetailsURL,
-      parameters: weapiParameters(json: json, secretKey: secretKey),
+      parameters: try weapiParameters(json: json, secretKey: secretKey),
       credential: credential
     )
   }
@@ -757,7 +801,7 @@ public actor NeteaseSession {
     let json = try likedSongIDsJSON(userID: userID, credential: credential)
     return weapiRequest(
       url: likedSongIDsURL,
-      parameters: weapiParameters(json: json, secretKey: secretKey),
+      parameters: try weapiParameters(json: json, secretKey: secretKey),
       credential: credential
     )
   }
@@ -786,7 +830,7 @@ public actor NeteaseSession {
     let json = try playRecordsJSON(userID: userID, scope: scope, credential: credential)
     return weapiRequest(
       url: playRecordsURL,
-      parameters: weapiParameters(json: json, secretKey: secretKey),
+      parameters: try weapiParameters(json: json, secretKey: secretKey),
       credential: credential
     )
   }
@@ -832,7 +876,7 @@ public actor NeteaseSession {
     let json = try csrfOnlyJSON(credential: credential)
     return weapiRequest(
       url: dailyRecommendedSongsURL,
-      parameters: weapiParameters(json: json, secretKey: secretKey),
+      parameters: try weapiParameters(json: json, secretKey: secretKey),
       credential: credential
     )
   }
@@ -863,7 +907,7 @@ public actor NeteaseSession {
     let json = try csrfOnlyJSON(credential: credential)
     return weapiRequest(
       url: dailyRecommendedPlaylistsURL,
-      parameters: weapiParameters(json: json, secretKey: secretKey),
+      parameters: try weapiParameters(json: json, secretKey: secretKey),
       credential: credential
     )
   }
@@ -891,7 +935,7 @@ public actor NeteaseSession {
     let json = try personalizedPlaylistsJSON(credential: credential)
     return weapiRequest(
       url: personalizedPlaylistsURL,
-      parameters: weapiParameters(json: json, secretKey: secretKey),
+      parameters: try weapiParameters(json: json, secretKey: secretKey),
       credential: credential
     )
   }
@@ -926,7 +970,7 @@ public actor NeteaseSession {
     )
     let header = try eapiHeaderJSON(headerFields)
     let json = #"{"e_r":false,"header":\#(header)}"#
-    return eapiRequest(
+    return try eapiRequest(
       endpoint: toplistsEndpoint,
       json: json,
       headerFields: headerFields
@@ -957,7 +1001,7 @@ public actor NeteaseSession {
     let json = try similarSongsJSON(songID: songID, credential: credential)
     return weapiRequest(
       url: similarSongsURL,
-      parameters: weapiParameters(json: json, secretKey: secretKey),
+      parameters: try weapiParameters(json: json, secretKey: secretKey),
       credential: credential
     )
   }
@@ -991,7 +1035,7 @@ public actor NeteaseSession {
     let json = try likeSongJSON(songID: songID, liked: liked, credential: credential)
     return weapiRequest(
       url: likeSongURL,
-      parameters: weapiParameters(json: json, secretKey: secretKey),
+      parameters: try weapiParameters(json: json, secretKey: secretKey),
       credential: credential,
       platformContext: true
     )
@@ -1016,7 +1060,7 @@ public actor NeteaseSession {
       #"{"name":\#(encodedName),"privacy":"0","type":"NORMAL","csrf_token":\#(csrf)}"#
     return weapiRequest(
       url: createPlaylistURL,
-      parameters: weapiParameters(json: json, secretKey: secretKey),
+      parameters: try weapiParameters(json: json, secretKey: secretKey),
       credential: credential,
       platformContext: true
     )
@@ -1035,7 +1079,7 @@ public actor NeteaseSession {
     let json = #"{"ids":\#(ids),"csrf_token":\#(csrf)}"#
     return weapiRequest(
       url: deletePlaylistURL,
-      parameters: weapiParameters(json: json, secretKey: secretKey),
+      parameters: try weapiParameters(json: json, secretKey: secretKey),
       credential: credential,
       platformContext: true
     )
@@ -1065,7 +1109,7 @@ public actor NeteaseSession {
     let json =
       #"{"op":"\#(edit.rawValue)","pid":\#(playlistID),"trackIds":\#(encodedList),"#
       + #""imme":"true","e_r":false,"header":\#(header)}"#
-    return eapiRequest(
+    return try eapiRequest(
       endpoint: manipulateTracksEndpoint,
       json: json,
       headerFields: headerFields
@@ -1096,7 +1140,7 @@ public actor NeteaseSession {
     let encodedInner = String(decoding: try JSONEncoder().encode(inner), as: UTF8.self)
     let json =
       #"{"/api/playlist/update/name":\#(encodedInner),"e_r":false,"header":\#(header)}"#
-    return eapiRequest(
+    return try eapiRequest(
       endpoint: batchEndpoint,
       json: json,
       headerFields: headerFields
@@ -1119,7 +1163,7 @@ public actor NeteaseSession {
     )
     let header = try eapiHeaderJSON(headerFields)
     let json = #"{"id":\#(playlistID),"e_r":false,"header":\#(header)}"#
-    return eapiRequest(
+    return try eapiRequest(
       endpoint: subscribed ? subscribePlaylistEndpoint : unsubscribePlaylistEndpoint,
       json: json,
       headerFields: headerFields
@@ -1144,7 +1188,7 @@ public actor NeteaseSession {
     let json =
       #"{"s":\#(encoded),"type":1,"limit":30,"offset":0,"total":true,"#
       + #""e_r":false,"header":\#(header)}"#
-    return eapiRequest(
+    return try eapiRequest(
       endpoint: searchSongsEndpoint,
       json: json,
       headerFields: headerFields
@@ -1222,7 +1266,7 @@ public actor NeteaseSession {
     let header = try eapiHeaderJSON(headerFields)
     let json =
       #"{"ids":"[\#(songID)]","level":"\#(quality.rawValue)","encodeType":"flac","e_r":false,"header":\#(header)}"#
-    return eapiRequest(
+    return try eapiRequest(
       endpoint: songURLEndpoint,
       json: json,
       headerFields: headerFields
@@ -1281,10 +1325,10 @@ public actor NeteaseSession {
     )
   }
 
-  package static func lyricsProbeRequest(songID: Int64) -> URLRequest {
+  package static func lyricsProbeRequest(songID: Int64) throws -> URLRequest {
     let json =
       #"{"id":"\#(songID)","cp":false,"tv":0,"lv":0,"rv":0,"kv":0,"yv":0,"ytv":0,"yrv":0,"e_r":false,"header":{}}"#
-    let params = NeteaseCrypto.eapi(path: lyricsEndpoint.path, json: json)
+    let params = try NeteaseCrypto.eapi(path: lyricsEndpoint.path, json: json)
     var request = URLRequest(url: lyricsEndpoint.url)
     request.httpMethod = "POST"
     request.httpBody = FormURLEncoder.encode([("params", params)])
@@ -1300,9 +1344,14 @@ public actor NeteaseSession {
   package func probeLyrics(songID: Int64) async -> LyricsProbeOutcome {
     do {
       let (data, response) = try await urlSession.data(
-        for: Self.lyricsProbeRequest(songID: songID)
+        for: try Self.lyricsProbeRequest(songID: songID)
       )
-      return Self.classifyLyricsProbe(data: data, response: response as! HTTPURLResponse)
+      return Self.classifyLyricsProbe(
+        data: data,
+        response: try Self.requireHTTPResponse(response)
+      )
+    } catch is NeteaseTransportError {
+      return LyricsProbeOutcome(status: .invalidResponse, setsCookie: false)
     } catch {
       return LyricsProbeOutcome(status: .network, setsCookie: false)
     }
@@ -1470,11 +1519,11 @@ public actor NeteaseSession {
     endpoint: EndpointDescriptor,
     json: String,
     headerFields: [(String, String)]
-  ) -> URLRequest {
+  ) throws -> URLRequest {
     var request = URLRequest(url: endpoint.url)
     request.httpMethod = "POST"
     request.httpBody = FormURLEncoder.encode([
-      ("params", NeteaseCrypto.eapi(path: endpoint.path, json: json))
+      ("params", try NeteaseCrypto.eapi(path: endpoint.path, json: json))
     ])
     request.httpShouldHandleCookies = false
     request.setValue(
@@ -1492,9 +1541,11 @@ public actor NeteaseSession {
   private static func weapiParameters(
     json: String,
     secretKey: String?
-  ) -> WeAPIParameters {
-    secretKey.map { NeteaseCrypto.weapi(json: json, secretKey: $0) }
-      ?? NeteaseCrypto.weapi(json: json)
+  ) throws -> WeAPIParameters {
+    if let secretKey {
+      return try NeteaseCrypto.weapi(json: json, secretKey: secretKey)
+    }
+    return try NeteaseCrypto.weapi(json: json)
   }
 
   private static func csrfJSONValue(

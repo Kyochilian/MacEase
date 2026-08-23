@@ -9,9 +9,9 @@ private let xeapiFormBody = FormURLEncoder.encode([
   ("encodeType", "flac"),
 ])
 
-@Test func weapiGoldenVector() {
+@Test func weapiGoldenVector() throws {
   let json = #"{"ids":"[347230]","level":"standard","encodeType":"aac"}"#
-  let parameters = NeteaseCrypto.weapi(
+  let parameters = try NeteaseCrypto.weapi(
     json: json,
     secretKey: "0123456789abcdef"
   )
@@ -26,23 +26,23 @@ private let xeapiFormBody = FormURLEncoder.encode([
   )
 }
 
-@Test func eapiGoldenVector() {
+@Test func eapiGoldenVector() throws {
   let path = "/api/song/enhance/player/url/v1"
   let json = #"{"ids":"[347230]","level":"standard","encodeType":"flac"}"#
 
   #expect(
-    NeteaseCrypto.eapi(path: path, json: json)
+    try NeteaseCrypto.eapi(path: path, json: json)
       == "FA90B329E9614F79E79598F37DC2EDB487F00D1BC4C9B24CD57E6C318B9073569338432CD7D98D1A3626E997A2C53121C461EE0E88D3D1BF3F42E78643807A29B83D00D24CECA2C01F229A64E4D80CBB43B3579770BB9A18CB701D3B0BC6D06534152C48015A10B37D65EAF37AA55CDB865AFA2367A1328A406C1D0BFDFE0C5AE4BE39397EDC48F19815DE0CB86E1B30E15AEF43036BA0683F3F57B81CB4B5EE"
   )
 }
 
-@Test func eapiResponseVectors() {
+@Test func eapiResponseVectors() throws {
   let plain = Data(
     base64Encoded: "yZRj59wuKJ/1c341BcjpjuTshRqno5xD/aCanv/ZfBo="
   )!
   #expect(
     String(
-      decoding: NeteaseCrypto.decodeEAPIResponse(plain, gzipped: false),
+      decoding: try NeteaseCrypto.decodeEAPIResponse(plain, gzipped: false),
       as: UTF8.self
     )
       == #"{"code":200,"profile":null}"#
@@ -54,15 +54,15 @@ private let xeapiFormBody = FormURLEncoder.encode([
   )!
   #expect(
     String(
-      decoding: NeteaseCrypto.decodeEAPIResponse(gzipped, gzipped: true),
+      decoding: try NeteaseCrypto.decodeEAPIResponse(gzipped, gzipped: true),
       as: UTF8.self
     )
       == #"{"code":200,"data":["gzip"]}"#
   )
 }
 
-@Test func xeapiInitialRequestGoldenVector() {
-  let parameters = NeteaseCrypto.xeapi(
+@Test func xeapiInitialRequestGoldenVector() throws {
+  let parameters = try NeteaseCrypto.xeapi(
     formBody: xeapiFormBody,
     publicKey: Data(
       base64Encoded: "YFpyXSpK3+6xop4X7dYhwbdZPujNvESsbEq24vgF0jw="
@@ -90,8 +90,8 @@ private let xeapiFormBody = FormURLEncoder.encode([
   #expect(parameters.r == "MS2tK79o3GW1nNBiSHA6Vw==")
 }
 
-@Test func xeapiSessionReuseGoldenVector() {
-  let parameters = NeteaseCrypto.xeapi(
+@Test func xeapiSessionReuseGoldenVector() throws {
+  let parameters = try NeteaseCrypto.xeapi(
     formBody: xeapiFormBody,
     publicKey: Data(
       base64Encoded: "YFpyXSpK3+6xop4X7dYhwbdZPujNvESsbEq24vgF0jw="
@@ -129,8 +129,8 @@ private let xeapiFormBody = FormURLEncoder.encode([
   )
 }
 
-@Test func xeapiPublicKeyStateGoldenVector() {
-  let state = NeteaseCrypto.decodeXeAPIPublicKeyState(
+@Test func xeapiPublicKeyStateGoldenVector() throws {
+  let state = try NeteaseCrypto.decodeXeAPIPublicKeyState(
     Data(
       base64Encoded:
         "GhuOQkj9H8Qa6IXvAf/36MDK6hIpjJgvdZpYr/xQwcKGBtl8KwDC/h+VmkACqd+fN8lKKBP98O6/K3861uVw52zAsj9wmkoUKA7yK8So2K1aM0ZJAJf7T7vl/ndevWBF"

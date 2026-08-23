@@ -548,7 +548,7 @@ final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
         status = "\(operation) \(serviceError.source.rawValue) error \(serviceError.statusCode)"
       }
     } else if let vaultError = error as? CredentialVaultError {
-      status = "Keychain error \(vaultError.status)"
+      status = "Keychain error \(vaultError.diagnostic)"
     } else {
       status = "\(operation) network or response error"
     }

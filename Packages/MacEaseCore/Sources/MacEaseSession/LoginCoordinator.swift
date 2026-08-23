@@ -311,7 +311,7 @@ package final class LoginCoordinator: NSObject, WKNavigationDelegate, WKUIDelega
 
   private func keychainErrorMessage(_ error: Error) -> String {
     if let error = error as? CredentialVaultError {
-      return "Keychain error \(error.status)"
+      return "Keychain error \(error.diagnostic)"
     }
     return "Credential encoding error"
   }

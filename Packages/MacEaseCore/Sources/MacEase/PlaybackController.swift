@@ -605,7 +605,7 @@ final class PlaybackController {
       status = "Song URL invalid response"
     case let error as CredentialVaultError:
       phase = .failed
-      status = "Keychain error \(error.status)"
+      status = "Keychain error \(error.diagnostic)"
     default:
       phase = .failed
       status = "Song URL network or response error"
