@@ -9,7 +9,7 @@
 
 | key | value |
 |---|---|
-| verified-at-commit | 246b363 |
+| verified-at-commit | 069f22d |
 | toolchain | Swift 6.1.2 / Xcode 16.4 |
 | platform | macOS 15, arm64 only |
 | debug-tests | 230 |
@@ -44,6 +44,7 @@
 | 歌单写组（创建/改名/删除/增删曲目） | live-passed |
 | 歌单收藏 / 取消收藏（不带反作弊 token） | implemented-offline |
 | 歌曲搜索（cloudsearch） | implemented-offline |
+| 红心三态（unknown / liked / not liked） | implemented-offline |
 | 单曲播放与队列、定时播放、本地 seek | implemented-offline |
 | 逐行歌词 | hold |
 | Now Playing / Remote Command | hold |
