@@ -25,7 +25,6 @@ package enum SessionDivergence: Equatable, Sendable {
 @MainActor
 package protocol SessionProviding: AnyObject {
   var account: NeteaseAccount? { get }
-  var isBusy: Bool { get }
 
   func matchesValidatedSession(
     _ credential: NeteaseCredential,

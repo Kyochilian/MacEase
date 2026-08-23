@@ -329,7 +329,6 @@ actor FakeVault: CredentialStoring {
 @MainActor
 final class FakeSession: SessionProviding {
   var account: NeteaseAccount?
-  var isBusy = false
   var validatedCredential: NeteaseCredential?
   private(set) var divergences: [SessionDivergence] = []
   private(set) var invalidations: [NeteaseCredential] = []

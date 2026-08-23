@@ -29,6 +29,8 @@ package final class PlaybackController {
 
   @ObservationIgnored private let transport: any NeteaseTransporting
   @ObservationIgnored private let vault: any CredentialStoring
+  @ObservationIgnored private let arbiter: OperationArbiter
+  @ObservationIgnored private var operationToken: OperationToken?
   @ObservationIgnored private var gate = PlaybackIntentGate()
   @ObservationIgnored private var rng = SystemRandomNumberGenerator()
   @ObservationIgnored private var playTask: Task<Void, Never>?
@@ -41,7 +43,6 @@ package final class PlaybackController {
   @ObservationIgnored private var activeToken: PlaybackIntentGate.Token?
   @ObservationIgnored private var queueTracks: [PlaylistTrack] = []
   @ObservationIgnored private weak var attachedSession: (any SessionProviding)?
-  @ObservationIgnored private var libraryBusy: (@MainActor () -> Bool)?
   @ObservationIgnored private var sleepTask: Task<Void, Never>?
   @ObservationIgnored private var sleepGeneration = 0
 
@@ -88,9 +89,14 @@ package final class PlaybackController {
     return queueTracks[index]
   }
 
-  package init(transport: any NeteaseTransporting, vault: any CredentialStoring) {
+  package init(
+    transport: any NeteaseTransporting,
+    vault: any CredentialStoring,
+    arbiter: OperationArbiter
+  ) {
     self.transport = transport
     self.vault = vault
+    self.arbiter = arbiter
     if let stored = UserDefaults.standard.object(forKey: Self.volumeDefaultsKey)
       as? Double
     {
@@ -98,17 +104,17 @@ package final class PlaybackController {
     }
   }
 
-  /// Wires the references auto-advance needs for its preflight checks.
-  package func attach(
-    session: any SessionProviding,
-    libraryBusy: @escaping @MainActor () -> Bool
-  ) {
+  /// Wires the session auto-advance needs for its preflight check.
+  package func attach(session: any SessionProviding) {
     attachedSession = session
-    self.libraryBusy = libraryBusy
   }
 
-  package func play(tracks: [PlaylistTrack], startIndex: Int, session: any SessionProviding) {
-    guard !session.isBusy else { return }
+  package func play(
+    tracks: [PlaylistTrack],
+    startIndex: Int,
+    session: any SessionProviding
+  ) {
+    guard canClaimResolution else { return }
     guard let account = session.account else {
       status = "Validate the session before playback"
       return
@@ -142,7 +148,7 @@ package final class PlaybackController {
   }
 
   package func playAgain(session: any SessionProviding) {
-    guard !session.isBusy else { return }
+    guard canClaimResolution else { return }
     guard let account = session.account else {
       status = "Validate the session before playback"
       return
@@ -150,6 +156,7 @@ package final class PlaybackController {
     guard let snapshot = recoverySnapshot else { return }
 
     let token = beginIntent()
+    guard let operation = claimResolution() else { return }
     clearPendingSleepStop()
     phase = .resolving
     status = "Re-resolving song URL (1 request)"
@@ -160,7 +167,8 @@ package final class PlaybackController {
         account: account,
         recovery: snapshot,
         session: session,
-        token: token
+        token: token,
+        operation: operation
       )
     }
   }
@@ -210,6 +218,10 @@ package func pause() {
     gate.cancel()
     playTask?.cancel()
     playTask = nil
+    if let operationToken {
+      // A song-URL resolve is a read: abandoning it has no server effect.
+      releaseResolution(operationToken, outcome: .cancelled)
+    }
     recoverySnapshot = nil
     queue = nil
     queueTracks = []
@@ -258,7 +270,7 @@ package func pause() {
   }
 
   private func step(to target: Int?, session: any SessionProviding) {
-    guard !session.isBusy else { return }
+    guard canClaimResolution else { return }
     guard let account = session.account else {
       status = "Validate the session before playback"
       return
@@ -283,6 +295,7 @@ package func pause() {
     guard queueTracks.indices.contains(index) else { return }
     let track = queueTracks[index]
     let token = beginIntent()
+    guard let operation = claimResolution() else { return }
     recoverySnapshot = nil
     trackName = track.name
     phase = .resolving
@@ -298,9 +311,33 @@ package func pause() {
         account: account,
         recovery: nil,
         session: session,
-        token: token
+        token: token,
+        operation: operation
       )
     }
+  }
+
+  /// True when a new resolve may start: either nothing owns the arbiter, or
+  /// this controller owns it and the user is superseding their own request.
+  private var canClaimResolution: Bool {
+    arbiter.canStart() || operationToken != nil
+  }
+
+  private func claimResolution() -> OperationToken? {
+    let token = arbiter.begin(name: "Song URL", effect: .playbackResolution)
+    operationToken = token
+    return token
+  }
+
+  /// Releases the arbiter slot this controller holds. A stale token is
+  /// ignored by the arbiter, so a late completion cannot free a newer
+  /// operation's slot.
+  private func releaseResolution(
+    _ token: OperationToken,
+    outcome: OperationOutcome
+  ) {
+    if operationToken == token { operationToken = nil }
+    arbiter.end(token, outcome: outcome)
   }
 
   private func resolveAndPlay(
@@ -309,9 +346,12 @@ package func pause() {
     account: NeteaseAccount,
     recovery: PlaybackRecoverySnapshot?,
     session: any SessionProviding,
-    token: PlaybackIntentGate.Token
+    token: PlaybackIntentGate.Token,
+    operation: OperationToken
   ) async {
+    var outcome = OperationOutcome.failed
     defer {
+      releaseResolution(operation, outcome: outcome)
       if gate.accepts(token) {
         playTask = nil
       }
@@ -328,6 +368,7 @@ package func pause() {
       else { return }
       requestCredential = credential
 
+      arbiter.markRequestSent(operation)
       let resolution = try await transport.resolveSongURL(
         songID: songID,
         quality: quality,
@@ -343,6 +384,8 @@ package func pause() {
         )
       else { return }
 
+      arbiter.markSettling(operation)
+      outcome = .applied
       switch resolution {
       case .unavailable(let itemCode, let fee):
         recoverySnapshot = nil
@@ -354,6 +397,7 @@ package func pause() {
         try await startPlayback(asset: resolved, recovery: recovery, token: token)
       }
     } catch {
+      outcome = Task.isCancelled ? .cancelled : .failed
       guard gate.accepts(token), !Task.isCancelled else { return }
       await handle(
         error,
@@ -482,16 +526,15 @@ package func pause() {
       finishQueue(status: "Queue finished; no automatic repeat")
     case .play(let index):
       guard
-        let login = attachedSession,
-        !login.isBusy,
-        let account = login.account,
-        libraryBusy?() != true,
+        let session = attachedSession,
+        arbiter.canStart(),
+        let account = session.account,
         self.queue?.moveTo(index) == true
       else {
         finishQueue(status: "Track finished; press Next to continue the queue")
         return
       }
-      startEntry(at: index, account: account, session: login, auto: true)
+      startEntry(at: index, account: account, session: session, auto: true)
     }
   }
 

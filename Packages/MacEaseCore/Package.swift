@@ -36,7 +36,7 @@ let package = Package(
     ),
     .executableTarget(
       name: "GateBLoginHarness",
-      dependencies: ["NeteaseKit", "MacEaseSession"]
+      dependencies: ["NeteaseKit", "MacEaseSession", "MacEaseAppCore"]
     ),
     .executableTarget(
       name: "GateCPlaybackProbe",

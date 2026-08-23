@@ -9,6 +9,7 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
 
   @ObservationIgnored private let transport: any NeteaseTransporting
   @ObservationIgnored package let vault: any CredentialStoring
+  @ObservationIgnored private let arbiter: OperationArbiter
   @ObservationIgnored package private(set) var generation = 0
   @ObservationIgnored private var loadTask: Task<Void, Never>?
   @ObservationIgnored private var trackIDs: [Int64] = []
@@ -29,27 +30,36 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
   package var isLoading = false
   package var status = "Validate the session before loading playlists"
 
-  package init(transport: any NeteaseTransporting, vault: any CredentialStoring) {
+  package init(
+    transport: any NeteaseTransporting,
+    vault: any CredentialStoring,
+    arbiter: OperationArbiter
+  ) {
     self.transport = transport
     self.vault = vault
+    self.arbiter = arbiter
   }
 
   package func load(reset: Bool, session: any SessionProviding) {
-    guard !session.isBusy, !isLoading else { return }
     guard reset || hasMore else { return }
-    guard let account = session.account else {
-      status = "Validate the session before loading playlists"
-      return
-    }
+    guard
+      let claim = claim(
+        "Playlist",
+        effect: .read,
+        session: session,
+        noAccountStatus: "Validate the session before loading playlists"
+      )
+    else { return }
 
     if reset { clearDetail() }
     let currentGeneration = generation
     let offset = reset ? 0 : playlists.count
+    let account = claim.account
     isLoading = true
     status = "Loading playlists (1 request)"
     loadTask = Task {
       await perform(
-        account: account,
+        claim: claim,
         generation: currentGeneration,
         session: session,
         invalidateOnService301: true,
@@ -68,7 +78,7 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
             generation: currentGeneration,
             session: session
           )
-        else { return }
+        else { return false }
 
         if reset {
           self.playlists = page.playlists
@@ -77,6 +87,7 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
         }
         self.hasMore = page.more
         self.status = "Loaded \(self.playlists.count) playlists"
+        return true
       }
     }
   }
@@ -85,21 +96,25 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
     for playlist: UserPlaylist,
     session: any SessionProviding
   ) {
-    guard !session.isBusy, !isLoading else { return }
-    guard let account = session.account else {
-      status = "Validate the session before loading tracks"
-      return
-    }
+    guard
+      let claim = claim(
+        "Playlist/song detail",
+        effect: .read,
+        session: session,
+        noAccountStatus: "Validate the session before loading tracks"
+      )
+    else { return }
 
     generation += 1
     let currentGeneration = generation
+    let account = claim.account
     clearDetail()
     selectedPlaylist = playlist
     isLoading = true
     status = "Loading playlist metadata (request 1 of 2)"
     loadTask = Task {
       await perform(
-        account: account,
+        claim: claim,
         generation: currentGeneration,
         session: session,
         invalidateOnService301: false,
@@ -116,7 +131,7 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
             generation: currentGeneration,
             session: session
           )
-        else { return }
+        else { return false }
         self.selectedPlaylist = UserPlaylist(
           id: playlist.id,
           name: detail.name,
@@ -125,7 +140,7 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
         )
         guard !detail.trackIDs.isEmpty else {
           self.status = "Loaded an empty playlist (1 request)"
-          return
+          return true
         }
 
         let batchIDs = Array(
@@ -143,7 +158,7 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
             generation: currentGeneration,
             session: session
           )
-        else { return }
+        else { return false }
 
         self.trackIDs = detail.trackIDs
         self.loadedTrackIDCount = batchIDs.count
@@ -152,23 +167,29 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
         self.status =
           "Loaded \(batch.count) tracks from \(batchIDs.count) "
           + "of \(detail.trackIDs.count) IDs"
+        return true
       }
     }
   }
 
   package func loadMoreTracks(session: any SessionProviding) {
-    guard !session.isBusy, !isLoading, hasMoreTracks else { return }
-    guard let account = session.account else {
-      status = "Validate the session before loading tracks"
-      return
-    }
+    guard hasMoreTracks else { return }
+    guard
+      let claim = claim(
+        "Song detail",
+        effect: .read,
+        session: session,
+        noAccountStatus: "Validate the session before loading tracks"
+      )
+    else { return }
 
     let currentGeneration = generation
+    let account = claim.account
     isLoading = true
     status = "Loading the next track batch (1 request)"
     loadTask = Task {
       await perform(
-        account: account,
+        claim: claim,
         generation: currentGeneration,
         session: session,
         invalidateOnService301: false,
@@ -190,7 +211,7 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
             generation: currentGeneration,
             session: session
           )
-        else { return }
+        else { return false }
 
         self.tracks.append(contentsOf: batch)
         self.loadedTrackIDCount = end
@@ -198,23 +219,28 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
         self.status =
           "Loaded \(self.tracks.count) tracks from \(end) "
           + "of \(self.trackIDs.count) IDs"
+        return true
       }
     }
   }
 
   package func loadLikedIDs(session: any SessionProviding) {
-    guard !session.isBusy, !isLoading else { return }
-    guard let account = session.account else {
-      status = "Validate the session before loading liked songs"
-      return
-    }
+    guard
+      let claim = claim(
+        "Liked songs",
+        effect: .read,
+        session: session,
+        noAccountStatus: "Validate the session before loading liked songs"
+      )
+    else { return }
 
     let currentGeneration = generation
+    let account = claim.account
     isLoading = true
     status = "Loading liked song IDs (1 request)"
     loadTask = Task {
       await perform(
-        account: account,
+        claim: claim,
         generation: currentGeneration,
         session: session,
         invalidateOnService301: false,
@@ -231,53 +257,36 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
             generation: currentGeneration,
             session: session
           )
-        else { return }
+        else { return false }
 
         self.likedIDs = Set(ids)
         self.status = "Loaded \(ids.count) liked song IDs"
+        return true
       }
     }
   }
 
-  /// The first write action: toggles the server-side liked state for one
-  /// track (1 request). On success only `likedIDs` is updated locally; the
-  /// liked list is never auto-refreshed. Any failure is reported and stops.
+  /// Toggles the server-side liked state for one track (1 request). On
+  /// success only `likedIDs` is updated locally; the liked list is never
+  /// auto-refreshed. Any failure is reported and stops.
   package func setLiked(
     _ liked: Bool,
     for track: PlaylistTrack,
     session: any SessionProviding
   ) {
-    guard !session.isBusy, !isLoading else { return }
-    guard let account = session.account else {
-      status = "Validate the session before changing liked songs"
-      return
-    }
-
-    let currentGeneration = generation
-    isLoading = true
-    status = liked ? "Liking the track (1 request)" : "Unliking the track (1 request)"
-    loadTask = Task {
-      await perform(
-        account: account,
-        generation: currentGeneration,
-        session: session,
-        invalidateOnService301: false,
-        operation: liked ? "Like" : "Unlike"
-      ) { credential in
-        try await self.transport.setSongLiked(
-          songID: track.id,
-          liked: liked,
-          credential: credential
-        )
-        guard
-          try await self.sessionRemainsCurrent(
-            account: account,
-            credential: credential,
-            generation: currentGeneration,
-            session: session
-          )
-        else { return }
-
+    write(
+      loadingStatus: liked
+        ? "Liking the track (1 request)" : "Unliking the track (1 request)",
+      operation: liked ? "Like" : "Unlike",
+      session: session,
+      noAccountStatus: "Validate the session before changing liked songs"
+    ) { credential in
+      try await self.transport.setSongLiked(
+        songID: track.id,
+        liked: liked,
+        credential: credential
+      )
+      return {
         if self.likedIDs != nil {
           if liked {
             self.likedIDs?.insert(track.id)
@@ -285,7 +294,7 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
             self.likedIDs?.remove(track.id)
           }
         }
-        self.status =
+        return
           (liked ? "Liked " : "Unliked ") + track.name
           + (self.likedIDs == nil ? "; load liked IDs to see hearts" : "")
       }
@@ -308,7 +317,10 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
     }
   }
 
-  package func deletePlaylist(_ playlist: UserPlaylist, session: any SessionProviding) {
+  package func deletePlaylist(
+    _ playlist: UserPlaylist,
+    session: any SessionProviding
+  ) {
     write(
       loadingStatus: "Deleting the playlist (1 request)",
       operation: "Delete playlist",
@@ -328,7 +340,10 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
     }
   }
 
-  package func renameSelectedPlaylist(to name: String, session: any SessionProviding) {
+  package func renameSelectedPlaylist(
+    to name: String,
+    session: any SessionProviding
+  ) {
     let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
     guard let playlist = selectedPlaylist, !trimmed.isEmpty,
       trimmed != playlist.name
@@ -381,7 +396,10 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
 
   /// Removes from the currently selected playlist and drops the row locally;
   /// the detail list is not refetched.
-  package func removeSelectedPlaylistTrack(at index: Int, session: any SessionProviding) {
+  package func removeSelectedPlaylistTrack(
+    at index: Int,
+    session: any SessionProviding
+  ) {
     guard let playlist = selectedPlaylist, tracks.indices.contains(index) else {
       return
     }
@@ -440,20 +458,25 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
     loadingStatus: String,
     operation: String,
     session: any SessionProviding,
+    noAccountStatus: String = "Validate the session before changing playlists",
     body: @escaping @MainActor (NeteaseCredential) async throws -> @MainActor () -> String
   ) {
-    guard !session.isBusy, !isLoading else { return }
-    guard let account = session.account else {
-      status = "Validate the session before changing playlists"
-      return
-    }
+    guard
+      let claim = claim(
+        operation,
+        effect: .write,
+        session: session,
+        noAccountStatus: noAccountStatus
+      )
+    else { return }
 
     let currentGeneration = generation
+    let account = claim.account
     isLoading = true
     status = loadingStatus
     loadTask = Task {
       await perform(
-        account: account,
+        claim: claim,
         generation: currentGeneration,
         session: session,
         invalidateOnService301: false,
@@ -467,19 +490,22 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
             generation: currentGeneration,
             session: session
           )
-        else { return }
+        else {
+          // The request reached the server but the session it belonged to is
+          // gone, so the local change must not be applied and the server
+          // result cannot be reported either way.
+          return false
+        }
         self.status = apply()
+        return true
       }
     }
   }
 
-    /// Test seam: awaits the task the last explicit action started, so a test
-  /// can assert on settled state without polling.
-  package func settleForTesting() async {
-    await loadTask?.value
-  }
-
-package func reset() {
+  /// Clears this coordinator's own state only. It never cancels another
+  /// module's work, and it never cancels a write whose request has already
+  /// been sent: that decision belongs to the arbiter.
+  package func reset() {
     generation += 1
     loadTask?.cancel()
     loadTask = nil
@@ -488,26 +514,67 @@ package func reset() {
     status = "Validate the session before loading playlists"
   }
 
+  /// Test seam: awaits the task the last explicit action started, so a test
+  /// can assert on settled state without polling.
+  package func settleForTesting() async {
+    await loadTask?.value
+  }
+
+  private struct Claim {
+    let token: OperationToken
+    let account: NeteaseAccount
+  }
+
+  /// Claims the arbiter and the validated account together, so no entry point
+  /// can start a request without holding both.
+  private func claim(
+    _ name: String,
+    effect: OperationEffect,
+    session: any SessionProviding,
+    noAccountStatus: String
+  ) -> Claim? {
+    guard let token = arbiter.begin(name: name, effect: effect) else { return nil }
+    guard let account = session.account else {
+      arbiter.end(token, outcome: .failed)
+      status = noAccountStatus
+      return nil
+    }
+    return Claim(token: token, account: account)
+  }
+
+  /// Runs the body under the claimed operation. The body returns whether its
+  /// result was published; a write that was sent but not published leaves the
+  /// server outcome unknown, which the arbiter records.
   private func perform(
-    account: NeteaseAccount,
+    claim: Claim,
     generation: Int,
     session: any SessionProviding,
     invalidateOnService301: Bool,
     operation: String,
-    body: @MainActor (NeteaseCredential) async throws -> Void
+    body: @MainActor (NeteaseCredential) async throws -> Bool
   ) async {
-    defer { finish(generation: generation) }
+    var outcome = OperationOutcome.failed
+    defer {
+      arbiter.end(claim.token, outcome: outcome)
+      finish(generation: generation)
+    }
 
     var credential: NeteaseCredential?
     do {
       credential = try await currentCredential(
-        account: account,
+        account: claim.account,
         generation: generation,
         session: session
       )
       guard let credential else { return }
-      try await body(credential)
+      arbiter.markRequestSent(claim.token)
+      let published = try await body(credential)
+      arbiter.markSettling(claim.token)
+      outcome = published ? .applied : .outcomeUnknown
+    } catch is CancellationError {
+      outcome = .cancelled
     } catch {
+      outcome = Task.isCancelled ? .cancelled : .failed
       await handle(
         error,
         credential: credential,

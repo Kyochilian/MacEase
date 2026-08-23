@@ -1,4 +1,5 @@
 import AppKit
+import MacEaseAppCore
 import MacEaseSession
 import NeteaseKit
 import SwiftUI
@@ -9,7 +10,8 @@ import WebKit
 struct GateBLoginHarnessApp: App {
   @State private var coordinator = LoginCoordinator(
     transport: NeteaseSession(),
-    vault: CredentialVault()
+    vault: CredentialVault(),
+    arbiter: OperationArbiter()
   )
   @State private var playback = PlaybackProbeCoordinator()
   @State private var probes = SandboxProbeCoordinator()

@@ -12,9 +12,10 @@ import Testing
 @MainActor
 private func makeLibrary(
   transport: FakeTransport,
-  vault: FakeVault
+  vault: FakeVault,
+  arbiter: OperationArbiter = OperationArbiter()
 ) -> PlaylistLibraryCoordinator {
-  PlaylistLibraryCoordinator(transport: transport, vault: vault)
+  PlaylistLibraryCoordinator(transport: transport, vault: vault, arbiter: arbiter)
 }
 
 // MARK: - Preflight
@@ -215,7 +216,11 @@ private func makeLibrary(
   let transport = FakeTransport()
   let vault = FakeVault(stored: credential)
   let session = FakeSession(credential: credential)
-  let discovery = DiscoveryCoordinator(transport: transport, vault: vault)
+  let discovery = DiscoveryCoordinator(
+    transport: transport,
+    vault: vault,
+    arbiter: OperationArbiter()
+  )
   await transport.setDiscoveryTracks(
     .failure(NeteaseServiceError(source: .http, statusCode: 500))
   )
@@ -236,7 +241,11 @@ private func makeLibrary(
   let transport = FakeTransport()
   let vault = FakeVault(stored: credential)
   let session = FakeSession(credential: credential)
-  let discovery = DiscoveryCoordinator(transport: transport, vault: vault)
+  let discovery = DiscoveryCoordinator(
+    transport: transport,
+    vault: vault,
+    arbiter: OperationArbiter()
+  )
   await transport.setDiscoveryTracks(.success(makeTracks([9])))
 
   discovery.searchQuery = "   "

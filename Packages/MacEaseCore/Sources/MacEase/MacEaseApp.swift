@@ -19,6 +19,7 @@ struct MacEaseApp: App {
   @State private var library: PlaylistLibraryCoordinator
   @State private var discovery: DiscoveryCoordinator
   @State private var playback: PlaybackController
+  @State private var arbiter: OperationArbiter
   @State private var selectedTab: MainTab = .session
 
   init() {
@@ -26,17 +27,30 @@ struct MacEaseApp: App {
     // coordinator shares them instead of constructing its own.
     let transport = NeteaseSession()
     let vault = CredentialVault()
-    let login = LoginCoordinator(transport: transport, vault: vault)
-    let library = PlaylistLibraryCoordinator(transport: transport, vault: vault)
-    let discovery = DiscoveryCoordinator(transport: transport, vault: vault)
-    let playback = PlaybackController(transport: transport, vault: vault)
-    playback.attach(session: login) {
-      library.isLoading || discovery.isLoading
-    }
+    // One arbiter owns "a NetEase request is in flight" for the whole app.
+    let arbiter = OperationArbiter()
+    let login = LoginCoordinator(transport: transport, vault: vault, arbiter: arbiter)
+    let library = PlaylistLibraryCoordinator(
+      transport: transport,
+      vault: vault,
+      arbiter: arbiter
+    )
+    let discovery = DiscoveryCoordinator(
+      transport: transport,
+      vault: vault,
+      arbiter: arbiter
+    )
+    let playback = PlaybackController(
+      transport: transport,
+      vault: vault,
+      arbiter: arbiter
+    )
+    playback.attach(session: login)
     _session = State(initialValue: login)
     _library = State(initialValue: library)
     _discovery = State(initialValue: discovery)
     _playback = State(initialValue: playback)
+    _arbiter = State(initialValue: arbiter)
   }
 
   var body: some Scene {
@@ -47,7 +61,8 @@ struct MacEaseApp: App {
             session: session,
             library: library,
             discovery: discovery,
-            playback: playback
+            playback: playback,
+            arbiter: arbiter
           )
           .tabItem { Label("Session", systemImage: "person.crop.circle") }
           .tag(MainTab.session)
@@ -55,7 +70,8 @@ struct MacEaseApp: App {
             session: session,
             library: library,
             discovery: discovery,
-            playback: playback
+            playback: playback,
+            arbiter: arbiter
           )
           .tabItem { Label("Library", systemImage: "music.note.list") }
           .tag(MainTab.library)
@@ -64,6 +80,7 @@ struct MacEaseApp: App {
             library: library,
             discovery: discovery,
             playback: playback,
+            arbiter: arbiter,
             openPlaylist: { playlist in
               library.loadTracks(
                 for: UserPlaylist(
@@ -83,7 +100,8 @@ struct MacEaseApp: App {
             session: session,
             library: library,
             discovery: discovery,
-            playback: playback
+            playback: playback,
+            arbiter: arbiter
           )
           .tabItem { Label("Search", systemImage: "magnifyingglass") }
           .tag(MainTab.search)
@@ -91,17 +109,20 @@ struct MacEaseApp: App {
             session: session,
             library: library,
             discovery: discovery,
-            playback: playback
+            playback: playback,
+            arbiter: arbiter
           )
           .tabItem { Label("Records", systemImage: "chart.bar") }
           .tag(MainTab.records)
         }
         Divider()
+        UnresolvedOutcomeBanner(arbiter: arbiter)
         PlaybackBarView(
           session: session,
           library: library,
           discovery: discovery,
-          playback: playback
+          playback: playback,
+          arbiter: arbiter
         )
       }
       .frame(minWidth: 760, minHeight: 600)
@@ -118,6 +139,7 @@ private struct SessionView: View {
   let library: PlaylistLibraryCoordinator
   let discovery: DiscoveryCoordinator
   let playback: PlaybackController
+  let arbiter: OperationArbiter
 
   var body: some View {
     VStack(spacing: 0) {
@@ -147,7 +169,7 @@ private struct SessionView: View {
         }
       }
       .padding(12)
-      .disabled(session.isBusy)
+      .disabled(arbiter.isBusy)
 
       Divider()
 
@@ -160,7 +182,7 @@ private struct SessionView: View {
         Button("Import Session", systemImage: "square.and.arrow.down") {
           mutateSession(session.importSession)
         }
-        .disabled(session.isBusy)
+        .disabled(arbiter.isBusy)
       }
       .padding(12)
 
@@ -172,12 +194,16 @@ private struct SessionView: View {
     }
   }
 
+  /// A session mutation only starts when the arbiter is free, so it can no
+  /// longer cancel a write that has already reached the server. Session-scoped
+  /// data is cleared after the operation, never before it.
   private func mutateSession(_ operation: @escaping @MainActor () async -> Void) {
-    playback.stop()
-    library.reset()
-    discovery.reset()
+    guard arbiter.canStart() else { return }
     Task {
       await operation()
+      playback.stop()
+      library.reset()
+      discovery.reset()
       // Roadmap decision: one launch-scoped Discover prefetch after the
       // first successful validation; refreshes stay user-triggered.
       discovery.prefetch(session: session)
@@ -190,14 +216,12 @@ private struct PlaylistLibraryView: View {
   let library: PlaylistLibraryCoordinator
   let discovery: DiscoveryCoordinator
   let playback: PlaybackController
+  let arbiter: OperationArbiter
   @State private var newPlaylistName = ""
   @State private var renameText = ""
   @State private var playlistPendingDeletion: UserPlaylist?
 
-  private var requestInFlight: Bool {
-    session.isBusy || library.isLoading || discovery.isLoading
-      || playback.isResolving
-  }
+  private var requestInFlight: Bool { arbiter.isBusy }
 
   var body: some View {
     VStack(spacing: 0) {
@@ -468,12 +492,10 @@ private struct DiscoverView: View {
   let library: PlaylistLibraryCoordinator
   let discovery: DiscoveryCoordinator
   let playback: PlaybackController
+  let arbiter: OperationArbiter
   let openPlaylist: (DiscoveredPlaylist) -> Void
 
-  private var requestInFlight: Bool {
-    session.isBusy || library.isLoading || discovery.isLoading
-      || playback.isResolving
-  }
+  private var requestInFlight: Bool { arbiter.isBusy }
 
   private var loadDisabled: Bool {
     session.account == nil || requestInFlight
@@ -641,11 +663,9 @@ private struct SearchView: View {
   let library: PlaylistLibraryCoordinator
   @Bindable var discovery: DiscoveryCoordinator
   let playback: PlaybackController
+  let arbiter: OperationArbiter
 
-  private var requestInFlight: Bool {
-    session.isBusy || library.isLoading || discovery.isLoading
-      || playback.isResolving
-  }
+  private var requestInFlight: Bool { arbiter.isBusy }
 
   private var searchDisabled: Bool {
     session.account == nil || requestInFlight
@@ -733,11 +753,9 @@ private struct PlayRecordsView: View {
   let library: PlaylistLibraryCoordinator
   @Bindable var discovery: DiscoveryCoordinator
   let playback: PlaybackController
+  let arbiter: OperationArbiter
 
-  private var requestInFlight: Bool {
-    session.isBusy || library.isLoading || discovery.isLoading
-      || playback.isResolving
-  }
+  private var requestInFlight: Bool { arbiter.isBusy }
 
   var body: some View {
     VStack(spacing: 0) {
@@ -809,12 +827,10 @@ private struct PlaybackBarView: View {
   let library: PlaylistLibraryCoordinator
   let discovery: DiscoveryCoordinator
   @Bindable var playback: PlaybackController
+  let arbiter: OperationArbiter
   @State private var scrubPosition: Double?
 
-  private var requestInFlight: Bool {
-    session.isBusy || library.isLoading || discovery.isLoading
-      || playback.isResolving
-  }
+  private var requestInFlight: Bool { arbiter.isBusy }
 
   private var stepDisabled: Bool {
     session.account == nil || requestInFlight
@@ -873,7 +889,7 @@ private struct PlaybackBarView: View {
         }
         .fixedSize()
         .help("Applies to the next explicit Play")
-        .disabled(playback.isResolving)
+        .disabled(arbiter.isBusy)
         if playback.canPlayAgain {
           Button("Play Again · 1 request", systemImage: "arrow.counterclockwise") {
             playback.playAgain(session: session)
@@ -989,6 +1005,35 @@ extension PlaybackMode {
     case .repeatAll: "Repeat All"
     case .repeatOne: "Repeat One"
     case .shuffle: "Shuffle"
+    }
+  }
+}
+
+/// A write whose server result the client could not determine is never shown
+/// as success or failure. The user is told to go and check, and no automatic
+/// follow-up request is issued.
+private struct UnresolvedOutcomeBanner: View {
+  let arbiter: OperationArbiter
+
+  var body: some View {
+    if !arbiter.unresolvedOutcomes.isEmpty {
+      Divider()
+      HStack(spacing: 8) {
+        Image(systemName: "exclamationmark.triangle.fill")
+          .foregroundStyle(.orange)
+        Text(
+          "Outcome unknown for "
+            + arbiter.unresolvedOutcomes.map(\.name).joined(separator: ", ")
+            + ". The request reached the server but its result was lost; "
+            + "reload the affected list to check before retrying."
+        )
+        .font(.caption)
+        Spacer()
+        Button("Dismiss") { arbiter.acknowledgeUnresolvedOutcomes() }
+          .buttonStyle(.borderless)
+      }
+      .padding(.horizontal, 12)
+      .padding(.vertical, 8)
     }
   }
 }

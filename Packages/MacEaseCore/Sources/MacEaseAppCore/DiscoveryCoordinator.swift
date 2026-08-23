@@ -13,6 +13,7 @@ import Observation
 package final class DiscoveryCoordinator: SessionGuardedCoordinator {
   @ObservationIgnored private let transport: any NeteaseTransporting
   @ObservationIgnored package let vault: any CredentialStoring
+  @ObservationIgnored private let arbiter: OperationArbiter
   @ObservationIgnored package private(set) var generation = 0
   @ObservationIgnored private var loadTask: Task<Void, Never>?
   @ObservationIgnored private var hasPrefetched = false
@@ -36,9 +37,14 @@ package final class DiscoveryCoordinator: SessionGuardedCoordinator {
   package var isLoading = false
   package var status = "Validate the session, then load each section explicitly"
 
-  package init(transport: any NeteaseTransporting, vault: any CredentialStoring) {
+  package init(
+    transport: any NeteaseTransporting,
+    vault: any CredentialStoring,
+    arbiter: OperationArbiter
+  ) {
     self.transport = transport
     self.vault = vault
+    self.arbiter = arbiter
   }
 
   /// One-time prefetch of the four Discover sections after the first
@@ -46,18 +52,25 @@ package final class DiscoveryCoordinator: SessionGuardedCoordinator {
   /// sequence, stopping at the first error, with no retry. Later refreshes
   /// remain explicit user actions.
   package func prefetch(session: any SessionProviding) {
-    guard
-      !hasPrefetched, !session.isBusy, !isLoading,
-      let account = session.account
-    else { return }
+    guard !hasPrefetched, session.account != nil else { return }
+    guard let claim = claim("Discover prefetch", session: session) else { return }
     hasPrefetched = true
     let currentGeneration = generation
+    let account = claim.account
     isLoading = true
     status = "Prefetching Discover once (up to 4 requests)"
     loadTask = Task {
-      defer { finish(generation: currentGeneration) }
+      var outcome = OperationOutcome.applied
+      defer {
+        arbiter.end(claim.token, outcome: outcome)
+        finish(generation: currentGeneration)
+      }
+      arbiter.markRequestSent(claim.token)
       for step in [runDailySongs, runDailyPlaylists, runPersonalized, runToplists] {
-        guard await step(account, currentGeneration, session) else { return }
+        guard await step(account, currentGeneration, session) else {
+          outcome = .failed
+          return
+        }
       }
     }
   }
@@ -65,6 +78,7 @@ package final class DiscoveryCoordinator: SessionGuardedCoordinator {
   package func loadDailySongs(session: any SessionProviding) {
     load(
       loadingStatus: "Loading daily recommended songs (1 request)",
+      operation: "Daily songs",
       session: session,
       run: runDailySongs
     )
@@ -73,6 +87,7 @@ package final class DiscoveryCoordinator: SessionGuardedCoordinator {
   package func loadDailyPlaylists(session: any SessionProviding) {
     load(
       loadingStatus: "Loading daily recommended playlists (1 request)",
+      operation: "Daily playlists",
       session: session,
       run: runDailyPlaylists
     )
@@ -81,6 +96,7 @@ package final class DiscoveryCoordinator: SessionGuardedCoordinator {
   package func loadPersonalized(session: any SessionProviding) {
     load(
       loadingStatus: "Loading recommended playlists (1 request)",
+      operation: "Recommended playlists",
       session: session,
       run: runPersonalized
     )
@@ -89,6 +105,7 @@ package final class DiscoveryCoordinator: SessionGuardedCoordinator {
   package func loadToplists(session: any SessionProviding) {
     load(
       loadingStatus: "Loading toplists (1 request)",
+      operation: "Toplists",
       session: session,
       run: runToplists
     )
@@ -98,6 +115,7 @@ package final class DiscoveryCoordinator: SessionGuardedCoordinator {
     let scope = recordScope
     load(
       loadingStatus: "Loading listening rankings (1 request)",
+      operation: "Listening rankings",
       session: session,
       run: { account, generation, session in
         await self.run(
@@ -128,6 +146,7 @@ package final class DiscoveryCoordinator: SessionGuardedCoordinator {
   ) {
     load(
       loadingStatus: "Loading similar songs (1 request)",
+      operation: "Similar songs",
       session: session,
       run: { account, generation, session in
         await self.run(
@@ -158,6 +177,7 @@ package final class DiscoveryCoordinator: SessionGuardedCoordinator {
     guard !keywords.isEmpty else { return }
     load(
       loadingStatus: "Searching (1 request)",
+      operation: "Search",
       session: session,
       run: { account, generation, session in
         await self.run(
@@ -195,23 +215,43 @@ package func reset() {
     status = "Validate the session, then load each section explicitly"
   }
 
+  private struct Claim {
+    let token: OperationToken
+    let account: NeteaseAccount
+  }
+
+  /// Claims the arbiter and the validated account together, so no section can
+  /// start a request while any other NetEase request is in flight.
+  private func claim(_ name: String, session: any SessionProviding) -> Claim? {
+    guard let token = arbiter.begin(name: name, effect: .read) else { return nil }
+    guard let account = session.account else {
+      arbiter.end(token, outcome: .failed)
+      status = "Validate the session before loading"
+      return nil
+    }
+    return Claim(token: token, account: account)
+  }
+
   private func load(
     loadingStatus: String,
+    operation: String,
     session: any SessionProviding,
     run: @escaping @MainActor (NeteaseAccount, Int, any SessionProviding) async -> Bool
   ) {
-    guard !session.isBusy, !isLoading else { return }
-    guard let account = session.account else {
-      status = "Validate the session before loading"
-      return
-    }
+    guard let claim = claim(operation, session: session) else { return }
 
     let currentGeneration = generation
+    let account = claim.account
     isLoading = true
     status = loadingStatus
     loadTask = Task {
-      defer { finish(generation: currentGeneration) }
-      _ = await run(account, currentGeneration, session)
+      var outcome = OperationOutcome.failed
+      defer {
+        arbiter.end(claim.token, outcome: outcome)
+        finish(generation: currentGeneration)
+      }
+      arbiter.markRequestSent(claim.token)
+      outcome = await run(account, currentGeneration, session) ? .applied : .failed
     }
   }
 

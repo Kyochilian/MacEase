@@ -15,18 +15,24 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
   @ObservationIgnored private let dataStore: WKWebsiteDataStore
   @ObservationIgnored private let transport: any NeteaseTransporting
   @ObservationIgnored private let vault: any CredentialStoring
+  @ObservationIgnored private let arbiter: OperationArbiter
+  @ObservationIgnored private var operationToken: OperationToken?
   @ObservationIgnored private var validatedCredential: NeteaseCredential?
   @ObservationIgnored package let webView: WKWebView
 
   package var status = "Ready"
   package var hasStoredSession = false
-  package var isBusy = false
   package var manualCookieHeader = ""
   package var account: NeteaseAccount?
 
+  /// Session work is arbitrated with every other NetEase request, so this is
+  /// derived rather than a fourth independent busy flag.
+  package var isBusy: Bool { arbiter.isBusy }
+
   package init(
     transport: any NeteaseTransporting,
-    vault: any CredentialStoring
+    vault: any CredentialStoring,
+    arbiter: OperationArbiter
   ) {
     let dataStore = WKWebsiteDataStore.nonPersistent()
     let configuration = WKWebViewConfiguration()
@@ -35,6 +41,7 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
     self.dataStore = dataStore
     self.transport = transport
     self.vault = vault
+    self.arbiter = arbiter
     self.webView = WKWebView(frame: .zero, configuration: configuration)
     super.init()
 
@@ -43,7 +50,7 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
   }
 
   package func start() async {
-    guard beginOperation() else { return }
+    guard beginOperation("Session start") else { return }
     defer { endOperation() }
 
     do {
@@ -65,7 +72,7 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
   }
 
   package func saveSession() async {
-    guard beginOperation() else { return }
+    guard beginOperation("Save session") else { return }
     defer { endOperation() }
 
     let cookies = await dataStore.httpCookieStore.allCookies()
@@ -102,7 +109,7 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
   }
 
   package func clearSession() async {
-    guard beginOperation() else { return }
+    guard beginOperation("Clear session") else { return }
     defer { endOperation() }
 
     webView.stopLoading()
@@ -126,7 +133,7 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
   }
 
   package func importSession() async {
-    guard beginOperation() else { return }
+    guard beginOperation("Import session") else { return }
     defer { endOperation() }
 
     let header = manualCookieHeader
@@ -164,7 +171,7 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
   }
 
   package func validateSession() async {
-    guard beginOperation() else { return }
+    guard beginOperation("Validate session") else { return }
     defer { endOperation() }
 
     account = nil
@@ -212,13 +219,14 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
     }
   }
 
+  /// Called from inside another coordinator's error path, which already owns
+  /// the arbiter, and touches only the Keychain and the login page. It
+  /// therefore does not claim an operation slot of its own.
   package func invalidateStoredSession(
     matching credential: NeteaseCredential,
     message: String
   ) async -> SessionInvalidationResult {
-    guard beginOperation() else { return .busy }
-    defer { endOperation() }
-    return await deleteStoredSession(matching: credential, message: message)
+    await deleteStoredSession(matching: credential, message: message)
   }
 
   package func matchesValidatedSession(
@@ -350,16 +358,21 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
       + "nonempty=\(!cookie.value.isEmpty), expired=\(expired), SameSite=\(sameSite)"
   }
 
-  private func beginOperation() -> Bool {
-    if isBusy {
+  /// Claims the arbiter for a session mutation. It fails while any other
+  /// NetEase request is in flight, which is what stops a Save, Validate,
+  /// Clear or Import from cancelling a write that already reached the server.
+  private func beginOperation(_ name: String) -> Bool {
+    guard let token = arbiter.begin(name: name, effect: .sessionMutation) else {
       return false
     }
-    isBusy = true
+    operationToken = token
     return true
   }
 
-  private func endOperation() {
-    isBusy = false
+  private func endOperation(outcome: OperationOutcome = .applied) {
+    guard let token = operationToken else { return }
+    operationToken = nil
+    arbiter.end(token, outcome: outcome)
   }
 }
 
