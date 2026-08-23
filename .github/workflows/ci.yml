@@ -1,0 +1,55 @@
+name: CI
+
+# Everything here is offline. No job may send a NetEase request.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  offline-verification:
+    # arm64 macOS 15, matching the only supported target.
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: swift --version && xcodebuild -version
+
+      - name: Debug tests
+        working-directory: Packages/MacEaseCore
+        run: swift test
+
+      - name: Release tests
+        working-directory: Packages/MacEaseCore
+        run: swift test -c release
+
+      - name: Release build
+        working-directory: Packages/MacEaseCore
+        run: swift build -c release
+
+      - name: Whitespace and conflict markers
+        run: git diff --check HEAD
+
+      - name: Documented paths are tracked
+        run: ./scripts/check_links.sh
+
+      - name: Status document matches reality
+        run: ./scripts/check_status.sh
+
+      - name: No process-terminating paths on untrusted input
+        run: |
+          if grep -RInE 'as!|try!|precondition\(|fatalError\(' \
+              Packages/MacEaseCore/Sources; then
+            echo "::error::untrusted-input paths must classify, not terminate"
+            exit 1
+          fi
+
+      - name: No credentials or response samples in the tree
+        run: |
+          if grep -RInE 'MUSIC_U=[A-Za-z0-9]{16,}|__csrf=[A-Za-z0-9]{16,}' \
+              --exclude-dir=.git .; then
+            echo "::error::a real-looking cookie value is committed"
+            exit 1
+          fi

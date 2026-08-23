@@ -20,7 +20,6 @@ __pycache__/
 .env.*
 !.env.example
 .python-version
-scripts/
 
 # Local secrets
 Secrets/
@@ -29,9 +28,20 @@ secrets/
 *.mobileprovision
 *.provisionprofile
 
-# Local working notes (not tracked)
-docs/
+# Local working notes and gate evidence (not tracked). Everything a clean
+# clone needs to build, test and verify licence provenance is tracked; only
+# maintainer handover notes and raw gate evidence stay local.
 init.md
 AGENTS.md
 CLAUDE.md
-THIRD_PARTY_NOTICES.md
+docs/next-session.md
+docs/reference-implementations.md
+docs/MacEase_AGENT_REVIEW_AND_EXECUTION_PLAN.md
+docs/MacEase_AGENT_REVIEW_LOG.md
+docs/gatea/
+docs/gateb/
+docs/gatec/
+docs/gated/
+docs/gatee/
+docs/phase0/
+docs/phase2/
