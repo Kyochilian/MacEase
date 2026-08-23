@@ -195,19 +195,38 @@ private struct SessionView: View {
   }
 
   /// A session mutation only starts when the arbiter is free, so it can no
-  /// longer cancel a write that has already reached the server. Session-scoped
-  /// data is cleared after the operation, never before it.
-  private func mutateSession(_ operation: @escaping @MainActor () async -> Void) {
+  /// longer cancel a write that has already reached the server. What happens
+  /// to session-scoped data is decided from the typed result, never from the
+  /// status text, and only after the operation has finished.
+  private func mutateSession(
+    _ operation: @escaping @MainActor () async -> SessionMutationResult
+  ) {
     guard arbiter.canStart() else { return }
     Task {
-      await operation()
-      playback.stop()
-      library.reset()
-      discovery.reset()
-      // Roadmap decision: one launch-scoped Discover prefetch after the
-      // first successful validation; refreshes stay user-triggered.
-      discovery.prefetch(session: session)
+      switch await operation() {
+      case .unchangedValidated:
+        // Same account: playback and everything loaded still belong to it.
+        // Roadmap decision: one launch-scoped Discover prefetch after the
+        // first successful validation; refreshes stay user-triggered.
+        discovery.prefetch(session: session)
+      case .credentialReplaced(let account):
+        clearSessionScopedState()
+        if account != nil {
+          discovery.prefetch(session: session)
+        }
+      case .signedOut, .storedUnvalidated:
+        clearSessionScopedState()
+      case .rejected:
+        // Nothing was established, so nothing confirmed is thrown away.
+        break
+      }
     }
+  }
+
+  private func clearSessionScopedState() {
+    playback.stop()
+    library.reset()
+    discovery.reset()
   }
 }
 

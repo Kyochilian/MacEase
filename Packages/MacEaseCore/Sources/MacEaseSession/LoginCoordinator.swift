@@ -17,13 +17,18 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
   @ObservationIgnored private let vault: any CredentialStoring
   @ObservationIgnored private let arbiter: OperationArbiter
   @ObservationIgnored private var operationToken: OperationToken?
-  @ObservationIgnored private var validatedCredential: NeteaseCredential?
   @ObservationIgnored package let webView: WKWebView
 
+  /// The only mutable session state. The reducer replaces it whole; no path
+  /// edits presence and the validated credential separately.
+  private var snapshot = SessionSnapshot()
+
+  /// Display only. No logic reads or compares it.
   package var status = "Ready"
-  package var hasStoredSession = false
   package var manualCookieHeader = ""
-  package var account: NeteaseAccount?
+
+  package var account: NeteaseAccount? { snapshot.account }
+  package var hasStoredSession: Bool { snapshot.hasStoredSession }
 
   /// Session work is arbitrated with every other NetEase request, so this is
   /// derived rather than a fourth independent busy flag.
@@ -49,20 +54,25 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
     webView.uiDelegate = self
   }
 
-  package func start() async {
-    guard beginOperation("Session start") else { return }
+  @discardableResult
+  package func start() async -> SessionMutationResult {
+    guard beginOperation("Session start") else { return .rejected(.busy) }
     defer { endOperation() }
 
+    let result: SessionMutationResult
     do {
-      hasStoredSession = try await vault.load() != nil
+      let stored = try await vault.load()
+      result = commit(.observedStoredItem(present: stored != nil))
       status =
-        hasStoredSession
+        stored != nil
         ? "Stored API session loaded; validation pending"
         : "Loading official login page"
     } catch {
+      result = commit(.inconclusive(failure(error)))
       status = keychainErrorMessage(error)
     }
     load(Self.loginURL)
+    return result
   }
 
   package func loadLoginPage() {
@@ -71,8 +81,8 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
     load(Self.loginURL)
   }
 
-  package func saveSession() async {
-    guard beginOperation("Save session") else { return }
+  package func saveSession() async -> SessionMutationResult {
+    guard beginOperation("Save session") else { return .rejected(.busy) }
     defer { endOperation() }
 
     let cookies = await dataStore.httpCookieStore.allCookies()
@@ -81,66 +91,74 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
     let csrf = allowed.filter { $0.name == .csrf }
 
     guard musicU.count == 1 else {
-      status =
+      let diagnostic =
         musicU.isEmpty
         ? musicUCookieDiagnostic(cookies)
         : "Duplicate MUSIC_U cookies rejected"
-      return
+      status = diagnostic
+      return commit(.inconclusive(.cookiesUnusable(diagnostic)))
     }
     guard csrf.count <= 1 else {
-      status = "Duplicate __csrf cookies rejected"
-      return
+      let diagnostic = "Duplicate __csrf cookies rejected"
+      status = diagnostic
+      return commit(.inconclusive(.cookiesUnusable(diagnostic)))
     }
-
     guard let credential = NeteaseCredential(musicU: musicU[0], csrf: csrf.first) else {
-      status = "Extracted cookies did not form a usable session"
-      return
+      let diagnostic = "Extracted cookies did not form a usable session"
+      status = diagnostic
+      return commit(.inconclusive(.cookiesUnusable(diagnostic)))
     }
 
     do {
       try await vault.save(credential)
-      hasStoredSession = true
-      account = nil
-      validatedCredential = nil
       status = "Saved \(credential.cookies.count) whitelisted cookie names"
+      // Storage is proven, identity is not: the previous account must not be
+      // carried over onto a credential nobody has validated.
+      return commit(.storedNewCredential)
     } catch {
       status = keychainErrorMessage(error)
+      return commit(.inconclusive(failure(error)))
     }
   }
 
-  package func clearSession() async {
-    guard beginOperation("Clear session") else { return }
+  package func clearSession() async -> SessionMutationResult {
+    guard beginOperation("Clear session") else { return .rejected(.busy) }
     defer { endOperation() }
 
     webView.stopLoading()
-    account = nil
-    validatedCredential = nil
 
-    var keychainError: String?
+    var keychainError: (any Error)?
     do {
       try await vault.delete()
     } catch {
-      keychainError = keychainErrorMessage(error)
+      keychainError = error
     }
 
     await dataStore.removeData(
       ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(),
       modifiedSince: .distantPast
     )
-    hasStoredSession = keychainError != nil
-    status = keychainError ?? "Keychain and WebKit session cleared"
     load(Self.loginURL)
+
+    if let keychainError {
+      // WebKit data is gone but the Keychain item may not be. Say that rather
+      // than claiming a clean slate.
+      status =
+        keychainErrorMessage(keychainError)
+        + "; WebKit data cleared, the stored session may remain"
+      return commit(.storedItemChanged(hasStoredItem: true))
+    }
+    status = "Keychain and WebKit session cleared"
+    return commit(.signedOut)
   }
 
-  package func importSession() async {
-    guard beginOperation("Import session") else { return }
+  package func importSession() async -> SessionMutationResult {
+    guard beginOperation("Import session") else { return .rejected(.busy) }
     defer { endOperation() }
 
-    let header = manualCookieHeader
-    manualCookieHeader = ""
-    guard let credential = NeteaseCredential(cookieHeader: header) else {
+    guard let credential = NeteaseCredential(cookieHeader: manualCookieHeader) else {
       status = "Manual Cookie header needs one MUSIC_U without duplicates or control characters"
-      return
+      return commit(.inconclusive(.invalidManualHeader))
     }
 
     let state: AccountSessionState
@@ -148,74 +166,76 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
       state = try await transport.accountStatus(credential: credential)
     } catch let error as NeteaseServiceError {
       status = "Manual Cookie validation \(error.source.rawValue) error \(error.statusCode)"
-      return
+      return commit(.inconclusive(.service(error)))
     } catch {
       status = "Manual Cookie validation network or response error"
-      return
+      return commit(.inconclusive(.transport))
     }
 
     guard case .authenticated(let account) = state else {
       status = "Manual Cookie session invalid; not saved"
-      return
+      return commit(.inconclusive(.notAuthenticated))
     }
 
     do {
       try await vault.save(credential)
-      hasStoredSession = true
-      self.account = account
-      validatedCredential = credential
+      // Cleared only once the header is known to have produced a session, so
+      // a failed import does not lose what the user pasted.
+      manualCookieHeader = ""
       status = "Manual Cookie session authenticated and saved"
+      return commit(.validated(account, credential))
     } catch {
       status = keychainErrorMessage(error)
+      return commit(.inconclusive(failure(error)))
     }
   }
 
-  package func validateSession() async {
-    guard beginOperation("Validate session") else { return }
+  /// Reads and validates into locals, then commits once. A timeout, a Keychain
+  /// error or a non-301 service error leaves the previously confirmed account,
+  /// its playback and its loaded lists exactly as they were.
+  package func validateSession() async -> SessionMutationResult {
+    guard beginOperation("Validate session") else { return .rejected(.busy) }
     defer { endOperation() }
 
-    account = nil
-    validatedCredential = nil
     var credential: NeteaseCredential?
     do {
       guard let loaded = try await vault.load() else {
-        hasStoredSession = false
         status = "No stored session to validate"
-        return
+        return commit(.storedItemChanged(hasStoredItem: false))
       }
       credential = loaded
-      hasStoredSession = true
 
       switch try await transport.accountStatus(credential: loaded) {
       case .authenticated(let account):
-        let currentCredential = try await vault.load()
-        guard currentCredential == loaded else {
-          hasStoredSession = currentCredential != nil
+        guard try await vault.load() == loaded else {
           status = "Stored session changed; validate again"
-          return
+          return commit(.storedItemChanged(hasStoredItem: true))
         }
-        self.account = account
-        validatedCredential = loaded
         status = "Account status authenticated"
+        return commit(.validated(account, loaded))
       case .signedOut:
-        _ = await deleteStoredSession(
+        return await deleteStoredSession(
           matching: loaded,
           message: "Stored session expired; sign in again"
-        )
+        ).result
       }
     } catch let error as NeteaseServiceError {
+      // Service 301 with the credential in hand is the one evidence-backed
+      // sign-out; every other error leaves the session alone.
       if error.source == .service, error.statusCode == 301, let credential {
-        _ = await deleteStoredSession(
+        return await deleteStoredSession(
           matching: credential,
           message: "Stored session expired; sign in again"
-        )
-      } else {
-        status = "Account status \(error.source.rawValue) error \(error.statusCode)"
+        ).result
       }
+      status = "Account status \(error.source.rawValue) error \(error.statusCode)"
+      return commit(.inconclusive(.service(error)))
     } catch let error as CredentialVaultError {
       status = keychainErrorMessage(error)
+      return commit(.inconclusive(.keychain(error)))
     } catch {
       status = "Account status network or response error"
+      return commit(.inconclusive(.transport))
     }
   }
 
@@ -226,27 +246,23 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
     matching credential: NeteaseCredential,
     message: String
   ) async -> SessionInvalidationResult {
-    await deleteStoredSession(matching: credential, message: message)
+    await deleteStoredSession(matching: credential, message: message).invalidation
   }
 
   package func matchesValidatedSession(
     _ credential: NeteaseCredential,
     account: NeteaseAccount
   ) -> Bool {
-    self.account == account && validatedCredential == credential
+    snapshot.account == account && snapshot.validatedCredential == credential
   }
 
   /// The single place a coordinator's observation of the stored item is
   /// committed to session state. Coordinators never write these fields.
   package func reportDivergence(_ divergence: SessionDivergence) {
-    account = nil
-    validatedCredential = nil
-    switch divergence {
-    case .storedSessionMissing:
-      hasStoredSession = false
+    switch commit(SessionReducer.event(for: divergence)) {
+    case .signedOut:
       status = "No stored session to validate"
-    case .storedSessionChanged(let hasStoredItem):
-      hasStoredSession = hasStoredItem
+    default:
       status = "Stored session changed; validate again"
     }
   }
@@ -254,27 +270,34 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
   private func deleteStoredSession(
     matching credential: NeteaseCredential,
     message: String
-  ) async -> SessionInvalidationResult {
+  ) async -> (invalidation: SessionInvalidationResult, result: SessionMutationResult) {
     do {
       guard try await vault.delete(matching: credential) else {
-        hasStoredSession = try await vault.load() != nil
-        account = nil
-        validatedCredential = nil
+        // A different credential is stored now; it must not be deleted.
+        let remaining = (try? await vault.load()) != nil
         status = "Stored session changed; validate again"
-        return .notCurrent
+        return (.notCurrent, commit(.storedItemChanged(hasStoredItem: remaining)))
       }
     } catch {
       status = keychainErrorMessage(error)
-      account = nil
-      validatedCredential = nil
-      return .failed
+      return (.failed, commit(.inconclusive(failure(error))))
     }
-    hasStoredSession = false
-    account = nil
-    validatedCredential = nil
     status = message
     load(Self.loginURL)
-    return .deleted
+    return (.deleted, commit(.signedOut))
+  }
+
+  @discardableResult
+  private func commit(_ event: SessionEvent) -> SessionMutationResult {
+    let (next, result) = SessionReducer.reduce(snapshot, event)
+    snapshot = next
+    return result
+  }
+
+  private func failure(_ error: any Error) -> SessionFailure {
+    if let error = error as? CredentialVaultError { return .keychain(error) }
+    if let error = error as? NeteaseServiceError { return .service(error) }
+    return .transport
   }
 
   package func webView(
