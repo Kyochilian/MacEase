@@ -296,3 +296,95 @@ private func xeapiParameters(
     try NeteaseCrypto.decodeXeAPIPublicKeyState(Data(repeating: 0x5a, count: 48))
   }
 }
+
+// MARK: - Presence markers must be objects
+
+/// P1-01: an empty `Decodable` struct accepts any non-null JSON value, so
+/// `1`, `"null"`, `[]` and `true` all used to decode as "this field is
+/// present". The reference implementation's unblock path writes the string
+/// `"null"` into `freeTrialInfo`, so this is not hypothetical.
+
+private func songURLBody(_ trial: String) -> Data {
+  Data(
+    #"{"code":200,"data":[{"id":347230,"code":200,"#
+      .appending(#""url":"https://m8.music.126.net/a.mp3","freeTrialInfo":\#(trial)}]}"#)
+      .utf8
+  )
+}
+
+private let okResponse = HTTPURLResponse(
+  url: URL(string: "https://interfacepc.music.163.com/eapi/x")!,
+  statusCode: 200,
+  httpVersion: nil,
+  headerFields: nil
+)!
+
+@Test func onlyAnObjectMarksATrackAsTrial() throws {
+  for body in ["1", #""null""#, "[]", "true", #""""#] {
+    let resolution = try NeteaseSession.classifySongURL(
+      data: songURLBody(body),
+      response: okResponse,
+      songID: 347_230,
+      requestedQuality: .standard
+    )
+    guard case .resolved(let asset) = resolution else {
+      Issue.record("expected a resolved asset for \(body)")
+      continue
+    }
+    #expect(!asset.trial, "\(body) must not read as a trial")
+  }
+
+  for body in ["{}", #"{"start":0,"end":30000}"#] {
+    let resolution = try NeteaseSession.classifySongURL(
+      data: songURLBody(body),
+      response: okResponse,
+      songID: 347_230,
+      requestedQuality: .standard
+    )
+    guard case .resolved(let asset) = resolution else {
+      Issue.record("expected a resolved asset for \(body)")
+      continue
+    }
+    #expect(asset.trial, "\(body) must read as a trial")
+  }
+}
+
+@Test func aNullTrialFieldIsNotATrial() throws {
+  let resolution = try NeteaseSession.classifySongURL(
+    data: songURLBody("null"),
+    response: okResponse,
+    songID: 347_230,
+    requestedQuality: .standard
+  )
+  guard case .resolved(let asset) = resolution else {
+    Issue.record("expected a resolved asset")
+    return
+  }
+  #expect(!asset.trial)
+}
+
+@Test func onlyAnObjectCountsAsLyricsContent() {
+  func status(_ lrc: String) -> LyricsProbeStatus {
+    NeteaseSession.classifyLyricsProbe(
+      data: Data(#"{"code":200,"lrc":\#(lrc)}"#.utf8),
+      response: okResponse
+    ).status
+  }
+
+  // A scalar or array is a shape the probe has never seen; it must be
+  // reported as an invalid response, not as lyric content.
+  for body in ["1", #""null""#, "[]", "true"] {
+    #expect(status(body) == .invalidResponse, "\(body) must not read as content")
+  }
+  #expect(status("{}") == .content)
+  #expect(status(#"{"version":1,"lyric":"[00:00.00] hi"}"#) == .content)
+}
+
+@Test func aResponseWithNoLyricMarkersStillClassifies() {
+  let outcome = NeteaseSession.classifyLyricsProbe(
+    data: Data(#"{"code":200,"nolyric":true}"#.utf8),
+    response: okResponse
+  )
+
+  #expect(outcome.status == .noLyrics)
+}

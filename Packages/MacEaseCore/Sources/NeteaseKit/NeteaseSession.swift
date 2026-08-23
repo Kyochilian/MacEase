@@ -1377,7 +1377,7 @@ public actor NeteaseSession {
         byteCount: item.size,
         expiresIn: item.expi,
         fee: item.fee,
-        trial: item.freeTrialInfo != nil
+        trial: item.freeTrialInfo?.isObject == true
       )
     )
   }
@@ -1422,7 +1422,8 @@ public actor NeteaseSession {
     guard (200..<300).contains(response.statusCode) else {
       return LyricsProbeOutcome(status: .http(response.statusCode), setsCookie: setsCookie)
     }
-    guard let payload = try? JSONDecoder().decode(LyricsProbePayload.self, from: data) else {
+    guard let payload = try? JSONDecoder().decode(LyricsProbePayload.self, from: data)
+    else {
       return LyricsProbeOutcome(status: .invalidResponse, setsCookie: setsCookie)
     }
     guard payload.code == 200 else {
@@ -1872,14 +1873,40 @@ private struct SimilarSongsPayload: Decodable {
   }
 }
 
+/// A field whose presence carries meaning, but only when it really is a JSON
+/// object.
+///
+/// Swift's synthesised `Decodable` for an empty struct accepts *any* non-null
+/// value, so `1`, `"null"`, `[]` and `true` all decoded as "present". The
+/// reference implementation's own unblock path writes the string `"null"`
+/// into `freeTrialInfo`, so a non-object value is not hypothetical.
+private struct ObjectMarker: Decodable {
+  private enum NoKeys: CodingKey {}
+
+  init(from decoder: Decoder) throws {
+    _ = try decoder.container(keyedBy: NoKeys.self)
+  }
+}
+
+/// Same rule, but a non-object is recorded rather than thrown: this field
+/// only feeds a diagnostic string, and failing the whole song-URL resolution
+/// over it would stop playback for no benefit.
+private struct LenientObjectMarker: Decodable {
+  let isObject: Bool
+
+  private enum NoKeys: CodingKey {}
+
+  init(from decoder: Decoder) throws {
+    isObject = (try? decoder.container(keyedBy: NoKeys.self)) != nil
+  }
+}
+
 private struct LyricsProbePayload: Decodable {
   let code: Int
-  let lrc: LyricsMarker?
-  let yrc: LyricsMarker?
+  let lrc: ObjectMarker?
+  let yrc: ObjectMarker?
   let nolyric: Bool?
   let uncollected: Bool?
-
-  struct LyricsMarker: Decodable {}
 }
 
 private struct SongURLPayload: Decodable {
@@ -1897,9 +1924,7 @@ private struct SongURLPayload: Decodable {
     let size: Int64?
     let expi: Int?
     let fee: Int?
-    let freeTrialInfo: Trial?
-
-    struct Trial: Decodable {}
+    let freeTrialInfo: LenientObjectMarker?
   }
 }
 
