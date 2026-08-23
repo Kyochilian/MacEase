@@ -40,10 +40,7 @@ private func stubbedSession() -> NeteaseSession {
   return NeteaseSession(configuration: configuration)
 }
 
-private let boundaryCredential = NeteaseCredential(
-  musicU: NeteaseCookie(name: .musicU, value: "music-u-test"),
-  csrf: NeteaseCookie(name: .csrf, value: "csrf-test")
-)
+private let boundaryCredential = testCredential(musicU: "music-u-test", csrf: "csrf-test")
 
 @Test func nonHTTPResponseIsClassifiedOnTheWeAPIPath() async throws {
   let session = stubbedSession()

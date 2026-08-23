@@ -3,10 +3,7 @@ import Testing
 
 @testable import NeteaseKit
 
-private let accountCredential = NeteaseCredential(
-  musicU: NeteaseCookie(name: .musicU, value: "music-u-test"),
-  csrf: NeteaseCookie(name: .csrf, value: "csrf-test")
-)
+private let accountCredential = testCredential(musicU: "music-u-test", csrf: "csrf-test")
 
 @Test func accountStatusRequestUsesWhitelistedSessionContext() throws {
   let request = try NeteaseSession.accountStatusRequest(

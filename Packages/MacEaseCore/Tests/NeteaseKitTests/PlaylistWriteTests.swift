@@ -3,10 +3,7 @@ import Testing
 
 @testable import NeteaseKit
 
-private let writeCredential = NeteaseCredential(
-  musicU: NeteaseCookie(name: .musicU, value: "music-u-test"),
-  csrf: NeteaseCookie(name: .csrf, value: "csrf-test")
-)
+private let writeCredential = testCredential(musicU: "music-u-test", csrf: "csrf-test")
 
 private let okResponse = HTTPURLResponse(
   url: URL(string: "https://music.163.com")!,

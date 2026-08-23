@@ -8,24 +8,12 @@ import Testing
     service: "com.macease.tests.\(UUID().uuidString)",
     account: "round-trip"
   )
-  let credential = NeteaseCredential(
-    musicU: NeteaseCookie(
-      name: .musicU,
-      value: "test-music-u"
-    ),
-    csrf: NeteaseCookie(
-      name: .csrf,
-      value: "test-csrf"
-    )
-  )
+  let credential = testCredential(musicU: "test-music-u", csrf: "test-csrf")
 
   try await vault.save(credential)
   #expect(try await vault.load() == credential)
 
-  let replacement = NeteaseCredential(
-    musicU: NeteaseCookie(name: .musicU, value: "replacement"),
-    csrf: nil
-  )
+  let replacement = testCredential(musicU: "replacement")
   try await vault.save(replacement)
   #expect(try await vault.load() == replacement)
 
@@ -38,14 +26,8 @@ import Testing
     service: "com.macease.tests.\(UUID().uuidString)",
     account: "conditional-delete"
   )
-  let original = NeteaseCredential(
-    musicU: NeteaseCookie(name: .musicU, value: "original"),
-    csrf: nil
-  )
-  let replacement = NeteaseCredential(
-    musicU: NeteaseCookie(name: .musicU, value: "replacement"),
-    csrf: nil
-  )
+  let original = testCredential(musicU: "original")
+  let replacement = testCredential(musicU: "replacement")
 
   try await vault.save(replacement)
   #expect(try await vault.delete(matching: original) == false)
@@ -66,14 +48,8 @@ import Testing
   )
 
   for iteration in 0..<50 {
-    let original = NeteaseCredential(
-      musicU: NeteaseCookie(name: .musicU, value: "original-\(iteration)"),
-      csrf: nil
-    )
-    let replacement = NeteaseCredential(
-      musicU: NeteaseCookie(name: .musicU, value: "replacement-\(iteration)"),
-      csrf: nil
-    )
+    let original = testCredential(musicU: "original-\(iteration)")
+    let replacement = testCredential(musicU: "replacement-\(iteration)")
 
     try await deletingVault.save(original)
     async let deletion = deletingVault.delete(matching: original)

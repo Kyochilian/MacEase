@@ -86,7 +86,10 @@ package final class LoginCoordinator: NSObject, WKNavigationDelegate, WKUIDelega
       return
     }
 
-    let credential = NeteaseCredential(musicU: musicU[0], csrf: csrf.first)
+    guard let credential = NeteaseCredential(musicU: musicU[0], csrf: csrf.first) else {
+      status = "Extracted cookies did not form a usable session"
+      return
+    }
 
     do {
       try await vault.save(credential)
@@ -374,5 +377,4 @@ extension NeteaseCookie {
       name: name,
       value: cookie.value
     )
-  }
-}
+  }}

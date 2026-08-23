@@ -3,10 +3,7 @@ import Testing
 
 @testable import NeteaseKit
 
-private let likedCredential = NeteaseCredential(
-  musicU: NeteaseCookie(name: .musicU, value: "music-u-test"),
-  csrf: NeteaseCookie(name: .csrf, value: "csrf-test")
-)
+private let likedCredential = testCredential(musicU: "music-u-test", csrf: "csrf-test")
 
 @Test func likeSongRequestSendsTheLockedWriteContract() throws {
   let liked = try NeteaseSession.likeSongRequest(

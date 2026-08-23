@@ -3,10 +3,7 @@ import Testing
 
 @testable import NeteaseKit
 
-private let playbackCredential = NeteaseCredential(
-  musicU: NeteaseCookie(name: .musicU, value: "music-u-test"),
-  csrf: NeteaseCookie(name: .csrf, value: "csrf-test")
-)
+private let playbackCredential = testCredential(musicU: "music-u-test", csrf: "csrf-test")
 
 @Test func songURLRequestGoldenVector() throws {
   let request = try NeteaseSession.songURLRequest(
@@ -38,10 +35,7 @@ private let playbackCredential = NeteaseCredential(
 }
 
 @Test func songURLRequestKeepsEmptyCSRFContext() throws {
-  let credential = NeteaseCredential(
-    musicU: NeteaseCookie(name: .musicU, value: "music-u-test"),
-    csrf: nil
-  )
+  let credential = testCredential(musicU: "music-u-test")
   let request = try NeteaseSession.songURLRequest(
     songID: 347230,
     quality: .standard,
