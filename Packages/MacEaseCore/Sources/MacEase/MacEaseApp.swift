@@ -244,6 +244,7 @@ private struct PlaylistLibraryView: View {
   let playback: PlaybackController
   let arbiter: OperationArbiter
   @State private var newPlaylistName = ""
+  @State private var submittedPlaylistName: String?
   @State private var renameText = ""
   @State private var playlistPendingDeletion: UserPlaylist?
 
@@ -282,6 +283,18 @@ private struct PlaylistLibraryView: View {
     }
     .onChange(of: library.selectedPlaylist?.id) {
       renameText = library.selectedPlaylist?.name ?? ""
+    }
+    .onChange(of: library.lastReceipt?.id) {
+      guard let receipt = library.lastReceipt,
+        receipt.operation == "Create playlist", receipt.succeeded,
+        let submitted = submittedPlaylistName
+      else { return }
+      // Only clear what this action submitted: a late completion must not
+      // wipe a name the user has since typed.
+      if newPlaylistName == submitted {
+        newPlaylistName = ""
+      }
+      submittedPlaylistName = nil
     }
     .confirmationDialog(
       playlistPendingDeletion.map { "Delete \($0.name)?" } ?? "Delete playlist?",
@@ -339,8 +352,8 @@ private struct PlaylistLibraryView: View {
       TextField("New playlist name", text: $newPlaylistName)
         .frame(maxWidth: 240)
       Button("Create · 1 request", systemImage: "plus.rectangle.on.folder") {
+        submittedPlaylistName = newPlaylistName
         library.createPlaylist(named: newPlaylistName, session: session)
-        newPlaylistName = ""
       }
       .disabled(
         session.account == nil || requestInFlight
@@ -480,25 +493,14 @@ private struct PlaylistLibraryView: View {
 
   @ViewBuilder private func trackRow(_ track: PlaylistTrack) -> some View {
     HStack {
-      VStack(alignment: .leading, spacing: 3) {
-        Text(track.name)
-        if !track.artists.isEmpty {
-          Text(track.artists.joined(separator: ", "))
-            .font(.caption)
-            .foregroundStyle(.secondary)
-        }
-      }
+      TrackLabel(track: track)
       Spacer()
-      let isLiked = library.likedIDs?.contains(track.id) == true
-      Button {
-        library.setLiked(!isLiked, for: track, session: session)
-      } label: {
-        Image(systemName: isLiked ? "heart.fill" : "heart")
-          .foregroundStyle(isLiked ? .red : .secondary)
-      }
-      .buttonStyle(.borderless)
-      .disabled(session.account == nil || requestInFlight)
-      .help(isLiked ? "Unlike · 1 request" : "Like · 1 request")
+      LikeButton(
+        track: track,
+        library: library,
+        session: session,
+        disabled: requestInFlight
+      )
       AddToPlaylistMenu(
         track: track,
         library: library,
@@ -518,16 +520,97 @@ private struct PlaylistLibraryView: View {
         .help("Remove from this playlist · 1 request")
         .accessibilityLabel("Remove \(track.name)")
       }
-      Button("Play · 1 request", systemImage: "play.fill") {
-        guard let index = library.tracks.firstIndex(where: { $0.id == track.id })
-        else { return }
-        playback.play(tracks: library.tracks, startIndex: index, session: session)
-      }
-      .buttonStyle(.borderless)
-      .disabled(session.account == nil || requestInFlight)
+      PlayTrackButton(
+        track: track,
+        tracks: library.tracks,
+        playback: playback,
+        session: session,
+        disabled: session.account == nil || requestInFlight
+      )
       .help("Starts the queue from this track over the loaded list")
     }
     .padding(.vertical, 3)
+  }
+}
+
+/// The heart is tri-state. "Not loaded yet" is shown as a distinct neutral
+/// state and offers an explicit Like, rather than an empty heart whose toggle
+/// would be guessing the starting value.
+private struct LikeButton: View {
+  let track: PlaylistTrack
+  let library: PlaylistLibraryCoordinator
+  let session: LoginCoordinator
+  let disabled: Bool
+
+  var body: some View {
+    let state = library.liked.state(of: track.id)
+    Button {
+      library.setLiked(state != .liked, for: track, session: session)
+    } label: {
+      Image(systemName: state == .liked ? "heart.fill" : "heart")
+        .foregroundStyle(state == .liked ? AnyShapeStyle(.red) : AnyShapeStyle(colour(for: state)))
+    }
+    .buttonStyle(.borderless)
+    .disabled(session.account == nil || disabled)
+    .help(help(for: state))
+    .accessibilityLabel(accessibilityLabel(for: state))
+  }
+
+  private func colour(for state: LikedState) -> HierarchicalShapeStyle {
+    state == .notLiked ? .secondary : .tertiary
+  }
+
+  private func help(for state: LikedState) -> String {
+    switch state {
+    case .liked: "Unlike · 1 request"
+    case .notLiked: "Like · 1 request"
+    case .unknown: "Liked state unknown; this likes the track · 1 request"
+    }
+  }
+
+  private func accessibilityLabel(for state: LikedState) -> String {
+    switch state {
+    case .liked: "Liked, unlike \(track.name)"
+    case .notLiked: "Not liked, like \(track.name)"
+    case .unknown: "Liked state not loaded, like \(track.name)"
+    }
+  }
+}
+
+private struct TrackLabel: View {
+  let track: PlaylistTrack
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 3) {
+      Text(track.name)
+      if !track.artists.isEmpty {
+        Text(track.artists.joined(separator: ", "))
+          .font(.caption)
+          .foregroundStyle(.secondary)
+      }
+    }
+  }
+}
+
+/// Resolves the row's position at action time from the track id, so a list
+/// that changed between render and click cannot start the wrong track.
+private struct PlayTrackButton: View {
+  let track: PlaylistTrack
+  let tracks: [PlaylistTrack]
+  let playback: PlaybackController
+  let session: LoginCoordinator
+  let disabled: Bool
+
+  var body: some View {
+    Button("Play · 1 request", systemImage: "play.fill") {
+      guard let index = tracks.firstIndex(where: { $0.id == track.id }) else {
+        return
+      }
+      playback.play(tracks: tracks, startIndex: index, session: session)
+    }
+    .buttonStyle(.borderless)
+    .disabled(disabled)
+    .accessibilityLabel("Play \(track.name)")
   }
 }
 
@@ -574,27 +657,17 @@ private struct DiscoverView: View {
     VStack(spacing: 0) {
       List {
         Section {
-          ForEach(discovery.dailySongs.indices, id: \.self) { index in
-            let track = discovery.dailySongs[index]
+          ForEach(discovery.dailySongs, id: \.id) { track in
             HStack {
-              VStack(alignment: .leading, spacing: 3) {
-                Text(track.name)
-                if !track.artists.isEmpty {
-                  Text(track.artists.joined(separator: ", "))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                }
-              }
+              TrackLabel(track: track)
               Spacer()
-              Button("Play · 1 request", systemImage: "play.fill") {
-                playback.play(
-                  tracks: discovery.dailySongs,
-                  startIndex: index,
-                  session: session
-                )
-              }
-              .buttonStyle(.borderless)
-              .disabled(loadDisabled)
+              PlayTrackButton(
+                track: track,
+                tracks: discovery.dailySongs,
+                playback: playback,
+                session: session,
+                disabled: loadDisabled
+              )
             }
           }
         } header: {
@@ -628,27 +701,17 @@ private struct DiscoverView: View {
         }
 
         Section {
-          ForEach(discovery.similarSongs.indices, id: \.self) { index in
-            let track = discovery.similarSongs[index]
+          ForEach(discovery.similarSongs, id: \.id) { track in
             HStack {
-              VStack(alignment: .leading, spacing: 3) {
-                Text(track.name)
-                if !track.artists.isEmpty {
-                  Text(track.artists.joined(separator: ", "))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                }
-              }
+              TrackLabel(track: track)
               Spacer()
-              Button("Play · 1 request", systemImage: "play.fill") {
-                playback.play(
-                  tracks: discovery.similarSongs,
-                  startIndex: index,
-                  session: session
-                )
-              }
-              .buttonStyle(.borderless)
-              .disabled(loadDisabled)
+              PlayTrackButton(
+                track: track,
+                tracks: discovery.similarSongs,
+                playback: playback,
+                session: session,
+                disabled: loadDisabled
+              )
             }
           }
         } header: {
@@ -699,8 +762,7 @@ private struct DiscoverView: View {
   }
 
   private func playlistRows(_ playlists: [DiscoveredPlaylist]) -> some View {
-    ForEach(playlists.indices, id: \.self) { index in
-      let playlist = playlists[index]
+    ForEach(playlists, id: \.id) { playlist in
       HStack {
         Text(playlist.name)
         Spacer()
@@ -763,52 +825,29 @@ private struct SearchView: View {
           .foregroundStyle(.secondary)
           .frame(maxWidth: .infinity, maxHeight: .infinity)
       } else {
-        List(discovery.searchResults.indices, id: \.self) { index in
-          let track = discovery.searchResults[index]
+        List(discovery.searchResults, id: \.id) { track in
           HStack {
-            VStack(alignment: .leading, spacing: 3) {
-              Text(track.name)
-              if !track.artists.isEmpty {
-                Text(track.artists.joined(separator: ", "))
-                  .font(.caption)
-                  .foregroundStyle(.secondary)
-              }
-            }
+            TrackLabel(track: track)
             Spacer()
-            let isLiked = library.likedIDs?.contains(track.id) == true
-            Button {
-              library.setLiked(!isLiked, for: track, session: session)
-            } label: {
-              Image(systemName: isLiked ? "heart.fill" : "heart")
-                .foregroundStyle(isLiked ? .red : .secondary)
-            }
-            .buttonStyle(.borderless)
-            .disabled(session.account == nil || requestInFlight)
-            .help(isLiked ? "Unlike · 1 request" : "Like · 1 request")
-            Menu {
-              ForEach(library.playlists.filter(\.owned), id: \.id) { target in
-                Button(target.name) {
-                  library.addTrack(track, to: target, session: session)
-                }
-              }
-            } label: {
-              Image(systemName: "text.badge.plus")
-            }
-            .menuStyle(.borderlessButton)
-            .fixedSize()
-            .disabled(
-              requestInFlight || !library.playlists.contains(where: \.owned)
+            LikeButton(
+              track: track,
+              library: library,
+              session: session,
+              disabled: requestInFlight
             )
-            .help("Add to one of your playlists · 1 request")
-            Button("Play · 1 request", systemImage: "play.fill") {
-              playback.play(
-                tracks: discovery.searchResults,
-                startIndex: index,
-                session: session
-              )
-            }
-            .buttonStyle(.borderless)
-            .disabled(session.account == nil || requestInFlight)
+            AddToPlaylistMenu(
+              track: track,
+              library: library,
+              session: session,
+              disabled: requestInFlight
+            )
+            PlayTrackButton(
+              track: track,
+              tracks: discovery.searchResults,
+              playback: playback,
+              session: session,
+              disabled: session.account == nil || requestInFlight
+            )
           }
           .padding(.vertical, 3)
         }
@@ -855,34 +894,25 @@ private struct PlayRecordsView: View {
           .foregroundStyle(.secondary)
           .frame(maxWidth: .infinity, maxHeight: .infinity)
       } else {
-        List(discovery.records.indices, id: \.self) { index in
-          let entry = discovery.records[index]
+        List(Array(discovery.records.enumerated()), id: \.element.track.id) {
+          rank, entry in
           HStack {
-            Text("\(index + 1)")
+            Text("\(rank + 1)")
               .font(.caption.monospacedDigit())
               .foregroundStyle(.secondary)
               .frame(width: 28, alignment: .trailing)
-            VStack(alignment: .leading, spacing: 3) {
-              Text(entry.track.name)
-              if !entry.track.artists.isEmpty {
-                Text(entry.track.artists.joined(separator: ", "))
-                  .font(.caption)
-                  .foregroundStyle(.secondary)
-              }
-            }
+            TrackLabel(track: entry.track)
             Spacer()
             Text("\(entry.playCount) plays")
               .font(.caption.monospacedDigit())
               .foregroundStyle(.secondary)
-            Button("Play · 1 request", systemImage: "play.fill") {
-              playback.play(
-                tracks: discovery.records.map(\.track),
-                startIndex: index,
-                session: session
-              )
-            }
-            .buttonStyle(.borderless)
-            .disabled(session.account == nil || requestInFlight)
+            PlayTrackButton(
+              track: entry.track,
+              tracks: discovery.records.map(\.track),
+              playback: playback,
+              session: session,
+              disabled: session.account == nil || requestInFlight
+            )
           }
           .padding(.vertical, 3)
         }

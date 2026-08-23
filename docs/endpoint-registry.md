@@ -52,6 +52,8 @@
 | `/api/batch` 内层子响应状态 | **未验证**。当前只检查顶层 `code == 200`。是否存在「顶层 200、子请求失败」需一手脱敏响应证据；在此之前不宣称 rename 已证明保留 description/tags。 |
 | playlist subscribe / unsubscribe | 已实现且不发送反作弊 token。是否被服务端接受需 live 判定；`-460` 即视为需要 token，功能停用而非补指纹。 |
 | xeapi | 全部 Hold。错误处理已完成不等于批准 live。 |
+| 歌词 `lrc` / `yrc` 内层字段名 | **未验证**。Gate A 的 live 证据刻意不保存歌词文本，因此只锁定「必须是 JSON 对象」，未按 `lyric` 之类的字段名解析。取得一手脱敏样本后可再收紧。 |
+| `freeTrialInfo` 内层字段 | **未验证**。参考实现本身只判断非 null，MacEase 收紧为「必须是对象」；非对象值记为非试听而不使整次解析失败。 |
 
 ## 请求预算
 

@@ -201,12 +201,14 @@ private func makeLibrary(
 
   library.loadLikedIDs(session: session)
   await library.settleForTesting()
-  #expect(library.likedIDs == [1])
+  #expect(library.liked.state(of: 1) == .liked)
 
   library.setLiked(true, for: makeTracks([2])[0], session: session)
   await library.settleForTesting()
 
-  #expect(library.likedIDs == [1, 2])
+  #expect(library.liked.state(of: 1) == .liked)
+  #expect(library.liked.state(of: 2) == .liked)
+  #expect(library.liked.state(of: 3) == .notLiked)
   #expect(
     await transport.recordedCalls() == [.likedSongIDs, .setSongLiked(2, true)]
   )

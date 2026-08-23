@@ -257,7 +257,7 @@ private struct Rig {
   #expect(rig.arbiter.unresolvedOutcomes.map(\.name) == ["Like"])
   #expect(rig.arbiter.unresolvedOutcomes.map(\.kind) == [.appliedRemotelyOnly])
   #expect(rig.library.status == "Session changed; validate again")
-  #expect(rig.library.likedIDs == nil)
+  #expect(rig.library.liked.state(of: 3) == .unknown)
 }
 
 @Test @MainActor func theArbiterIsReleasedOnEveryEarlyReturn() async {

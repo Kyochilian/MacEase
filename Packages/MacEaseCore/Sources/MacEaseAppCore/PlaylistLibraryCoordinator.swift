@@ -22,7 +22,10 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
   package private(set) var collection = PlaylistCollection()
   package private(set) var detail = PlaylistTrackCollection()
   package var selectedPlaylist: UserPlaylist?
-  package var likedIDs: Set<Int64>?
+  package private(set) var liked = LikedSongs()
+  /// The last write's typed result, so a form clears its input only when its
+  /// own request succeeded.
+  package private(set) var lastReceipt: WriteReceipt?
   package var isLoading = false
   package var status = "Validate the session before loading playlists"
 
@@ -262,7 +265,7 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
           )
         else { return false }
 
-        self.likedIDs = Set(ids)
+        self.liked.load(ids)
         self.status = "Loaded \(ids.count) liked song IDs"
         return true
       }
@@ -290,16 +293,11 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
         credential: credential
       )
       return {
-        if self.likedIDs != nil {
-          if liked {
-            self.likedIDs?.insert(track.id)
-          } else {
-            self.likedIDs?.remove(track.id)
-          }
-        }
+        // The write proves this track's state, and only this track's.
+        self.liked.setLiked(liked, trackID: track.id)
         return
           (liked ? "Liked " : "Unliked ") + track.name
-          + (self.likedIDs == nil ? "; load liked IDs to see hearts" : "")
+          + (self.liked.isLoaded ? "" : "; load liked IDs to see every heart")
       }
     }
   }
@@ -530,6 +528,7 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
       var outcome = OperationOutcome.failed
       defer {
         arbiter.end(claim.token, outcome: outcome)
+        self.publishReceipt(operation: operation, outcome: outcome)
         finish(generation: currentGeneration)
       }
 
@@ -596,6 +595,18 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
   /// can assert on settled state without polling.
   package func settleForTesting() async {
     await loadTask?.value
+  }
+
+  /// Only the operations that carry a form input need this, but publishing it
+  /// for every write keeps one shape.
+  private func publishReceipt(operation: String, outcome: OperationOutcome) {
+    let mapped: WriteReceipt.Outcome
+    switch outcome {
+    case .applied: mapped = .succeeded
+    case .appliedRemotelyOnly: mapped = .appliedRemotelyOnly
+    case .failed, .cancelled, .outcomeUnknown: mapped = .failed
+    }
+    lastReceipt = WriteReceipt(operation: operation, outcome: mapped)
   }
 
   private struct Claim {
@@ -714,7 +725,8 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
 
   private func clearLibrary() {
     collection.reset()
-    likedIDs = nil
+    liked.reset()
+    lastReceipt = nil
     clearDetail()
   }
 

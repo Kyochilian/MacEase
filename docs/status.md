@@ -12,8 +12,8 @@
 | verified-at-commit | 246b363 |
 | toolchain | Swift 6.1.2 / Xcode 16.4 |
 | platform | macOS 15, arm64 only |
-| debug-tests | 215 |
-| release-tests | 215 |
+| debug-tests | 230 |
+| release-tests | 230 |
 | release-build | pass |
 | live-requests-this-round | 0 |
 
