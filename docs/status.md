@@ -9,11 +9,11 @@
 
 | key | value |
 |---|---|
-| verified-at-commit | 4b56b54 |
+| verified-at-commit | working-tree (SYS-001 in progress) |
 | toolchain | Swift 6.1.2 / Xcode 16.4 |
 | platform | macOS 15, arm64 only |
-| debug-tests | 249 |
-| release-tests | 249 |
+| debug-tests | 259 |
+| release-tests | 259 |
 | release-build | pass |
 | live-requests-this-round | 0 |
 

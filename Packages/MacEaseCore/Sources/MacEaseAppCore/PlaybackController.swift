@@ -50,6 +50,11 @@ package final class PlaybackController {
   package private(set) var sleepTimer: SleepTimerState = .off
   package private(set) var trackName: String?
   package private(set) var positionSeconds: Double = 0
+  /// Bumped whenever position moved for a reason other than the clock
+  /// advancing: a seek, a newly loaded item, or a teardown. `PlaybackSnapshot`
+  /// carries it so a system surface that extrapolates elapsed time knows when
+  /// its extrapolation became wrong.
+  package private(set) var positionEpoch = 0
   package private(set) var durationSeconds: Double?
   package private(set) var status = "Play a track from the library"
   package var quality: PlaybackQuality = .standard
@@ -89,6 +94,34 @@ package final class PlaybackController {
       return nil
     }
     return queueTracks[index]
+  }
+
+  /// The read-only projection a system media surface consumes. Derived on
+  /// every read, so it cannot hold a stale copy of what is playing. `liked` is
+  /// not known here — the library owns it — so the caller supplies it.
+  package func snapshot(liked: LikedState) -> PlaybackSnapshot {
+    let track = currentTrack
+    let state: PlaybackSnapshot.State =
+      switch phase {
+      case .playing: .playing
+      case .paused: .paused
+      // Resolving, finished and failed have no audio. They project to stopped
+      // while keeping the chosen track visible, so the system does not blank
+      // out between two tracks of one queue.
+      case .idle, .resolving, .finished, .failed: .stopped
+      }
+    return PlaybackSnapshot(
+      state: state,
+      trackID: track?.id,
+      title: track?.name ?? trackName,
+      artist: track.flatMap { $0.artists.isEmpty ? nil : $0.artists.joined(separator: ", ") },
+      durationSeconds: durationSeconds,
+      elapsedSeconds: positionSeconds,
+      positionEpoch: positionEpoch,
+      canStepNext: canStepNext,
+      canStepPrevious: canStepPrevious,
+      liked: track == nil ? .unknown : liked
+    )
   }
 
   package init(
@@ -214,7 +247,7 @@ package final class PlaybackController {
     else { return }
 
     let target = min(max(seconds, 0), duration)
-    positionSeconds = target
+    movePosition(to: target)
     attempt?.resumePosition = target
     Task {
       do {
@@ -242,7 +275,7 @@ package final class PlaybackController {
     releasePlayback()
     phase = .idle
     trackName = nil
-    positionSeconds = 0
+    movePosition(to: 0)
     status = "Playback stopped"
   }
 
@@ -461,7 +494,7 @@ package final class PlaybackController {
       try await output.seek(to: resumePosition)
       try checkCurrent(token)
     }
-    positionSeconds = resumePosition
+    movePosition(to: resumePosition)
     durationSeconds = info.durationSeconds
     currentAssetSummary = assetSummary(resolved)
     switch desiredState {
@@ -552,7 +585,7 @@ package final class PlaybackController {
       finishQueue(status: "Playback finished")
       return
     }
-    positionSeconds = 0
+    movePosition(to: 0)
     attempt?.resumePosition = 0
     status = "Repeating the current track (no request)"
     Task {
@@ -672,7 +705,7 @@ package final class PlaybackController {
     releasePlayback()
     phase = .idle
     trackName = nil
-    positionSeconds = 0
+    movePosition(to: 0)
     self.status = status
   }
 
@@ -699,8 +732,15 @@ package final class PlaybackController {
       releaseResolution(operationToken, outcome: .cancelled)
     }
     releasePlayback()
-    positionSeconds = 0
+    movePosition(to: 0)
     return token
+  }
+
+  /// Moves the clock for a reason other than playback advancing, so a system
+  /// surface extrapolating from the rate is told its value is now wrong.
+  private func movePosition(to seconds: Double) {
+    positionSeconds = seconds
+    positionEpoch &+= 1
   }
 
   private func releasePlayback() {
