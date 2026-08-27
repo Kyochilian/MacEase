@@ -28,20 +28,18 @@ secrets/
 *.mobileprovision
 *.provisionprofile
 
-# Local working notes and gate evidence (not tracked). Everything a clean
-# clone needs to build, test and verify licence provenance is tracked; only
-# maintainer handover notes and raw gate evidence stay local.
+# Local working notes and gate evidence. `docs/` is deny-by-default so raw
+# gate evidence and maintainer handover notes cannot be committed by accident;
+# every document a clean clone needs is listed explicitly below. Use `docs/*`
+# rather than `docs/`, because git does not descend into an excluded directory
+# and the negations would otherwise never be considered.
 init.md
 AGENTS.md
 CLAUDE.md
-docs/next-session.md
-docs/reference-implementations.md
-docs/MacEase_AGENT_REVIEW_AND_EXECUTION_PLAN.md
-docs/MacEase_AGENT_REVIEW_LOG.md
-docs/gatea/
-docs/gateb/
-docs/gatec/
-docs/gated/
-docs/gatee/
-docs/phase0/
-docs/phase2/
+docs/*
+!docs/architecture.md
+!docs/backend-parity.md
+!docs/endpoint-registry.md
+!docs/roadmap-features.md
+!docs/status.md
+!docs/testing.md

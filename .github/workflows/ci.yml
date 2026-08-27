@@ -9,25 +9,40 @@ on:
 
 jobs:
   offline-verification:
-    # arm64 macOS 15, matching the only supported target.
+    # macOS 15 on Apple Silicon, matching the only supported target.
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
+
+      - name: Verify Apple Silicon runner
+        run: test "$(uname -m)" = arm64
 
       - name: Show toolchain
         run: swift --version && xcodebuild -version
 
       - name: Debug tests
+        id: debug-tests
         working-directory: Packages/MacEaseCore
-        run: swift test
+        run: |
+          set -o pipefail
+          swift test 2>&1 | tee "$RUNNER_TEMP/debug-tests.log"
+          count=$(grep -oE 'Test run with [0-9]+ tests' "$RUNNER_TEMP/debug-tests.log" |
+            tail -1 | grep -oE '[0-9]+')
+          echo "count=$count" >> "$GITHUB_OUTPUT"
 
       - name: Release tests
+        id: release-tests
         working-directory: Packages/MacEaseCore
-        run: swift test -c release
+        run: |
+          set -o pipefail
+          swift test -c release 2>&1 | tee "$RUNNER_TEMP/release-tests.log"
+          count=$(grep -oE 'Test run with [0-9]+ tests' "$RUNNER_TEMP/release-tests.log" |
+            tail -1 | grep -oE '[0-9]+')
+          echo "count=$count" >> "$GITHUB_OUTPUT"
 
       - name: Release build
         working-directory: Packages/MacEaseCore
-        run: swift build -c release
+        run: swift build -c release --arch arm64
 
       - name: Whitespace and conflict markers
         run: git diff --check HEAD
@@ -35,8 +50,13 @@ jobs:
       - name: Documented paths are tracked
         run: ./scripts/check_links.sh
 
-      - name: Status document matches reality
-        run: ./scripts/check_status.sh
+      # Reuses the counts the two steps above already measured, so the status
+      # document cannot drift without paying for a third and fourth build.
+      - name: Status document matches the measured test counts
+        run: |
+          ./scripts/check_status.sh \
+            --debug-count '${{ steps.debug-tests.outputs.count }}' \
+            --release-count '${{ steps.release-tests.outputs.count }}'
 
       - name: No process-terminating paths on untrusted input
         run: |

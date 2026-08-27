@@ -19,7 +19,8 @@ done < <(git ls-files)
 
 check() {
   local source_file=$1 target=$2
-  local normalised=${target#./}
+  local absolute=${target:A}
+  local normalised=${absolute#$repo_root/}
   if [[ -z ${tracked[$normalised]:-} ]]; then
     print -r -- "not tracked: $normalised (referenced by $source_file)"
     (( failures += 1 ))
