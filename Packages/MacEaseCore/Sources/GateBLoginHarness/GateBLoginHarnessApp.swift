@@ -24,6 +24,9 @@ struct GateBLoginHarnessApp: App {
         probes: probes
       )
       .task {
+        coordinator.onIdentityChanged = { [weak playback] in
+          playback?.stop()
+        }
         await coordinator.start()
       }
     }
@@ -48,8 +51,8 @@ private struct LoginHarnessView: View {
           }
           Button("Validate Session") {
             Task {
-              await coordinator.validateSession()
-              if !coordinator.hasStoredSession {
+              _ = await coordinator.validateSession()
+              if coordinator.storedSessionPresence == .absent {
                 playback.stop()
               }
             }
@@ -61,8 +64,10 @@ private struct LoginHarnessView: View {
 
           Spacer()
 
-          Text(coordinator.hasStoredSession ? "Stored" : "Not stored")
-            .foregroundStyle(coordinator.hasStoredSession ? .green : .secondary)
+          Text(sessionPresenceTitle)
+            .foregroundStyle(
+              coordinator.storedSessionPresence == .stored ? .green : .secondary
+            )
         }
 
         HStack {
@@ -171,6 +176,14 @@ private struct LoginHarnessView: View {
       )
     ) { _ in
       playback.handleWake()
+    }
+  }
+
+  private var sessionPresenceTitle: String {
+    switch coordinator.storedSessionPresence {
+    case .unknown: "Storage status unknown"
+    case .absent: "Not stored"
+    case .stored: "Stored"
     }
   }
 }

@@ -101,6 +101,9 @@ private func makeLibrary(
   library.load(reset: true, session: session)
   while await transport.gate.arrivalCount() == 0 { await Task.yield() }
   library.reset()
+  let mutation = arbiter.begin(name: "Validate", effect: .sessionMutation)
+  #expect(mutation != nil)
+  if let mutation { arbiter.end(mutation, outcome: .applied) }
   await transport.gate.open()
   // `reset` clears the task handle, so settling on it would prove nothing.
   // Wait until the arbiter slot the superseded task held is actually free.
@@ -239,6 +242,37 @@ private func makeLibrary(
   await discovery.settleForTesting()
 
   #expect(await transport.callCount() == 1)
+}
+
+@Test @MainActor func discoveryResetAllowsTheNextIdentityToPrefetchOnce() async {
+  let credentialA = makeCredential()
+  let credentialB = makeCredential("replacement")
+  let transport = FakeTransport()
+  let vault = FakeVault(stored: credentialA)
+  let session = FakeSession(credential: credentialA)
+  let discovery = DiscoveryCoordinator(
+    transport: transport,
+    vault: vault,
+    arbiter: OperationArbiter()
+  )
+  await transport.setDiscoveryTracks(
+    .failure(NeteaseServiceError(source: .http, statusCode: 500))
+  )
+
+  discovery.prefetch(session: session)
+  await discovery.settleForTesting()
+  discovery.reset()
+
+  await vault.setStored(credentialB)
+  session.account = otherAccount
+  session.validatedCredential = credentialB
+  discovery.prefetch(session: session)
+  await discovery.settleForTesting()
+
+  #expect(
+    await transport.recordedCalls()
+      == [.dailyRecommendedSongs, .dailyRecommendedSongs]
+  )
 }
 
 @Test @MainActor func searchRunsOnlyFromAnExplicitNonEmptyQuery() async {

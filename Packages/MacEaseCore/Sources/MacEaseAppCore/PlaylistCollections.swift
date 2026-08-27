@@ -24,10 +24,6 @@ package struct PlaylistCollection: Equatable, Sendable {
   package private(set) var nextOffset = 0
   package private(set) var serverHasMore = false
   package private(set) var freshness: CollectionFreshness = .empty
-  /// Rows the server repeated across pages. Surfaced as a diagnostic rather
-  /// than silently shown twice.
-  package private(set) var duplicateRowsDropped = 0
-
   package init() {}
 
   package var canLoadMore: Bool { serverHasMore && freshness == .current }
@@ -41,33 +37,18 @@ package struct PlaylistCollection: Equatable, Sendable {
     self = PlaylistCollection()
   }
 
-  /// Applies a page the server returned. Returns how many duplicate rows it
-  /// contained.
-  @discardableResult
   package mutating func apply(
     page: UserPlaylistPage,
     replacingAll: Bool
-  ) -> Int {
+  ) {
     if replacingAll {
       playlists = []
       nextOffset = 0
-      duplicateRowsDropped = 0
     }
-    var seen = Set(playlists.map(\.id))
-    var duplicates = 0
-    for playlist in page.playlists {
-      if seen.insert(playlist.id).inserted {
-        playlists.append(playlist)
-      } else {
-        duplicates += 1
-      }
-    }
-    // The cursor follows what the server sent, not what survived dedup.
+    playlists.append(contentsOf: page.playlists)
     nextOffset += page.playlists.count
-    duplicateRowsDropped += duplicates
     serverHasMore = page.more
     freshness = .current
-    return duplicates
   }
 
   /// Called after any write that changes which playlists the account has, or

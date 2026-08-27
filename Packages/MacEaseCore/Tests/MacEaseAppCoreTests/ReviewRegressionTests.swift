@@ -175,20 +175,21 @@ private struct Rig {
   )
 
   #expect(after.presence == .absent)
-  #expect(!after.hasStoredSession)
+  #expect(after.storedSessionPresence == .absent)
   #expect(result == .credentialReplaced(nil))
 }
 
 /// A confirmed sign-out whose Keychain delete failed must stop treating the
-/// account as validated, while still saying the item may remain.
+/// account as validated without guessing whether an item remains.
 @Test func aConfirmedSignOutWithAFailedDeleteDropsValidation() {
   let (after, result) = SessionReducer.reduce(
     SessionSnapshot(presence: .validated(testAccount), validatedCredential: makeCredential()),
-    .storedItemChanged(hasStoredItem: true)
+    .storedItemPresenceUnknown
   )
 
   #expect(after.account == nil)
   #expect(after.validatedCredential == nil)
-  #expect(after.hasStoredSession)
-  #expect(result == .credentialReplaced(nil))
+  #expect(after.presence == .unknown)
+  #expect(after.storedSessionPresence == .unknown)
+  #expect(result == .storedPresenceUnknown)
 }

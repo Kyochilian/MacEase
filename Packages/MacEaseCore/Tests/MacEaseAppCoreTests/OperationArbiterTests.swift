@@ -4,24 +4,83 @@ import Testing
 
 @testable import MacEaseAppCore
 
-/// P0-01: one arbiter owns "a NetEase request is in flight". These tests pin
-/// the properties the review demands, above all that a write which reached the
-/// server is never silently dropped by a session action.
+/// P0-01: one arbiter owns write/session exclusion. These tests pin that a
+/// write which reached the server is never silently dropped, without
+/// serialising independent reads or playback resolution.
 
 // MARK: - Arbiter semantics
 
-@Test @MainActor func onlyOneOperationCanHoldTheArbiter() {
+@Test @MainActor func onlyWritesAndSessionMutationsHoldTheExclusiveSlot() {
   let arbiter = OperationArbiter()
 
-  let first = arbiter.begin(name: "Playlist", effect: .read)
-  #expect(first != nil)
-  #expect(arbiter.begin(name: "Daily songs", effect: .read) == nil)
+  let read = arbiter.begin(name: "Playlist", effect: .read)!
+  let playback = arbiter.begin(name: "Song URL", effect: .playbackResolution)!
+  #expect(arbiter.canStart())
   #expect(arbiter.begin(name: "Like", effect: .write) == nil)
   #expect(arbiter.begin(name: "Validate session", effect: .sessionMutation) == nil)
-  #expect(arbiter.begin(name: "Song URL", effect: .playbackResolution) == nil)
 
-  arbiter.end(first!, outcome: .applied)
-  #expect(arbiter.begin(name: "Daily songs", effect: .read) != nil)
+  #expect(arbiter.end(read, outcome: .applied) == .applied)
+  #expect(arbiter.end(read, outcome: .applied) == nil)
+  #expect(arbiter.begin(name: "Like", effect: .write) == nil)
+  #expect(arbiter.end(playback, outcome: .applied) == .applied)
+
+  let write = arbiter.begin(name: "Like", effect: .write)!
+  #expect(arbiter.begin(name: "Daily songs", effect: .read) == nil)
+  #expect(arbiter.begin(name: "Song URL", effect: .playbackResolution) == nil)
+  arbiter.end(write, outcome: .applied)
+  #expect(arbiter.begin(name: "Validate session", effect: .sessionMutation) != nil)
+}
+
+@Test @MainActor func readsAreBoundedByTheConcurrencyCeiling() {
+  let arbiter = OperationArbiter(maximumConcurrentReads: 2)
+
+  let first = arbiter.begin(name: "Playlist", effect: .read)!
+  let second = arbiter.begin(name: "Song URL", effect: .playbackResolution)!
+  #expect(arbiter.activeReadCount == 2)
+
+  // The ceiling refuses the third read rather than queueing it, so a caller
+  // that ignores the nil cannot turn one action into an unbounded burst.
+  #expect(arbiter.begin(name: "Discover", effect: .read) == nil)
+  #expect(arbiter.activeReadCount == 2)
+
+  arbiter.end(first, outcome: .applied)
+  let third = arbiter.begin(name: "Discover", effect: .read)!
+  #expect(arbiter.activeReadCount == 2)
+
+  arbiter.end(second, outcome: .applied)
+  arbiter.end(third, outcome: .applied)
+  #expect(arbiter.activeReadCount == 0)
+  #expect(arbiter.begin(name: "Like", effect: .write) != nil)
+}
+
+@Test @MainActor func theCeilingNeverRefusesEveryRead() {
+  // Configuration must not be able to deadlock reads entirely.
+  let arbiter = OperationArbiter(maximumConcurrentReads: 0)
+
+  let only = arbiter.begin(name: "Playlist", effect: .read)!
+  #expect(arbiter.begin(name: "Discover", effect: .read) == nil)
+  arbiter.end(only, outcome: .applied)
+  #expect(arbiter.activeReadCount == 0)
+}
+
+@Test @MainActor func onlyTheSoleReadCanPromoteToSessionMutation() {
+  let arbiter = OperationArbiter()
+  let read = arbiter.begin(name: "Playlist", effect: .read)!
+  let promoted = arbiter.promote(read, name: "Invalidate session")!
+
+  #expect(promoted.kind == .exclusive)
+  #expect(arbiter.active?.effect == .sessionMutation)
+  arbiter.markRequestSent(read)
+  #expect(arbiter.active?.phase == .preparing)
+  #expect(arbiter.begin(name: "Import", effect: .sessionMutation) == nil)
+  #expect(arbiter.end(read, outcome: .cancelled) == nil)
+  #expect(arbiter.end(promoted, outcome: .applied) == .applied)
+
+  let first = arbiter.begin(name: "Playlist", effect: .read)!
+  let second = arbiter.begin(name: "Discover", effect: .read)!
+  #expect(arbiter.promote(first, name: "Invalidate session") == nil)
+  arbiter.end(first, outcome: .cancelled)
+  arbiter.end(second, outcome: .cancelled)
 }
 
 @Test @MainActor func aWriteCancelledBeforeItIsSentIsJustCancelled() {
@@ -45,18 +104,19 @@ import Testing
 
 @Test @MainActor func aCancelledReadNeverBecomesOutcomeUnknown() {
   let arbiter = OperationArbiter()
-  for effect in [
-    OperationEffect.read, .playbackResolution, .sessionMutation,
-  ] {
+  for effect in [OperationEffect.read, .playbackResolution] {
     let token = arbiter.begin(name: "op", effect: effect)!
     arbiter.markRequestSent(token)
     #expect(!arbiter.abandoningLosesTheOutcome(token))
     #expect(arbiter.end(token, outcome: .cancelled) == .cancelled)
   }
+  let session = arbiter.begin(name: "session", effect: .sessionMutation)!
+  arbiter.markRequestSent(session)
+  #expect(arbiter.end(session, outcome: .cancelled) == .cancelled)
   #expect(arbiter.unresolvedOutcomes.isEmpty)
 }
 
-@Test @MainActor func aSentWriteThatFailedIsAFailureNotAnUnknown() {
+@Test @MainActor func aSentWriteWithAnExplicitRejectionStaysFailed() {
   let arbiter = OperationArbiter()
   let token = arbiter.begin(name: "Create playlist", effect: .write)!
   arbiter.markRequestSent(token)
@@ -67,14 +127,14 @@ import Testing
 
 @Test @MainActor func onlyTheOwnerCanReleaseTheArbiter() {
   let arbiter = OperationArbiter()
-  let first = arbiter.begin(name: "Playlist", effect: .read)!
+  let first = arbiter.begin(name: "Like", effect: .write)!
   arbiter.end(first, outcome: .applied)
-  let second = arbiter.begin(name: "Daily songs", effect: .read)!
+  let second = arbiter.begin(name: "Validate", effect: .sessionMutation)!
 
   // A late completion from the finished operation must not free the new one.
   #expect(arbiter.end(first, outcome: .applied) == nil)
   #expect(arbiter.isBusy)
-  #expect(arbiter.active?.name == "Daily songs")
+  #expect(arbiter.active?.name == "Validate")
 
   // Nor may a duplicate completion of the current one release twice.
   #expect(arbiter.end(second, outcome: .applied) == .applied)
@@ -86,7 +146,7 @@ import Testing
   let arbiter = OperationArbiter()
   let stale = arbiter.begin(name: "Like", effect: .write)!
   arbiter.end(stale, outcome: .applied)
-  let current = arbiter.begin(name: "Playlist", effect: .read)!
+  let current = arbiter.begin(name: "Validate", effect: .sessionMutation)!
 
   arbiter.markRequestSent(stale)
   #expect(arbiter.active?.phase == .preparing)
@@ -118,6 +178,7 @@ private struct Rig {
   let session: FakeSession
   let library: PlaylistLibraryCoordinator
   let discovery: DiscoveryCoordinator
+  let output = FakeAudioOutput()
   let playback: PlaybackController
 
   init() {
@@ -137,7 +198,8 @@ private struct Rig {
     playback = PlaybackController(
       transport: transport,
       vault: vault,
-      arbiter: arbiter
+      arbiter: arbiter,
+      output: output
     )
     playback.attach(session: session)
   }
@@ -147,7 +209,7 @@ private struct Rig {
   }
 }
 
-@Test @MainActor func twoReadsCannotRunConcurrently() async {
+@Test @MainActor func independentReadsCanRunConcurrently() async {
   let rig = Rig()
   await rig.transport.setPlaylistPages([
     UserPlaylistPage(playlists: makePlaylists([1]), more: false)
@@ -159,12 +221,14 @@ private struct Rig {
   await rig.waitForFirstRequest()
   rig.discovery.loadDailySongs(session: rig.session)
 
-  #expect(await rig.transport.callCount() == 1)
-  #expect(rig.discovery.dailySongs.isEmpty)
+  while await rig.transport.gate.arrivalCount() < 2 { await Task.yield() }
+  #expect(await rig.transport.callCount() == 2)
 
   await rig.transport.gate.open()
   await rig.library.settleForTesting()
+  await rig.discovery.settleForTesting()
   #expect(rig.library.playlists.count == 1)
+  #expect(rig.discovery.dailySongs.map(\.id) == [2])
 }
 
 @Test @MainActor func aReadCannotStartWhileAWriteIsInFlight() async {
@@ -182,7 +246,7 @@ private struct Rig {
   await rig.library.settleForTesting()
 }
 
-@Test @MainActor func playbackResolutionCannotRunAlongsideADiscoveryRead() async {
+@Test @MainActor func playbackResolutionCanRunAlongsideADiscoveryRead() async {
   let rig = Rig()
   await rig.transport.setDiscoveryTracks(.success(makeTracks([7])))
   await rig.transport.gate.close()
@@ -191,11 +255,14 @@ private struct Rig {
   await rig.waitForFirstRequest()
   rig.playback.play(tracks: makeTracks([7]), startIndex: 0, session: rig.session)
 
-  #expect(await rig.transport.callCount() == 1)
-  #expect(rig.playback.phase == .idle)
+  while await rig.transport.gate.arrivalCount() < 2 { await Task.yield() }
+  #expect(await rig.transport.callCount() == 2)
+  #expect(rig.playback.phase == .resolving)
 
   await rig.transport.gate.open()
   await rig.discovery.settleForTesting()
+  await rig.playback.settleForTesting()
+  #expect(rig.playback.phase == .failed)
 }
 
 @Test @MainActor func aSessionMutationCannotStartWhileAWriteIsInFlight() async {
@@ -308,7 +375,7 @@ private struct Rig {
 
   rig.playback.play(tracks: makeTracks([9]), startIndex: 0, session: rig.session)
   await rig.waitForFirstRequest()
-  #expect(!rig.arbiter.canStart())
+  #expect(rig.arbiter.canStart())
 
   rig.playback.stop()
   #expect(rig.arbiter.canStart())
@@ -321,16 +388,27 @@ private struct Rig {
   #expect(later != nil)
 }
 
-@Test @MainActor func autoAdvanceDoesNotStartWhileAnotherRequestIsInFlight() async {
+@Test @MainActor func autoAdvanceRunsAlongsideAnIndependentRead() async {
   let rig = Rig()
+  await rig.transport.setSongURL(.success(makeResolvedAsset(songID: 1)))
+  rig.playback.play(tracks: makeTracks([1, 2]), startIndex: 0, session: rig.session)
+  await rig.playback.settleForTesting()
+  #expect(rig.playback.phase == .playing)
+
+  await rig.transport.setPlaylistPages([
+    UserPlaylistPage(playlists: makePlaylists([1]), more: false)
+  ])
   await rig.transport.gate.close()
   rig.library.load(reset: true, session: rig.session)
   await rig.waitForFirstRequest()
+  await rig.transport.setSongURL(.success(makeResolvedAsset(songID: 2)))
 
-  // Auto-advance consults the same arbiter every page does.
-  #expect(!rig.arbiter.canStart())
+  rig.output.reportPlayedToEnd()
+  while await rig.transport.gate.arrivalCount() < 2 { await Task.yield() }
 
   await rig.transport.gate.open()
   await rig.library.settleForTesting()
-  #expect(rig.arbiter.canStart())
+  await rig.playback.settleForTesting()
+  #expect(rig.playback.currentTrack?.id == 2)
+  #expect(rig.playback.phase == .playing)
 }

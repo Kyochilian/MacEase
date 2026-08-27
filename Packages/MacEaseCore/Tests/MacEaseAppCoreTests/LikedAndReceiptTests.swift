@@ -14,7 +14,6 @@ import Testing
 
   #expect(!liked.isLoaded)
   #expect(liked.state(of: 1) == .unknown)
-  #expect(liked.loadedCount == nil)
 }
 
 @Test func loadingTheListMakesEveryTrackKnown() {
@@ -24,7 +23,6 @@ import Testing
   #expect(liked.isLoaded)
   #expect(liked.state(of: 1) == .liked)
   #expect(liked.state(of: 99) == .notLiked)
-  #expect(liked.loadedCount == 2)
 }
 
 /// A confirmed write proves that track's state and nothing else; it must not
@@ -36,7 +34,6 @@ import Testing
   #expect(liked.state(of: 7) == .liked)
   #expect(liked.state(of: 8) == .unknown)
   #expect(!liked.isLoaded)
-  #expect(liked.loadedCount == nil)
 }
 
 @Test func unlikingWithoutALoadedListIsAlsoRecorded() {
@@ -111,8 +108,7 @@ private func makeLibraryRig() -> (FakeTransport, PlaylistLibraryCoordinator, Fak
   library.createPlaylist(named: "canary", session: session)
   await library.settleForTesting()
 
-  #expect(library.lastReceipt?.operation == "Create playlist")
-  #expect(library.lastReceipt?.succeeded == true)
+  #expect(library.lastCreateReceipt?.succeeded == true)
 }
 
 @Test @MainActor func aFailedCreatePublishesAFailedReceipt() async {
@@ -124,9 +120,75 @@ private func makeLibraryRig() -> (FakeTransport, PlaylistLibraryCoordinator, Fak
   library.createPlaylist(named: "canary", session: session)
   await library.settleForTesting()
 
-  #expect(library.lastReceipt?.operation == "Create playlist")
-  #expect(library.lastReceipt?.succeeded == false)
-  #expect(library.lastReceipt?.outcome == .failed)
+  #expect(library.lastCreateReceipt?.succeeded == false)
+  #expect(library.lastCreateReceipt?.outcome == .failed)
+}
+
+@Test @MainActor func aTimedOutWritePublishesAnUnknownReceipt() async {
+  let credential = makeCredential()
+  let transport = FakeTransport()
+  let vault = FakeVault(stored: credential)
+  let arbiter = OperationArbiter()
+  let session = FakeSession(credential: credential)
+  let library = PlaylistLibraryCoordinator(
+    transport: transport,
+    vault: vault,
+    arbiter: arbiter
+  )
+  await transport.setWriteResult(.failure(URLError(.timedOut)))
+
+  library.createPlaylist(named: "canary", session: session)
+  await library.settleForTesting()
+
+  #expect(library.lastCreateReceipt?.outcome == .outcomeUnknown)
+  #expect(arbiter.unresolvedOutcomes.map(\.kind) == [.unknown])
+}
+
+@Test @MainActor func anUndecodableWriteResponseHasAnUnknownOutcome() async {
+  let credential = makeCredential()
+  let transport = FakeTransport()
+  let vault = FakeVault(stored: credential)
+  let arbiter = OperationArbiter()
+  let session = FakeSession(credential: credential)
+  let library = PlaylistLibraryCoordinator(
+    transport: transport,
+    vault: vault,
+    arbiter: arbiter
+  )
+  let decodingError = DecodingError.dataCorrupted(
+    .init(codingPath: [], debugDescription: "missing write acknowledgement")
+  )
+  await transport.setWriteResult(.failure(decodingError))
+
+  library.createPlaylist(named: "canary", session: session)
+  await library.settleForTesting()
+
+  #expect(library.lastCreateReceipt?.outcome == .outcomeUnknown)
+  #expect(arbiter.unresolvedOutcomes.map(\.kind) == [.unknown])
+}
+
+@Test @MainActor func aPostflightKeychainFailureIsAppliedRemotelyOnly() async {
+  let credential = makeCredential()
+  let transport = FakeTransport()
+  let vault = FakeVault(stored: credential)
+  let arbiter = OperationArbiter()
+  let session = FakeSession(credential: credential)
+  let library = PlaylistLibraryCoordinator(
+    transport: transport,
+    vault: vault,
+    arbiter: arbiter
+  )
+  await transport.gate.close()
+
+  library.createPlaylist(named: "canary", session: session)
+  while await transport.gate.arrivalCount() == 0 { await Task.yield() }
+  await vault.setLoadError(CredentialVaultError.keychain(-25300))
+  await transport.gate.open()
+  await library.settleForTesting()
+
+  #expect(library.lastCreateReceipt?.outcome == .appliedRemotelyOnly)
+  #expect(arbiter.unresolvedOutcomes.map(\.kind) == [.appliedRemotelyOnly])
+  #expect(library.status == "Keychain error status=-25300")
 }
 
 /// Each write gets its own receipt id, so a view can tell its own action's
@@ -136,11 +198,11 @@ private func makeLibraryRig() -> (FakeTransport, PlaylistLibraryCoordinator, Fak
 
   library.createPlaylist(named: "one", session: session)
   await library.settleForTesting()
-  let first = library.lastReceipt
+  let first = library.lastCreateReceipt
 
   library.createPlaylist(named: "two", session: session)
   await library.settleForTesting()
-  let second = library.lastReceipt
+  let second = library.lastCreateReceipt
 
   #expect(first != nil)
   #expect(second != nil)
@@ -165,6 +227,6 @@ private func makeLibraryRig() -> (FakeTransport, PlaylistLibraryCoordinator, Fak
   await transport.gate.open()
   await library.settleForTesting()
 
-  #expect(library.lastReceipt?.outcome == .appliedRemotelyOnly)
-  #expect(library.lastReceipt?.succeeded == false)
+  #expect(library.lastCreateReceipt?.outcome == .appliedRemotelyOnly)
+  #expect(library.lastCreateReceipt?.succeeded == false)
 }

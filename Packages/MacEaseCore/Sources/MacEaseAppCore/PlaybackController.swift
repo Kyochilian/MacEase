@@ -358,6 +358,11 @@ package final class PlaybackController {
     arbiter.end(token, outcome: outcome)
   }
 
+  private func detachTokenForInvalidation(_ token: OperationToken) {
+    guard operationToken == token else { return }
+    operationToken = nil
+  }
+
   private func resolveAndPlay(
     songID: Int64,
     quality: PlaybackQuality,
@@ -421,6 +426,7 @@ package final class PlaybackController {
       await handle(
         error,
         credential: requestCredential,
+        readToken: operation,
         session: session,
         token: token
       )
@@ -434,6 +440,7 @@ package final class PlaybackController {
     // A throw here means the asset could not be loaded at all, most often
     // because the URL expired. The attempt survives so Play Again can
     // re-resolve; it is never reused with the stale URL.
+    observeOutput(token: token)
     let info = try await output.prepare(
       url: resolved.url,
       userAgent: "MacEasePhase0/0.1 (macOS 15)"
@@ -447,7 +454,6 @@ package final class PlaybackController {
     }
 
     hasLoadedItem = true
-    observeOutput(token: token)
 
     let resumePosition = attempt?.resumePosition ?? 0
     let desiredState = attempt?.desiredState ?? .playing
@@ -479,13 +485,13 @@ package final class PlaybackController {
     output.onPlayedToEnd = { [weak self] in
       self?.handlePlayedToEnd(token: token)
     }
-    output.onFailure = { [weak self] detail in
-      self?.handleItemFailure(detail: detail, token: token)
+    output.onFailure = { [weak self] failure in
+      self?.handleItemFailure(failure: failure, token: token)
     }
   }
 
   private func handleItemFailure(
-    detail: String,
+    failure: AudioOutputFailure,
     token: PlaybackIntentGate.Token
   ) {
     guard gate.accepts(token) else { return }
@@ -498,7 +504,7 @@ package final class PlaybackController {
     )
     releasePlayback()
     phase = .failed
-    status = "Playback failed (\(detail)); Play Again re-resolves the URL"
+    status = "Playback failed (\(failure.diagnostic)); Play Again re-resolves the URL"
   }
 
   private func handlePlayedToEnd(token: PlaybackIntentGate.Token) {
@@ -601,6 +607,7 @@ package final class PlaybackController {
   private func handle(
     _ error: Error,
     credential: NeteaseCredential?,
+    readToken: OperationToken,
     session: any SessionProviding,
     token: PlaybackIntentGate.Token
   ) async {
@@ -616,9 +623,11 @@ package final class PlaybackController {
         status = "Song URL service error 301"
         return
       }
+      detachTokenForInvalidation(readToken)
       let invalidation = await session.invalidateStoredSession(
         matching: credential,
-        message: "Stored session expired; sign in again"
+        message: "Stored session expired; sign in again",
+        readToken: readToken
       )
       guard gate.accepts(token), !Task.isCancelled else { return }
       switch invalidation {
@@ -627,7 +636,8 @@ package final class PlaybackController {
       case .notCurrent:
         abandonPlayback(status: "Session changed; validate again")
       case .busy:
-        abandonPlayback(status: "Session busy; validate again")
+        phase = .failed
+        status = "Another read is active; validate again"
       case .failed:
         abandonPlayback(status: "Session invalidation failed")
       }

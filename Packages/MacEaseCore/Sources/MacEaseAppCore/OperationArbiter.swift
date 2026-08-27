@@ -18,8 +18,14 @@ package enum OperationPhase: Equatable, Sendable {
   case settling
 }
 
+package enum OperationTokenKind: Equatable, Sendable {
+  case read
+  case exclusive
+}
+
 package struct OperationToken: Equatable, Sendable {
-  fileprivate let id: UUID
+  package let id: UUID
+  package let kind: OperationTokenKind
 }
 
 package struct ActiveOperation: Equatable, Sendable {
@@ -32,8 +38,8 @@ package struct ActiveOperation: Equatable, Sendable {
 package enum OperationOutcome: Equatable, Sendable {
   /// Finished and its result was published.
   case applied
-  /// Finished with a classified failure. The server either did not act, or
-  /// acted and said so.
+  /// The request did not leave the client, or the server explicitly rejected
+  /// it with an HTTP or service status.
   case failed
   /// Abandoned by the client.
   case cancelled
@@ -69,7 +75,7 @@ package struct UnresolvedOutcome: Equatable, Identifiable, Sendable {
   }
 }
 
-/// The single owner of "a NetEase request is in flight".
+/// The single owner of server writes and destructive session mutations.
 ///
 /// Before this existed, four coordinators kept their own busy flags and each
 /// page rebuilt its own `session.isBusy || library.isLoading || ...`
@@ -79,7 +85,9 @@ package struct UnresolvedOutcome: Equatable, Identifiable, Sendable {
 /// state — the user could not tell whether the write had taken effect.
 ///
 /// Rules enforced here:
-/// - at most one NetEase request at a time, whatever its effect;
+/// - writes and session mutations are mutually exclusive;
+/// - reads and playback resolution may run together, but cannot start while an
+///   exclusive operation is active, and never exceed a fixed ceiling;
 /// - local playback actions (pause, seek, volume) never claim it;
 /// - a read may be abandoned freely;
 /// - a write that has been sent is never silently dropped: abandoning it
@@ -91,27 +99,75 @@ package struct UnresolvedOutcome: Equatable, Identifiable, Sendable {
 @MainActor
 @Observable
 package final class OperationArbiter {
+  /// The most reads MacEase keeps in flight at once. Concurrency exists so an
+  /// independent read does not wait behind an unrelated one, not so the app can
+  /// fan out: a composite search is four requests on its own, and without a
+  /// ceiling a future feature could turn one user action into a burst that
+  /// looks nothing like a person using a music client.
+  package static let defaultMaximumConcurrentReads = 6
+
   package private(set) var active: ActiveOperation?
   package private(set) var unresolvedOutcomes: [UnresolvedOutcome] = []
+  private var activeReadTokens: Set<UUID> = []
+  private let maximumConcurrentReads: Int
 
-  package init() {}
+  package init(maximumConcurrentReads: Int = defaultMaximumConcurrentReads) {
+    // A ceiling below one would refuse every read; clamp rather than trap,
+    // because this value can come from configuration.
+    self.maximumConcurrentReads = max(1, maximumConcurrentReads)
+  }
 
   package var isBusy: Bool { active != nil }
 
-  /// True when the arbiter would accept a new operation right now.
+  /// How many reads hold the read side right now. Diagnostics and tests use
+  /// it; no control-flow branch reads it.
+  package var activeReadCount: Int { activeReadTokens.count }
+
+  /// True when no write or session mutation owns the exclusive slot.
   package func canStart() -> Bool { active == nil }
 
-  /// Claims the arbiter, or returns nil when another operation owns it.
+  /// Claims an operation. Reads share the read side up to the ceiling, while a
+  /// write or session mutation requires both the read side and the exclusive
+  /// slot to be free.
   package func begin(name: String, effect: OperationEffect) -> OperationToken? {
-    guard active == nil else { return nil }
     let id = UUID()
+    guard effect == .write || effect == .sessionMutation else {
+      guard active == nil, activeReadTokens.count < maximumConcurrentReads else {
+        return nil
+      }
+      activeReadTokens.insert(id)
+      return OperationToken(id: id, kind: .read)
+    }
+    guard active == nil, activeReadTokens.isEmpty else { return nil }
     active = ActiveOperation(id: id, name: name, effect: effect, phase: .preparing)
-    return OperationToken(id: id)
+    return OperationToken(id: id, kind: .exclusive)
+  }
+
+  /// Atomically turns the only active read into a session mutation. No gap is
+  /// exposed in which another read or exclusive operation can enter.
+  package func promote(
+    _ readToken: OperationToken,
+    name: String
+  ) -> OperationToken? {
+    guard readToken.kind == .read, active == nil,
+      activeReadTokens.count == 1,
+      activeReadTokens.contains(readToken.id)
+    else { return nil }
+
+    activeReadTokens.remove(readToken.id)
+    active = ActiveOperation(
+      id: readToken.id,
+      name: name,
+      effect: .sessionMutation,
+      phase: .preparing
+    )
+    return OperationToken(id: readToken.id, kind: .exclusive)
   }
 
   /// Called immediately before the request is handed to the transport. After
   /// this point a write can no longer be treated as "never happened".
   package func markRequestSent(_ token: OperationToken) {
+    guard token.kind == .exclusive else { return }
     guard var operation = active, operation.id == token.id else { return }
     operation.phase = .requestSent
     active = operation
@@ -119,6 +175,7 @@ package final class OperationArbiter {
 
   /// Called once the response is in hand and only local state remains.
   package func markSettling(_ token: OperationToken) {
+    guard token.kind == .exclusive else { return }
     guard var operation = active, operation.id == token.id else { return }
     operation.phase = .settling
     active = operation
@@ -129,6 +186,7 @@ package final class OperationArbiter {
   /// once the response is in hand the phase is `.settling` and the server's
   /// answer is known even if the local apply never runs.
   package func abandoningLosesTheOutcome(_ token: OperationToken) -> Bool {
+    guard token.kind == .exclusive else { return false }
     guard let operation = active, operation.id == token.id else { return false }
     return operation.effect == .write && operation.phase == .requestSent
   }
@@ -145,6 +203,10 @@ package final class OperationArbiter {
     _ token: OperationToken,
     outcome: OperationOutcome
   ) -> OperationOutcome? {
+    if token.kind == .read {
+      guard activeReadTokens.remove(token.id) != nil else { return nil }
+      return outcome
+    }
     guard let operation = active, operation.id == token.id else { return nil }
     let resolved = Self.resolve(outcome, for: operation)
     if let kind = resolved.unresolvedKind {

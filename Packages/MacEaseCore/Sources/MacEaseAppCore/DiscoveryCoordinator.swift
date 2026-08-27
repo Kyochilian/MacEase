@@ -16,6 +16,7 @@ package final class DiscoveryCoordinator: SessionGuardedCoordinator {
   @ObservationIgnored private let arbiter: OperationArbiter
   @ObservationIgnored package private(set) var generation = 0
   @ObservationIgnored private var loadTask: Task<Void, Never>?
+  @ObservationIgnored private var operationToken: OperationToken?
   @ObservationIgnored private var hasPrefetched = false
 
   package var noStoredSessionStatus: String { "No stored session to load Discover" }
@@ -62,7 +63,7 @@ package final class DiscoveryCoordinator: SessionGuardedCoordinator {
     loadTask = Task {
       var outcome = OperationOutcome.applied
       defer {
-        arbiter.end(claim.token, outcome: outcome)
+        release(claim.token, outcome: outcome)
         finish(generation: currentGeneration)
       }
       arbiter.markRequestSent(claim.token)
@@ -200,16 +201,20 @@ package final class DiscoveryCoordinator: SessionGuardedCoordinator {
     )
   }
 
-    /// Test seam: awaits the task the last explicit action started, so a test
+  /// Test seam: awaits the task the last explicit action started, so a test
   /// can assert on settled state without polling.
   package func settleForTesting() async {
     await loadTask?.value
   }
 
-package func reset() {
+  package func reset() {
     generation += 1
     loadTask?.cancel()
     loadTask = nil
+    if let operationToken {
+      release(operationToken, outcome: .cancelled)
+    }
+    hasPrefetched = false
     clearAll()
     isLoading = false
     status = "Validate the session, then load each section explicitly"
@@ -220,15 +225,17 @@ package func reset() {
     let account: NeteaseAccount
   }
 
-  /// Claims the arbiter and the validated account together, so no section can
-  /// start a request while any other NetEase request is in flight.
+  /// Claims the validated account while no write/session mutation is active;
+  /// `isLoading` prevents duplicate work inside this coordinator.
   private func claim(_ name: String, session: any SessionProviding) -> Claim? {
+    guard !isLoading else { return nil }
     guard let token = arbiter.begin(name: name, effect: .read) else { return nil }
     guard let account = session.account else {
       arbiter.end(token, outcome: .failed)
       status = "Validate the session before loading"
       return nil
     }
+    operationToken = token
     return Claim(token: token, account: account)
   }
 
@@ -247,7 +254,7 @@ package func reset() {
     loadTask = Task {
       var outcome = OperationOutcome.failed
       defer {
-        arbiter.end(claim.token, outcome: outcome)
+        release(claim.token, outcome: outcome)
         finish(generation: currentGeneration)
       }
       arbiter.markRequestSent(claim.token)
@@ -384,6 +391,11 @@ package func reset() {
     guard self.generation == generation else { return }
     isLoading = false
     loadTask = nil
+  }
+
+  private func release(_ token: OperationToken, outcome: OperationOutcome) {
+    if operationToken == token { operationToken = nil }
+    arbiter.end(token, outcome: outcome)
   }
 
   private func clearAll() {

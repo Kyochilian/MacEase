@@ -27,7 +27,7 @@ struct MacEaseApp: App {
     // coordinator shares them instead of constructing its own.
     let transport = NeteaseSession()
     let vault = CredentialVault()
-    // One arbiter owns "a NetEase request is in flight" for the whole app.
+    // One arbiter protects writes and destructive session mutations.
     let arbiter = OperationArbiter()
     let login = LoginCoordinator(transport: transport, vault: vault, arbiter: arbiter)
     let library = PlaylistLibraryCoordinator(
@@ -154,11 +154,10 @@ private struct SessionView: View {
         Text("MacEase")
           .font(.headline)
 
-        Label(
-          session.hasStoredSession ? "Session stored" : "Not signed in",
-          systemImage: session.hasStoredSession ? "checkmark.circle.fill" : "person.crop.circle"
-        )
-        .foregroundStyle(session.hasStoredSession ? .green : .secondary)
+        Label(sessionPresenceTitle, systemImage: sessionPresenceIcon)
+          .foregroundStyle(
+            session.storedSessionPresence == .stored ? .green : .secondary
+          )
 
         Spacer()
 
@@ -201,6 +200,22 @@ private struct SessionView: View {
     }
   }
 
+  private var sessionPresenceTitle: String {
+    switch session.storedSessionPresence {
+    case .unknown: "Session status unknown"
+    case .absent: "Not signed in"
+    case .stored: "Session stored"
+    }
+  }
+
+  private var sessionPresenceIcon: String {
+    switch session.storedSessionPresence {
+    case .unknown: "questionmark.circle"
+    case .absent: "person.crop.circle"
+    case .stored: "checkmark.circle.fill"
+    }
+  }
+
   /// A session mutation only starts when the arbiter is free, so it can no
   /// longer cancel a write that has already reached the server. What happens
   /// to session-scoped data is decided from the typed result, never from the
@@ -208,7 +223,6 @@ private struct SessionView: View {
   private func mutateSession(
     _ operation: @escaping @MainActor () async -> SessionMutationResult
   ) {
-    guard arbiter.canStart() else { return }
     Task {
       switch await operation() {
       case .unchangedValidated:
@@ -217,23 +231,18 @@ private struct SessionView: View {
         // first successful validation; refreshes stay user-triggered.
         discovery.prefetch(session: session)
       case .credentialReplaced(let account):
-        clearSessionScopedState()
         if account != nil {
           discovery.prefetch(session: session)
         }
-      case .signedOut, .storedUnvalidated:
-        clearSessionScopedState()
+      case .signedOut, .storedUnvalidated, .storedPresenceUnknown:
+        // LoginCoordinator committed the identity change and cleared all
+        // session-scoped modules before releasing its operation lease.
+        break
       case .rejected:
         // Nothing was established, so nothing confirmed is thrown away.
         break
       }
     }
-  }
-
-  private func clearSessionScopedState() {
-    playback.stop()
-    library.reset()
-    discovery.reset()
   }
 }
 
@@ -248,7 +257,7 @@ private struct PlaylistLibraryView: View {
   @State private var renameText = ""
   @State private var playlistPendingDeletion: UserPlaylist?
 
-  private var requestInFlight: Bool { arbiter.isBusy }
+  private var requestInFlight: Bool { library.isLoading || arbiter.isBusy }
 
   var body: some View {
     VStack(spacing: 0) {
@@ -284,9 +293,8 @@ private struct PlaylistLibraryView: View {
     .onChange(of: library.selectedPlaylist?.id) {
       renameText = library.selectedPlaylist?.name ?? ""
     }
-    .onChange(of: library.lastReceipt?.id) {
-      guard let receipt = library.lastReceipt,
-        receipt.operation == "Create playlist", receipt.succeeded,
+    .onChange(of: library.lastCreateReceipt?.id) {
+      guard let receipt = library.lastCreateReceipt, receipt.succeeded,
         let submitted = submittedPlaylistName
       else { return }
       // Only clear what this action submitted: a late completion must not
@@ -647,7 +655,7 @@ private struct DiscoverView: View {
   let arbiter: OperationArbiter
   let openPlaylist: (DiscoveredPlaylist) -> Void
 
-  private var requestInFlight: Bool { arbiter.isBusy }
+  private var requestInFlight: Bool { discovery.isLoading || arbiter.isBusy }
 
   private var loadDisabled: Bool {
     session.account == nil || requestInFlight
@@ -796,7 +804,7 @@ private struct SearchView: View {
   let playback: PlaybackController
   let arbiter: OperationArbiter
 
-  private var requestInFlight: Bool { arbiter.isBusy }
+  private var requestInFlight: Bool { discovery.isLoading || arbiter.isBusy }
 
   private var searchDisabled: Bool {
     session.account == nil || requestInFlight
@@ -863,7 +871,7 @@ private struct PlayRecordsView: View {
   let playback: PlaybackController
   let arbiter: OperationArbiter
 
-  private var requestInFlight: Bool { arbiter.isBusy }
+  private var requestInFlight: Bool { discovery.isLoading || arbiter.isBusy }
 
   var body: some View {
     VStack(spacing: 0) {

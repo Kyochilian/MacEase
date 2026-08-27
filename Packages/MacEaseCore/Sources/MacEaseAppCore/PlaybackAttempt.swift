@@ -71,23 +71,34 @@ package enum PlaybackFailureKind: Equatable, Sendable {
 }
 
 package enum PlaybackFailureClassifier {
-  /// The rules the review fixes in place. Anything not named here is treated
-  /// as recoverable, because the cost of one more explicit user-initiated
-  /// request is low and silently losing the entry point is not.
+  /// Retry is opt-in: only failures with evidence that a fresh resolve or a
+  /// rebuilt AVFoundation item can succeed retain Play Again.
   package static func kind(for error: any Error) -> PlaybackFailureKind {
     switch error {
-    case let error as NeteaseServiceError
-    where error.source == .service && error.statusCode == 301:
-      // The session is gone; playback is abandoned, not retried.
-      .terminal
-    case NeteasePlaybackError.nonHTTPSURL, NeteasePlaybackError.unapprovedHost:
-      // A host MacEase refuses will be refused again.
-      .terminal
-    case is CancellationError:
-      // Not a failure: a newer intent superseded this one and owns the state.
-      .terminal
-    default:
+    case is AudioOutputFailure:
       .recoverable
+    case let error as URLError where isTransient(error.code):
+      .recoverable
+    case let error as NeteaseServiceError
+    where error.source == .http && (500...599).contains(error.statusCode):
+      .recoverable
+    default:
+      .terminal
+    }
+  }
+
+  private static func isTransient(_ code: URLError.Code) -> Bool {
+    switch code {
+    case .timedOut,
+      .cannotFindHost,
+      .cannotConnectToHost,
+      .networkConnectionLost,
+      .dnsLookupFailed,
+      .notConnectedToInternet,
+      .resourceUnavailable:
+      true
+    default:
+      false
     }
   }
 }

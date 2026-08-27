@@ -1,7 +1,7 @@
 import Foundation
-import NeteaseKit
 
 @testable import MacEaseAppCore
+@testable import NeteaseKit
 
 // MARK: - Fixtures
 
@@ -291,12 +291,12 @@ actor FakeTransport: NeteaseTransporting {
   }
 }
 
-
 // MARK: - Credential store
 
 actor FakeVault: CredentialStoring {
   private var stored: NeteaseCredential?
   private var loadError: (any Error)?
+  private var deleteError: (any Error)?
   private(set) var loadCount = 0
 
   init(stored: NeteaseCredential?) {
@@ -305,6 +305,7 @@ actor FakeVault: CredentialStoring {
 
   func setStored(_ credential: NeteaseCredential?) { stored = credential }
   func setLoadError(_ error: (any Error)?) { loadError = error }
+  func setDeleteError(_ error: (any Error)?) { deleteError = error }
 
   func load() throws -> NeteaseCredential? {
     loadCount += 1
@@ -314,9 +315,13 @@ actor FakeVault: CredentialStoring {
 
   func save(_ credential: NeteaseCredential) throws { stored = credential }
 
-  func delete() throws { stored = nil }
+  func delete() throws {
+    if let deleteError { throw deleteError }
+    stored = nil
+  }
 
   func delete(matching credential: NeteaseCredential) throws -> Bool {
+    if let deleteError { throw deleteError }
     guard stored == credential else { return false }
     stored = nil
     return true
@@ -353,7 +358,8 @@ final class FakeSession: SessionProviding {
 
   func invalidateStoredSession(
     matching credential: NeteaseCredential,
-    message: String
+    message: String,
+    readToken: OperationToken
   ) async -> SessionInvalidationResult {
     invalidations.append(credential)
     if invalidationResult == .deleted {
@@ -380,7 +386,7 @@ final class FakeAudioOutput: AudioOutput {
 
   var onPositionUpdate: (@MainActor (Double) -> Void)?
   var onPlayedToEnd: (@MainActor () -> Void)?
-  var onFailure: (@MainActor (String) -> Void)?
+  var onFailure: (@MainActor (AudioOutputFailure) -> Void)?
 
   /// Programmed answer for the next `prepare`.
   var prepareResult: Result<AudioAssetInfo, any Error> = .success(
@@ -390,10 +396,27 @@ final class FakeAudioOutput: AudioOutput {
   private(set) var isPlaying = false
   private(set) var seeks: [Double] = []
   private(set) var teardownCount = 0
+  private(set) var loadedURL: URL?
+  private(set) var prepareIsBlocked = false
+  private var generation: UInt64 = 0
+  private var shouldBlockNextPrepare = false
+  private var blockedPrepare: CheckedContinuation<Void, Never>?
 
   func prepare(url: URL, userAgent: String) async throws -> AudioAssetInfo {
+    teardown()
+    let generation = self.generation
     preparedURLs.append(url)
-    return try prepareResult.get()
+    if shouldBlockNextPrepare {
+      shouldBlockNextPrepare = false
+      prepareIsBlocked = true
+      await withCheckedContinuation { blockedPrepare = $0 }
+      prepareIsBlocked = false
+    }
+    try Task.checkCancellation()
+    guard self.generation == generation else { throw CancellationError() }
+    let result = try prepareResult.get()
+    loadedURL = url
+    return result
   }
 
   func play() { isPlaying = true }
@@ -406,11 +429,30 @@ final class FakeAudioOutput: AudioOutput {
   }
 
   func teardown() {
+    generation &+= 1
     isPlaying = false
+    loadedURL = nil
     teardownCount += 1
   }
 
   // MARK: Test drivers
+
+  func blockNextPrepare() {
+    shouldBlockNextPrepare = true
+  }
+
+  func resumeBlockedPrepare() {
+    blockedPrepare?.resume()
+    blockedPrepare = nil
+  }
+
+  func queuedFailure(_ failure: AudioOutputFailure) -> @MainActor () -> Void {
+    let generation = generation
+    return { [weak self] in
+      guard let self, self.generation == generation else { return }
+      self.onFailure?(failure)
+    }
+  }
 
   func reportPosition(_ seconds: Double) {
     currentPositionSeconds = seconds
@@ -418,7 +460,7 @@ final class FakeAudioOutput: AudioOutput {
   }
 
   func reportFailure(_ detail: String) {
-    onFailure?(detail)
+    onFailure?(.itemPlayback(detail))
   }
 
   func reportPlayedToEnd() {

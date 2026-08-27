@@ -98,7 +98,7 @@ private func validatedSnapshot(
   #expect(after.presence == .storedUnvalidated)
   #expect(after.account == nil)
   #expect(after.validatedCredential == nil)
-  #expect(after.hasStoredSession)
+  #expect(after.storedSessionPresence == .stored)
 }
 
 // MARK: - Sign-out and divergence
@@ -110,7 +110,7 @@ private func validatedSnapshot(
   #expect(after.presence == .absent)
   #expect(after.account == nil)
   #expect(after.validatedCredential == nil)
-  #expect(!after.hasStoredSession)
+  #expect(after.storedSessionPresence == .absent)
 }
 
 @Test func aReplacedStoredItemDropsTheValidatedAccountButKeepsTheItem() {
@@ -179,6 +179,17 @@ private func validatedSnapshot(
   #expect(after.account == nil)
 }
 
+@Test func storagePresenceKeepsUnknownDistinctFromAbsent() {
+  #expect(SessionSnapshot().storedSessionPresence == .unknown)
+  #expect(SessionSnapshot(presence: .absent).storedSessionPresence == .absent)
+  #expect(
+    SessionSnapshot(presence: .storedUnvalidated).storedSessionPresence == .stored
+  )
+  #expect(
+    SessionSnapshot(presence: .validated(testAccount)).storedSessionPresence == .stored
+  )
+}
+
 /// A relaunch read must not demote an account that is already validated in
 /// this process.
 @Test func observingAStoredItemDoesNotDemoteAValidatedAccount() {
@@ -199,7 +210,7 @@ private func validatedSnapshot(
   func clearsData(_ result: SessionMutationResult) -> Bool {
     switch result {
     case .unchangedValidated, .rejected: false
-    case .credentialReplaced, .signedOut, .storedUnvalidated: true
+    case .credentialReplaced, .signedOut, .storedUnvalidated, .storedPresenceUnknown: true
     }
   }
 
@@ -209,4 +220,5 @@ private func validatedSnapshot(
   #expect(clearsData(.credentialReplaced(nil)))
   #expect(clearsData(.signedOut))
   #expect(clearsData(.storedUnvalidated))
+  #expect(clearsData(.storedPresenceUnknown))
 }

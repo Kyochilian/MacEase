@@ -20,20 +20,16 @@ import Testing
   #expect(collection.nextOffset == 30)
   #expect(collection.canLoadMore)
 
-  // A page that repeats two rows still advances the cursor by 30.
-  let duplicates = collection.apply(
+  collection.apply(
     page: UserPlaylistPage(
-      playlists: makePlaylists(Array(29...58)),
+      playlists: makePlaylists(Array(31...60)),
       more: true
     ),
     replacingAll: false
   )
 
-  #expect(duplicates == 2)
   #expect(collection.nextOffset == 60)
-  #expect(collection.playlists.count == 58)
-  #expect(collection.duplicateRowsDropped == 2)
-  #expect(Set(collection.playlists.map(\.id)).count == 58)
+  #expect(collection.playlists.count == 60)
 }
 
 @Test func creatingAPlaylistStopsPagingUntilAnExplicitReload() {
@@ -398,19 +394,4 @@ private struct LibraryRig {
   #expect(rig.library.tracks.isEmpty)
   #expect(rig.library.playlists.isEmpty)
   #expect(rig.library.selectedPlaylist == nil)
-}
-
-@Test @MainActor func duplicateRowsFromTheServerAreReportedNotShownTwice() async {
-  let rig = LibraryRig()
-  await rig.loadFirstPage([1, 2, 3], more: true)
-  await rig.transport.setPlaylistPages([
-    UserPlaylistPage(playlists: makePlaylists([3, 4]), more: false)
-  ])
-
-  rig.library.load(reset: false, session: rig.session)
-  await rig.library.settleForTesting()
-
-  #expect(rig.library.playlists.map(\.id) == [1, 2, 3, 4])
-  #expect(rig.library.status.contains("dropped 1 duplicate rows"))
-  #expect(rig.library.collection.nextOffset == 5)
 }

@@ -70,7 +70,7 @@ private struct PlaybackRig {
 @Test @MainActor func anAssetThatWillNotLoadKeepsPlayAgain() async {
   let rig = PlaybackRig()
   await rig.transport.setSongURL(.success(makeResolvedAsset(songID: 101)))
-  rig.output.prepareResult = .failure(FakeAudioOutput.LoadFailure(reason: "403"))
+  rig.output.prepareResult = .failure(AudioOutputFailure.assetLoad("NSURLErrorDomain -1001"))
 
   await rig.play()
 
@@ -198,7 +198,7 @@ private struct PlaybackRig {
   #expect(rig.session.invalidations.count == 1)
 }
 
-@Test func theClassifierNamesExactlyTheTerminalFailures() {
+@Test func theClassifierOnlyAllowsKnownTransientFailures() {
   #expect(
     PlaybackFailureClassifier.kind(
       for: NeteaseServiceError(source: .service, statusCode: 301)
@@ -222,12 +222,53 @@ private struct PlaybackRig {
   #expect(
     PlaybackFailureClassifier.kind(
       for: NeteaseServiceError(source: .service, statusCode: 400)
-    ) == .recoverable
+    ) == .terminal
   )
   #expect(
     PlaybackFailureClassifier.kind(for: CredentialVaultError.keychain(-25300))
+      == .terminal
+  )
+  #expect(
+    PlaybackFailureClassifier.kind(for: NeteasePlaybackError.invalidResponse)
+      == .terminal
+  )
+  #expect(
+    PlaybackFailureClassifier.kind(for: FakeAudioOutput.LoadFailure(reason: "unknown"))
+      == .terminal
+  )
+  #expect(
+    PlaybackFailureClassifier.kind(for: URLError(.cancelled)) == .terminal
+  )
+  #expect(
+    PlaybackFailureClassifier.kind(for: AudioOutputFailure.assetLoad("timeout"))
       == .recoverable
   )
+  #expect(
+    PlaybackFailureClassifier.kind(for: AudioOutputFailure.itemPlayback("stalled"))
+      == .recoverable
+  )
+}
+
+@Test @MainActor func keychainFailureHasNoPlayAgain() async {
+  let rig = PlaybackRig()
+  await rig.vault.setLoadError(CredentialVaultError.keychain(-25300))
+
+  await rig.play()
+
+  #expect(rig.playback.phase == .failed)
+  #expect(!rig.playback.canPlayAgain)
+}
+
+@Test @MainActor func unknownServiceFailureHasNoPlayAgain() async {
+  let rig = PlaybackRig()
+  await rig.transport.setSongURL(
+    .failure(NeteaseServiceError(source: .service, statusCode: 400))
+  )
+
+  await rig.play()
+
+  #expect(rig.playback.phase == .failed)
+  #expect(!rig.playback.canPlayAgain)
 }
 
 // MARK: - The entry point is retired by newer intents
@@ -277,10 +318,52 @@ private struct PlaybackRig {
 
   let staleFailure = rig.output.onFailure
   rig.playback.stop()
-  staleFailure?("NSURLErrorDomain -1005")
+  staleFailure?(.itemPlayback("NSURLErrorDomain -1005"))
 
   #expect(rig.playback.phase == .idle)
   #expect(!rig.playback.canPlayAgain)
+}
+
+/// This models a callback that AVPlayer queued before teardown but delivered
+/// after a replacement item installed new controller handlers.
+@Test @MainActor func aQueuedCallbackFromTheOldItemCannotFailTheNewItem() async {
+  let rig = PlaybackRig()
+  await rig.transport.setSongURL(.success(makeResolvedAsset(songID: 101)))
+  await rig.play([101, 202])
+  let staleFailure = rig.output.queuedFailure(.itemPlayback("old item"))
+
+  await rig.transport.setSongURL(.success(makeResolvedAsset(songID: 202)))
+  rig.playback.playNext(session: rig.session)
+  await rig.playback.settleForTesting()
+  staleFailure()
+
+  #expect(rig.playback.phase == .playing)
+  #expect(rig.playback.currentTrack?.id == 202)
+  #expect(!rig.playback.canPlayAgain)
+}
+
+/// A cancelled prepare may complete after a newer prepare. It must not install
+/// or play its old URL over the replacement item.
+@Test @MainActor func aBlockedOldPrepareCannotReplaceTheNewPlayer() async {
+  let rig = PlaybackRig()
+  await rig.transport.setSongURL(
+    .success(makeResolvedAsset(songID: 101, urlString: "https://m8.music.126.net/old.mp3"))
+  )
+  rig.output.blockNextPrepare()
+  rig.playback.play(tracks: makeTracks([101]), startIndex: 0, session: rig.session)
+  while !rig.output.prepareIsBlocked { await Task.yield() }
+
+  await rig.transport.setSongURL(
+    .success(makeResolvedAsset(songID: 202, urlString: "https://m8.music.126.net/new.mp3"))
+  )
+  rig.playback.play(tracks: makeTracks([202]), startIndex: 0, session: rig.session)
+  await rig.playback.settleForTesting()
+  rig.output.resumeBlockedPrepare()
+  await Task.yield()
+
+  #expect(rig.playback.phase == .playing)
+  #expect(rig.playback.currentTrack?.id == 202)
+  #expect(rig.output.loadedURL?.absoluteString == "https://m8.music.126.net/new.mp3")
 }
 
 // MARK: - Play Again sends exactly one request and keeps its place
@@ -316,7 +399,7 @@ private struct PlaybackRig {
   #expect(await rig.transport.recordedCalls().last == .resolveSongURL(101, .lossless))
 }
 
-@Test @MainActor func playAgainIsRefusedWhileAnotherRequestIsInFlight() async {
+@Test @MainActor func playAgainCanRunAlongsideAnIndependentRead() async {
   let rig = PlaybackRig()
   await rig.transport.setSongURL(.failure(URLError(.timedOut)))
   await rig.play()
@@ -325,6 +408,7 @@ private struct PlaybackRig {
   rig.playback.playAgain(session: rig.session)
   await rig.playback.settleForTesting()
 
-  #expect(await rig.transport.callCount() == 1)
-  rig.arbiter.end(blocker, outcome: .applied)
+  #expect(await rig.transport.callCount() == 2)
+  #expect(rig.playback.phase == .failed)
+  #expect(rig.arbiter.end(blocker, outcome: .applied) == .applied)
 }

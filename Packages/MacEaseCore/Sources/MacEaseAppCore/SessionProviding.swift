@@ -35,6 +35,7 @@ package protocol SessionProviding: AnyObject {
 
   func invalidateStoredSession(
     matching credential: NeteaseCredential,
-    message: String
+    message: String,
+    readToken: OperationToken
   ) async -> SessionInvalidationResult
 }

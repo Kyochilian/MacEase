@@ -17,6 +17,14 @@ package enum SessionFailure: Equatable, Sendable {
   case busy
 }
 
+/// What is known about Keychain presence. `unknown` must not be rendered as
+/// either an absent or a stored session.
+package enum StoredSessionPresence: Equatable, Sendable {
+  case unknown
+  case absent
+  case stored
+}
+
 /// The committed session state. Presence and the validated credential move
 /// together through the reducer, so no path can leave one set and the other
 /// stale.
@@ -48,10 +56,11 @@ package struct SessionSnapshot: Equatable, Sendable {
     return account
   }
 
-  package var hasStoredSession: Bool {
+  package var storedSessionPresence: StoredSessionPresence {
     switch presence {
-    case .unknown, .absent: false
-    case .storedUnvalidated, .validated: true
+    case .unknown: .unknown
+    case .absent: .absent
+    case .storedUnvalidated, .validated: .stored
     }
   }
 }
@@ -69,6 +78,9 @@ package enum SessionEvent: Equatable, Sendable {
   case signedOut
   /// The Keychain item is no longer the one the operation started with.
   case storedItemChanged(hasStoredItem: Bool)
+  /// A Keychain operation failed after the validated identity was disproved,
+  /// so whether an item remains cannot be stated either way.
+  case storedItemPresenceUnknown
   /// Nothing was established. Whatever was confirmed before still holds.
   case inconclusive(SessionFailure)
 }
@@ -87,6 +99,9 @@ package enum SessionMutationResult: Equatable, Sendable {
   /// A credential is stored but unproven; nothing may be treated as
   /// validated, and the previous account must not be carried over.
   case storedUnvalidated
+  /// The validated identity is gone, but a Keychain failure left storage
+  /// presence unknown. Session-scoped app data must still be cleared.
+  case storedPresenceUnknown
   /// Nothing was established; previously confirmed state is preserved.
   case rejected(SessionFailure)
 }
@@ -142,6 +157,9 @@ package enum SessionReducer {
         return (next, hasStoredItem ? .storedUnvalidated : .signedOut)
       }
       return (next, .credentialReplaced(nil))
+
+    case .storedItemPresenceUnknown:
+      return (SessionSnapshot(), .storedPresenceUnknown)
 
     case .inconclusive(let failure):
       return (snapshot, .rejected(failure))

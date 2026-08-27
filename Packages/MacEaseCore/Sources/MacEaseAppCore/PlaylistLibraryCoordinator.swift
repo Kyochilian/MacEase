@@ -12,6 +12,7 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
   @ObservationIgnored private let arbiter: OperationArbiter
   @ObservationIgnored package private(set) var generation = 0
   @ObservationIgnored private var loadTask: Task<Void, Never>?
+  @ObservationIgnored private var operationToken: OperationToken?
 
   package var noStoredSessionStatus: String { "No stored session to load library" }
 
@@ -23,9 +24,8 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
   package private(set) var detail = PlaylistTrackCollection()
   package var selectedPlaylist: UserPlaylist?
   package private(set) var liked = LikedSongs()
-  /// The last write's typed result, so a form clears its input only when its
-  /// own request succeeded.
-  package private(set) var lastReceipt: WriteReceipt?
+  /// The last create result, so the form clears only its own successful input.
+  package private(set) var lastCreateReceipt: CreateReceipt?
   package var isLoading = false
   package var status = "Validate the session before loading playlists"
 
@@ -89,10 +89,8 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
           )
         else { return false }
 
-        let duplicates = self.collection.apply(page: page, replacingAll: reset)
-        self.status =
-          "Loaded \(self.collection.playlists.count) playlists"
-          + (duplicates > 0 ? "; dropped \(duplicates) duplicate rows" : "")
+        self.collection.apply(page: page, replacingAll: reset)
+        self.status = "Loaded \(self.collection.playlists.count) playlists"
         return true
       }
     }
@@ -311,7 +309,8 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
     write(
       loadingStatus: "Creating the playlist (1 request)",
       operation: "Create playlist",
-      session: session
+      session: session,
+      recordsCreateReceipt: true
     ) { credential in
       try await self.transport.createPlaylist(name: trimmed, credential: credential)
       return {
@@ -509,6 +508,7 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
     operation: String,
     session: any SessionProviding,
     noAccountStatus: String = "Validate the session before changing playlists",
+    recordsCreateReceipt: Bool = false,
     body: @escaping @MainActor (NeteaseCredential) async throws -> @MainActor () -> String
   ) {
     guard
@@ -527,8 +527,10 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
     loadTask = Task {
       var outcome = OperationOutcome.failed
       defer {
-        arbiter.end(claim.token, outcome: outcome)
-        self.publishReceipt(operation: operation, outcome: outcome)
+        let resolved = release(claim.token, outcome: outcome)
+        if recordsCreateReceipt, let resolved {
+          self.lastCreateReceipt = CreateReceipt(outcome: resolved)
+        }
         finish(generation: currentGeneration)
       }
 
@@ -543,8 +545,10 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
         arbiter.markRequestSent(claim.token)
         let apply = try await body(credential)
         // The response is in hand: whatever happens next is a local-display
-        // problem, not an unknown server state.
+        // problem, not an unknown server state. The outcome therefore stays
+        // `appliedRemotelyOnly` unless the local apply actually runs.
         arbiter.markSettling(claim.token)
+        outcome = .appliedRemotelyOnly
         guard
           try await self.sessionRemainsCurrent(
             account: account,
@@ -555,7 +559,6 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
         else {
           // The server did execute it; the session it belonged to is gone, so
           // the local change must not be applied.
-          outcome = .appliedRemotelyOnly
           return
         }
         self.status = apply()
@@ -563,10 +566,20 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
       } catch is CancellationError {
         outcome = .cancelled
       } catch {
-        outcome = Task.isCancelled ? .cancelled : .failed
+        if Task.isCancelled {
+          outcome = .cancelled
+        } else if error is NeteaseServiceError {
+          // An HTTP or service status is an explicit rejection.
+          outcome = .failed
+        } else if arbiter.abandoningLosesTheOutcome(claim.token) {
+          // The request left the client, but no authoritative application
+          // response arrived. The user must reload before repeating it.
+          outcome = .outcomeUnknown
+        }
         await handle(
           error,
           credential: credential,
+          readToken: claim.token,
           generation: currentGeneration,
           session: session,
           invalidateOnService301: false,
@@ -585,6 +598,9 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
     if !arbiter.activeWriteIsInFlight {
       loadTask?.cancel()
       loadTask = nil
+      if let operationToken {
+        release(operationToken, outcome: .cancelled)
+      }
     }
     clearLibrary()
     isLoading = false
@@ -595,18 +611,6 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
   /// can assert on settled state without polling.
   package func settleForTesting() async {
     await loadTask?.value
-  }
-
-  /// Only the operations that carry a form input need this, but publishing it
-  /// for every write keeps one shape.
-  private func publishReceipt(operation: String, outcome: OperationOutcome) {
-    let mapped: WriteReceipt.Outcome
-    switch outcome {
-    case .applied: mapped = .succeeded
-    case .appliedRemotelyOnly: mapped = .appliedRemotelyOnly
-    case .failed, .cancelled, .outcomeUnknown: mapped = .failed
-    }
-    lastReceipt = WriteReceipt(operation: operation, outcome: mapped)
   }
 
   private struct Claim {
@@ -622,12 +626,14 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
     session: any SessionProviding,
     noAccountStatus: String
   ) -> Claim? {
+    guard !isLoading else { return nil }
     guard let token = arbiter.begin(name: name, effect: effect) else { return nil }
     guard let account = session.account else {
       arbiter.end(token, outcome: .failed)
       status = noAccountStatus
       return nil
     }
+    operationToken = token
     return Claim(token: token, account: account)
   }
 
@@ -644,7 +650,7 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
   ) async {
     var outcome = OperationOutcome.failed
     defer {
-      arbiter.end(claim.token, outcome: outcome)
+      release(claim.token, outcome: outcome)
       finish(generation: generation)
     }
 
@@ -668,6 +674,7 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
       await handle(
         error,
         credential: credential,
+        readToken: claim.token,
         generation: generation,
         session: session,
         invalidateOnService301: invalidateOnService301,
@@ -679,6 +686,7 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
   private func handle(
     _ error: Error,
     credential: NeteaseCredential?,
+    readToken: OperationToken,
     generation: Int,
     session: any SessionProviding,
     invalidateOnService301: Bool,
@@ -691,20 +699,23 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
         serviceError.statusCode == 301,
         let credential
       {
+        detachTokenForInvalidation(readToken)
         let invalidation = await session.invalidateStoredSession(
           matching: credential,
-          message: "Stored session expired; sign in again"
+          message: "Stored session expired; sign in again",
+          readToken: readToken
         )
         guard self.generation == generation else { return }
-        clearLibrary()
         switch invalidation {
         case .deleted:
+          clearLibrary()
           status = "Stored session expired; sign in again"
         case .notCurrent:
           status = "Session changed; validate again"
         case .busy:
-          status = "Session busy; validate again"
+          status = "Another read is active; validate again"
         case .failed:
+          clearLibrary()
           status = "Session invalidation failed"
         }
       } else {
@@ -723,10 +734,24 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
     loadTask = nil
   }
 
+  @discardableResult
+  private func release(
+    _ token: OperationToken,
+    outcome: OperationOutcome
+  ) -> OperationOutcome? {
+    if operationToken == token { operationToken = nil }
+    return arbiter.end(token, outcome: outcome)
+  }
+
+  private func detachTokenForInvalidation(_ token: OperationToken) {
+    guard operationToken == token else { return }
+    operationToken = nil
+  }
+
   private func clearLibrary() {
     collection.reset()
     liked.reset()
-    lastReceipt = nil
+    lastCreateReceipt = nil
     clearDetail()
   }
 

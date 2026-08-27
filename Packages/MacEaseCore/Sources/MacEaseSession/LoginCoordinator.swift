@@ -28,9 +28,11 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
   package var manualCookieHeader = ""
 
   package var account: NeteaseAccount? { snapshot.account }
-  package var hasStoredSession: Bool { snapshot.hasStoredSession }
+  package var storedSessionPresence: StoredSessionPresence {
+    snapshot.storedSessionPresence
+  }
 
-  /// Session work is arbitrated with every other NetEase request, so this is
+  /// Session actions share the exclusive slot with server writes, so this is
   /// derived rather than a fourth independent busy flag.
   package var isBusy: Bool { arbiter.isBusy }
 
@@ -146,7 +148,7 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
       status =
         keychainErrorMessage(keychainError)
         + "; WebKit data cleared, the stored session may remain"
-      return commit(.storedItemChanged(hasStoredItem: true))
+      return commit(.storedItemPresenceUnknown)
     }
     status = "Keychain and WebKit session cleared"
     return commit(.signedOut)
@@ -196,6 +198,7 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
   package func validateSession() async -> SessionMutationResult {
     guard beginOperation("Validate session") else { return .rejected(.busy) }
     defer { endOperation() }
+    let expectedSnapshot = snapshot
 
     var credential: NeteaseCredential?
     do {
@@ -217,7 +220,8 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
       case .signedOut:
         return await deleteStoredSession(
           matching: loaded,
-          message: "Stored session expired; sign in again"
+          message: "Stored session expired; sign in again",
+          expectedSnapshot: expectedSnapshot
         ).result
       }
     } catch let error as NeteaseServiceError {
@@ -226,7 +230,8 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
       if error.source == .service, error.statusCode == 301, let credential {
         return await deleteStoredSession(
           matching: credential,
-          message: "Stored session expired; sign in again"
+          message: "Stored session expired; sign in again",
+          expectedSnapshot: expectedSnapshot
         ).result
       }
       status = "Account status \(error.source.rawValue) error \(error.statusCode)"
@@ -240,14 +245,52 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
     }
   }
 
-  /// Called from inside another coordinator's error path, which already owns
-  /// the arbiter, and touches only the Keychain and the login page. It
-  /// therefore does not claim an operation slot of its own.
+  /// Called from another coordinator's 301 error path with its active read
+  /// token. Promotion is atomic: a second active read makes this return busy,
+  /// and the request is left for the user to validate again.
+  package func invalidateStoredSession(
+    matching credential: NeteaseCredential,
+    message: String,
+    readToken: OperationToken
+  ) async -> SessionInvalidationResult {
+    guard snapshot.validatedCredential == credential else { return .notCurrent }
+    guard
+      let mutationToken = arbiter.promote(
+        readToken,
+        name: "Invalidate session"
+      )
+    else {
+      return .busy
+    }
+    defer { arbiter.end(mutationToken, outcome: .applied) }
+    return await deleteStoredSession(
+      matching: credential,
+      message: message,
+      expectedSnapshot: snapshot
+    ).invalidation
+  }
+
+  /// Gate B has no app-level read arbiter. It claims the ordinary session
+  /// mutation slot before applying the same conditional invalidation.
   package func invalidateStoredSession(
     matching credential: NeteaseCredential,
     message: String
   ) async -> SessionInvalidationResult {
-    await deleteStoredSession(matching: credential, message: message).invalidation
+    guard snapshot.validatedCredential == credential else { return .notCurrent }
+    guard
+      let token = arbiter.begin(
+        name: "Invalidate session",
+        effect: .sessionMutation
+      )
+    else {
+      return .busy
+    }
+    defer { arbiter.end(token, outcome: .applied) }
+    return await deleteStoredSession(
+      matching: credential,
+      message: message,
+      expectedSnapshot: snapshot
+    ).invalidation
   }
 
   package func matchesValidatedSession(
@@ -271,46 +314,80 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
     default:
       status = "Stored session changed; validate again"
     }
-    // The reporting coordinator clears itself; its siblings still hold data
-    // for an identity that is no longer in effect.
-    onIdentityChanged?()
   }
 
   private func deleteStoredSession(
     matching credential: NeteaseCredential,
-    message: String
+    message: String,
+    expectedSnapshot: SessionSnapshot
   ) async -> (invalidation: SessionInvalidationResult, result: SessionMutationResult) {
+    guard deletionIsCurrent(expectedSnapshot) else {
+      return noLongerCurrentDeletion
+    }
     do {
-      guard try await vault.delete(matching: credential) else {
-        // A different credential is stored now; it must not be deleted. If the
-        // confirming read itself fails, the item's presence is unknown, so
-        // assume it is still there rather than reporting a clean slate.
-        let remaining: Bool
+      let deleted = try await vault.delete(matching: credential)
+      guard deletionIsCurrent(expectedSnapshot) else {
+        return noLongerCurrentDeletion
+      }
+      guard deleted else {
+        // A different credential is stored now; it must not be deleted. A
+        // failed confirming read leaves its presence unknown.
         do {
-          remaining = try await vault.load() != nil
+          let remaining = try await vault.load() != nil
+          guard deletionIsCurrent(expectedSnapshot) else {
+            return noLongerCurrentDeletion
+          }
+          status = "Stored session changed; validate again"
+          return (.notCurrent, commit(.storedItemChanged(hasStoredItem: remaining)))
         } catch {
-          remaining = true
+          guard deletionIsCurrent(expectedSnapshot) else {
+            return noLongerCurrentDeletion
+          }
+          status = "Stored session changed; Keychain state is unknown"
+          return (.notCurrent, commit(.storedItemPresenceUnknown))
         }
-        status = "Stored session changed; validate again"
-        return (.notCurrent, commit(.storedItemChanged(hasStoredItem: remaining)))
       }
     } catch {
+      guard deletionIsCurrent(expectedSnapshot) else {
+        return noLongerCurrentDeletion
+      }
       // The service confirmed this credential is dead, so it must stop being
       // treated as validated even though the item may still be on disk.
       status =
         keychainErrorMessage(error)
         + "; the session is no longer valid but may remain stored"
-      return (.failed, commit(.storedItemChanged(hasStoredItem: true)))
+      return (.failed, commit(.storedItemPresenceUnknown))
+    }
+    guard deletionIsCurrent(expectedSnapshot) else {
+      return noLongerCurrentDeletion
     }
     status = message
     load(Self.loginURL)
     return (.deleted, commit(.signedOut))
   }
 
+  private func deletionIsCurrent(_ expectedSnapshot: SessionSnapshot) -> Bool {
+    snapshot == expectedSnapshot
+  }
+
+  private var noLongerCurrentDeletion:
+    (invalidation: SessionInvalidationResult, result: SessionMutationResult)
+  {
+    (.notCurrent, .rejected(.busy))
+  }
+
   @discardableResult
   private func commit(_ event: SessionEvent) -> SessionMutationResult {
     let (next, result) = SessionReducer.reduce(snapshot, event)
     snapshot = next
+    switch result {
+    case .credentialReplaced, .signedOut, .storedUnvalidated, .storedPresenceUnknown:
+      // Clear all session-scoped modules before the session operation releases
+      // the arbiter, so no new request can observe half-transitioned app state.
+      onIdentityChanged?()
+    case .unchangedValidated, .rejected:
+      break
+    }
     return result
   }
 
@@ -401,9 +478,9 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
       + "nonempty=\(!cookie.value.isEmpty), expired=\(expired), SameSite=\(sameSite)"
   }
 
-  /// Claims the arbiter for a session mutation. It fails while any other
-  /// NetEase request is in flight, which is what stops a Save, Validate,
-  /// Clear or Import from cancelling a write that already reached the server.
+  /// Claims the arbiter for a session mutation. It fails while a server write
+  /// owns the exclusive slot, which stops Save/Validate/Clear/Import from
+  /// cancelling a write that already reached the server.
   private func beginOperation(_ name: String) -> Bool {
     guard let token = arbiter.begin(name: name, effect: .sessionMutation) else {
       return false
@@ -447,4 +524,5 @@ extension NeteaseCookie {
       name: name,
       value: cookie.value
     )
-  }}
+  }
+}

@@ -11,6 +11,20 @@ package struct AudioAssetInfo: Equatable, Sendable {
   }
 }
 
+/// Failures produced by the AVFoundation boundary for which rebuilding the
+/// asset or item from a freshly resolved URL is meaningful.
+package enum AudioOutputFailure: Error, Equatable, Sendable {
+  case assetLoad(String)
+  case itemPlayback(String)
+
+  package var diagnostic: String {
+    switch self {
+    case .assetLoad(let detail): "asset load: \(detail)"
+    case .itemPlayback(let detail): "item playback: \(detail)"
+    }
+  }
+}
+
 /// The media surface `PlaybackController` is allowed to use. Keeping AVPlayer
 /// behind it is what lets the recovery rules — which failures keep a retry
 /// entry point and which do not — be tested without real media.
@@ -25,10 +39,10 @@ package protocol AudioOutput: AnyObject {
   var onPlayedToEnd: (@MainActor () -> Void)? { get set }
   /// Reports a failure of the loaded item after playback began. The payload
   /// is a short, credential-free diagnostic.
-  var onFailure: (@MainActor (String) -> Void)? { get set }
+  var onFailure: (@MainActor (AudioOutputFailure) -> Void)? { get set }
 
-  /// Loads the resolved URL. Throwing means the asset could not be loaded at
-  /// all, which is a recoverable failure: the URL may simply have expired.
+  /// Loads the resolved URL. AVFoundation load failures are returned as the
+  /// typed transient error above; cancellation remains cancellation.
   func prepare(url: URL, userAgent: String) async throws -> AudioAssetInfo
   func play()
   func pause()
@@ -44,10 +58,11 @@ package final class AVPlayerAudioOutput: AudioOutput {
   private var periodicObserver: Any?
   private var itemStatusObservation: NSKeyValueObservation?
   private var playedToEndObserver: NSObjectProtocol?
+  private var generation: UInt64 = 0
 
   package var onPositionUpdate: (@MainActor (Double) -> Void)?
   package var onPlayedToEnd: (@MainActor () -> Void)?
-  package var onFailure: (@MainActor (String) -> Void)?
+  package var onFailure: (@MainActor (AudioOutputFailure) -> Void)?
 
   package var volume: Float = 1 {
     didSet { player?.volume = volume }
@@ -67,11 +82,22 @@ package final class AVPlayerAudioOutput: AudioOutput {
 
   package func prepare(url: URL, userAgent: String) async throws -> AudioAssetInfo {
     teardown()
+    let generation = self.generation
     let asset = AVURLAsset(
       url: url,
       options: [AVURLAssetHTTPUserAgentKey: userAgent]
     )
-    let (isPlayable, duration) = try await asset.load(.isPlayable, .duration)
+    let isPlayable: Bool
+    let duration: CMTime
+    do {
+      (isPlayable, duration) = try await asset.load(.isPlayable, .duration)
+    } catch {
+      try Task.checkCancellation()
+      guard self.generation == generation else { throw CancellationError() }
+      throw AudioOutputFailure.assetLoad(Self.failureDetail(error))
+    }
+    try Task.checkCancellation()
+    guard self.generation == generation else { throw CancellationError() }
     guard isPlayable else {
       return AudioAssetInfo(isPlayable: false, durationSeconds: nil)
     }
@@ -81,7 +107,7 @@ package final class AVPlayerAudioOutput: AudioOutput {
     player.volume = volume
     player.isMuted = isMuted
     self.player = player
-    observe(item: item, of: player)
+    observe(item: item, of: player, generation: generation)
 
     let seconds = duration.seconds
     return AudioAssetInfo(
@@ -106,6 +132,7 @@ package final class AVPlayerAudioOutput: AudioOutput {
   }
 
   package func teardown() {
+    generation &+= 1
     itemStatusObservation?.invalidate()
     itemStatusObservation = nil
     if let playedToEndObserver {
@@ -121,13 +148,18 @@ package final class AVPlayerAudioOutput: AudioOutput {
     player = nil
   }
 
-  private func observe(item: AVPlayerItem, of player: AVPlayer) {
+  private func observe(
+    item: AVPlayerItem,
+    of player: AVPlayer,
+    generation: UInt64
+  ) {
     itemStatusObservation = item.observe(\.status, options: [.new]) {
       [weak self] item, _ in
       guard item.status == .failed else { return }
       let detail = item.error.map(Self.failureDetail) ?? "unknown"
       Task { @MainActor [weak self] in
-        self?.onFailure?(detail)
+        guard let self, self.generation == generation else { return }
+        self.onFailure?(.itemPlayback(detail))
       }
     }
     playedToEndObserver = NotificationCenter.default.addObserver(
@@ -136,7 +168,8 @@ package final class AVPlayerAudioOutput: AudioOutput {
       queue: .main
     ) { [weak self] _ in
       Task { @MainActor [weak self] in
-        self?.onPlayedToEnd?()
+        guard let self, self.generation == generation else { return }
+        self.onPlayedToEnd?()
       }
     }
     periodicObserver = player.addPeriodicTimeObserver(
@@ -144,9 +177,10 @@ package final class AVPlayerAudioOutput: AudioOutput {
       queue: .main
     ) { [weak self] time in
       Task { @MainActor [weak self] in
+        guard let self, self.generation == generation else { return }
         let seconds = time.seconds
         guard seconds.isFinite, seconds >= 0 else { return }
-        self?.onPositionUpdate?(seconds)
+        self.onPositionUpdate?(seconds)
       }
     }
   }

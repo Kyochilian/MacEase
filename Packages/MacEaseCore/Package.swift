@@ -51,7 +51,7 @@ let package = Package(
     ),
     .testTarget(
       name: "MacEaseAppCoreTests",
-      dependencies: ["MacEaseAppCore", "NeteaseKit"]
+      dependencies: ["MacEaseSession", "MacEaseAppCore", "NeteaseKit"]
     ),
   ],
   swiftLanguageModes: [.v6]
