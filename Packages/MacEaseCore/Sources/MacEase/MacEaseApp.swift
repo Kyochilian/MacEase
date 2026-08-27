@@ -20,6 +20,9 @@ struct MacEaseApp: App {
   @State private var discovery: DiscoveryCoordinator
   @State private var playback: PlaybackController
   @State private var arbiter: OperationArbiter
+  /// Held so the Now Playing bridge lives as long as the app does; the views
+  /// never read it.
+  @State private var nowPlaying: NowPlayingCoordinator
   @State private var selectedTab: MainTab = .session
 
   init() {
@@ -46,18 +49,58 @@ struct MacEaseApp: App {
       arbiter: arbiter
     )
     playback.attach(session: login)
+    // Now Playing and the media keys read a projection of playback and route
+    // commands back as intents. They never call the transport themselves.
+    let nowPlaying = NowPlayingCoordinator(
+      surface: MPSystemMediaController(),
+      snapshotProvider: { [weak playback, weak library] in
+        guard let playback else { return .empty }
+        let liked =
+          playback.currentTrack
+          .map { library?.liked.state(of: $0.id) ?? .unknown } ?? .unknown
+        return playback.snapshot(liked: liked)
+      },
+      performIntent: { [weak playback, weak library, weak login] command in
+        guard let playback, let login else { return false }
+        switch command {
+        case .play:
+          playback.resume()
+        case .pause:
+          playback.pause()
+        case .next:
+          playback.playNext(session: login)
+        case .previous:
+          playback.playPrevious(session: login)
+        case .seek(let seconds):
+          playback.seek(to: seconds)
+        case .setLiked(let liked):
+          guard let library, let track = playback.currentTrack else { return false }
+          library.setLiked(liked, for: track, session: login)
+        case .toggle:
+          // Resolved to play or pause before dispatch.
+          return false
+        }
+        return true
+      }
+    )
+    nowPlaying.startObserving()
     // A divergence found by any coordinator invalidates the identity for all
     // of them, so the session owner clears everything, not just the reporter.
-    login.onIdentityChanged = { [weak playback, weak library, weak discovery] in
+    login.onIdentityChanged = {
+      [weak playback, weak library, weak discovery, weak nowPlaying] in
       playback?.stop()
       library?.reset()
       discovery?.reset()
+      // The system surface must not keep advertising a track that belonged to
+      // a session that no longer exists.
+      nowPlaying?.clear()
     }
     _session = State(initialValue: login)
     _library = State(initialValue: library)
     _discovery = State(initialValue: discovery)
     _playback = State(initialValue: playback)
     _arbiter = State(initialValue: arbiter)
+    _nowPlaying = State(initialValue: nowPlaying)
   }
 
   var body: some Scene {

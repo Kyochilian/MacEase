@@ -140,8 +140,8 @@ scrobble 记为 `experimental-nonshipping` 是**目标态**，当前尚未建立
 | 写操作 unknown / remote-only 结果分类 | `implemented-offline` | `OperationArbiter` |
 | 类型化播放失败与可恢复 allow-list | `implemented-offline` | `PlaybackFailureClassifier` |
 | 类型化错误层级与超时策略 | `hold` | 当前错误分类分散在各 coordinator |
-| Now Playing 状态投影 | `missing` | 无 `MediaPlayer` 接入 |
-| Remote Command / 媒体键 | `missing` | 同上 |
+| Now Playing 状态投影 | `implemented-offline` | `PlaybackSnapshot` + `NowPlayingCoordinator`；无专辑与封面，随 canonical Track 补齐 |
+| Remote Command / 媒体键 | `implemented-offline` | play/pause/toggle/next/previous/seek/like，均先经投影校验再转为 intent |
 | CoreAudio 输出设备变化 | `missing` | — |
 | sleep / wake | `probe-only` | 只在 Gate B harness 的 `PlaybackProbeCoordinator` |
 | 播放队列与上下文持久化 | `missing` | — |
@@ -176,9 +176,9 @@ scrobble 记为 `experimental-nonshipping` 是**目标态**，当前尚未建立
 | 状态 | 条目数 |
 |---|---|
 | `historical-live-observed` | 18 |
-| `implemented-offline` | 13 |
+| `implemented-offline` | 15 |
 | `probe-only` | 2 |
-| `missing` | 41 |
+| `missing` | 39 |
 | `hold` | 7 |
 | `experimental-nonshipping` | 1 |
 | `excluded` | 6 |

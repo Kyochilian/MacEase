@@ -12,8 +12,8 @@
 | verified-at-commit | working-tree (SYS-001 in progress) |
 | toolchain | Swift 6.1.2 / Xcode 16.4 |
 | platform | macOS 15, arm64 only |
-| debug-tests | 259 |
-| release-tests | 259 |
+| debug-tests | 273 |
+| release-tests | 273 |
 | release-build | pass |
 | live-requests-this-round | 0 |
 
@@ -56,7 +56,7 @@
 | 显式播放恢复与 stale callback 隔离 | implemented-offline |
 | 单曲播放与队列、定时播放、本地 seek | implemented-offline |
 | 逐行歌词 | hold |
-| Now Playing / Remote Command | hold |
+| Now Playing / Remote Command | implemented-offline |
 | GRDB 持久化 | hold |
 | 心动模式 | hold |
 
@@ -71,5 +71,7 @@
 - Gate D0 仅证明 arm64 本地 app/harness 组装、plist、ad-hoc Hardened Runtime 与
   strict 签名检查；它不代表 Gate D1 的 Developer ID、公证、Gatekeeper 或 Sparkle
   分发链路已完成。
-- Now Playing 与媒体键未接入，因此系统播放状态与 app 状态尚未统一。
-- 在上述三项完成前，本项目不称为 internal alpha。
+- Now Playing 与媒体键已接入并有离线测试，但**未在真机验证**：系统播放信息、媒体键与
+  蓝牙遥控的实际行为仍需固定 artifact 上的人工矩阵。当前投影不含专辑与封面，因为
+  `PlaylistTrack` 没有这两个字段；它们随 canonical Track 与图片管线一起补齐。
+- 在 Gate C 与上述真机验证完成前，本项目不称为 internal alpha。
