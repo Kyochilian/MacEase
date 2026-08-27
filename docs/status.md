@@ -35,6 +35,9 @@
 不在公开仓库，且该状态不等于当前 HEAD 已通过 live 验收。其它状态为
 `implemented-offline`、`hold`、`retired`。
 
+下表只列已实现或已明确规划的功能。与对标项目的完整能力差距（含尚未实现的端点）
+见 [backend-parity.md](backend-parity.md)。
+
 | 功能 | 状态 |
 |---|---|
 | 官方登录页 + Keychain 会话 | historical-live-observed |

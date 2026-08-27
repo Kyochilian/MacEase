@@ -4,6 +4,8 @@
 > 新增端点必须同时更新本表、golden test 与 `THIRD_PARTY_NOTICES.md` 的证据来源。
 > 2026-08-26 已对照本地 `api-enhanced` commit `a7e8d485f31c` 的相关 `module/*.js`、
 > `util/option.js`、`util/request.js` 与 `util/config.json`。
+> 本表只列**已实现**的端点；尚未实现的能力见
+> [backend-parity.md](backend-parity.md)。
 
 ## 规则
 

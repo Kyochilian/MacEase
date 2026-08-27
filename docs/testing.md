@@ -14,8 +14,11 @@ swift build -c release
 ```
 
 `scripts/check_links.sh` 校验 README 与 `docs/` 中的相对链接和脚本路径都存在。
-`scripts/check_status.sh` 只重跑两套测试并核对 `docs/status.md` 中记录的数量；它不验证
-其它状态字段，也不在 CI 已运行相同测试后重复执行。
+`scripts/check_status.sh` 只核对 `docs/status.md` 中记录的测试数量；无参数时自己重跑
+两套测试，CI 则用 `--debug-count` / `--release-count` 传入它已经测得的数字，避免第二
+次全量构建。它不验证其它状态字段。
+`scripts/check_parity.sh` 校验 `docs/backend-parity.md` 的每个状态格都取自其状态词表，
+且汇总计数与各表一致。
 
 ## 目标划分
 

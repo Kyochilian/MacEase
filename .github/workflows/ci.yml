@@ -50,6 +50,9 @@ jobs:
       - name: Documented paths are tracked
         run: ./scripts/check_links.sh
 
+      - name: Backend parity statuses are from the defined vocabulary
+        run: ./scripts/check_parity.sh
+
       # Reuses the counts the two steps above already measured, so the status
       # document cannot drift without paying for a third and fourth build.
       - name: Status document matches the measured test counts
