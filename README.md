@@ -2,9 +2,9 @@
 
 MacEase（Mac + Ease）是一个面向 macOS 的非官方网易云音乐第三方客户端，使用 Swift、SwiftUI 和 Apple 原生框架开发。本项目独立于 NetEase, Inc. 与网易云音乐，未获其关联、授权或背书。
 
-项目处于最小 app foundation 阶段，尚无公开二进制版本；仓库同时保留 Gate A 无账号读取
+项目处于 pre-alpha 实现阶段，尚无公开二进制版本；仓库同时保留 Gate A 无账号读取
 probe、Gate B 登录和 Gate C eapi 播放技术 harness。完整 Gate C、Gate E 与发行关卡仍为
-Hold。当前状态见 [docs/status.md](docs/status.md)。
+Hold。当前离线实现与历史 live 观察见 [docs/status.md](docs/status.md)。
 
 ## 当前范围
 
@@ -56,7 +56,7 @@ swift test -c release
 swift build -c release
 ```
 
-仓库自检（相对链接与脚本路径是否都已纳入版本控制、状态文档是否与实际测试数一致）：
+仓库自检（相对链接与脚本路径是否已纳入版本控制、状态文档记录的测试数是否仍准确）：
 
 ```sh
 ./scripts/check_links.sh
@@ -91,7 +91,7 @@ open -n .build/MacEasePhase0Harness.app
 组装当前最小 app（ad-hoc Hardened Runtime，仅用于本地开发验证）：
 
 ```sh
-./scripts/package_macease_app.sh --arch arm64 --build 1
+./scripts/package_macease_app.sh --build 1
 open -n .build/MacEase.app
 ```
 

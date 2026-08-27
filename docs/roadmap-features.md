@@ -19,8 +19,9 @@
 
 ## 开发顺序与端点映射
 
-端点均为成熟 weapi/eapi 路径，已核对 NeteaseCloudMusicApi 及其 Rust 移植（ncm-api-rs）
-的公开文档覆盖。写操作端点在接入前仍须按 init.md §3.2 合同字段登记并用测试账号验证。
+端点的当前实现与参考 commit 记录在 [endpoint-registry.md](endpoint-registry.md) 和
+[THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md)。写操作接入前必须登记合同字段、
+核对本地权威源码并用专用测试账号验证。
 
 ### 第 1 批：基础播放补齐（纯客户端为主）
 
@@ -32,8 +33,7 @@
 ### 第 2 批：音乐库读写
 
 - 我喜欢的音乐：`weapi/song/like/get`（likelist）+ 已有歌单详情
-- 红心/取消红心：`weapi` `/api/radio/like`（写；参数与 cookie 要求见
-  `reference-implementations.md`，源码核验后修正，不是 `song/like`）
+- 红心/取消红心：`weapi` `/api/radio/like`（写；不是 `song/like`）
 - 歌单编辑：`weapi/playlist/create`、`playlist/remove`、改元信息走 `weapi/batch`、
   `playlist/manipulate/tracks`、`playlist/subscribe`（写；删除需 UI 二次确认）
 - 听歌排行：`weapi/v1/play/record`（读，type=0 全部/1 最近一周）
@@ -53,5 +53,5 @@
 
 ## 参考项目
 
-功能级的「仓库 → 文件」映射、已核验端点细节与许可红线，统一维护在
-`docs/reference-implementations.md`，开发前先查该文件。
+端点路径、已知差异与未验证项维护在 [endpoint-registry.md](endpoint-registry.md)；
+参考仓库 commit 与许可红线维护在 [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md)。
