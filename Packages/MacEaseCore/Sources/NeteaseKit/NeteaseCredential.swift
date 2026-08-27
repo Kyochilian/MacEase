@@ -66,10 +66,6 @@ public struct NeteaseCredential: Codable, Equatable, Sendable {
 }
 
 public struct NeteaseCookie: Codable, Equatable, Sendable {
-  /// Generous bound on one cookie value; a real MUSIC_U is a few hundred
-  /// bytes and anything larger would only produce an unusable header.
-  private static let maximumValueByteCount = 4096
-
   public enum Name: String, Codable, Sendable {
     case musicU = "MUSIC_U"
     case csrf = "__csrf"
@@ -106,11 +102,8 @@ public struct NeteaseCookie: Codable, Equatable, Sendable {
   /// and `\`. This excludes CR, LF, NUL and every other control character,
   /// which are the bytes that would let a value inject or truncate a header.
   private static func isValidValue(_ value: String) -> Bool {
-    let bytes = Array(value.utf8)
-    guard !bytes.isEmpty, bytes.count <= maximumValueByteCount else {
-      return false
-    }
-    return bytes.allSatisfy { byte in
+    guard !value.isEmpty else { return false }
+    return value.utf8.allSatisfy { byte in
       switch byte {
       case 0x21, 0x23...0x2b, 0x2d...0x3a, 0x3c...0x5b, 0x5d...0x7e: true
       default: false

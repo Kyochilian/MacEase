@@ -376,7 +376,8 @@ private let okResponse = HTTPURLResponse(
   for body in ["1", #""null""#, "[]", "true"] {
     #expect(status(body) == .invalidResponse, "\(body) must not read as content")
   }
-  #expect(status("{}") == .content)
+  #expect(status("{}") == .invalidResponse)
+  #expect(status(#"{"lyric":""}"#) == .invalidResponse)
   #expect(status(#"{"version":1,"lyric":"[00:00.00] hi"}"#) == .content)
 }
 

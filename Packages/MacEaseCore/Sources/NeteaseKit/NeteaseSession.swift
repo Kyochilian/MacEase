@@ -74,6 +74,7 @@ public struct ResolvedAudioAsset: Equatable, Sendable {
     self.fee = fee
     self.trial = trial
   }
+
 }
 
 public enum SongURLResolution: Equatable, Sendable {
@@ -1430,7 +1431,7 @@ public actor NeteaseSession {
       return LyricsProbeOutcome(status: .service(payload.code), setsCookie: setsCookie)
     }
     let status: LyricsProbeStatus =
-      payload.lrc != nil || payload.yrc != nil
+      payload.lrc?.hasContent == true || payload.yrc?.hasContent == true
       ? .content
       : payload.nolyric == true || payload.uncollected == true
         ? .noLyrics : .invalidResponse
@@ -1873,18 +1874,21 @@ private struct SimilarSongsPayload: Decodable {
   }
 }
 
-/// A field whose presence carries meaning, but only when it really is a JSON
-/// object.
-///
-/// Swift's synthesised `Decodable` for an empty struct accepts *any* non-null
-/// value, so `1`, `"null"`, `[]` and `true` all decoded as "present". The
-/// reference implementation's own unblock path writes the string `"null"`
-/// into `freeTrialInfo`, so a non-object value is not hypothetical.
-private struct ObjectMarker: Decodable {
-  private enum NoKeys: CodingKey {}
+/// The minimum lyric payload documented by the authoritative local API
+/// reference. Object presence alone is not content: `{}` and an empty lyric
+/// must remain an invalid response rather than a false positive.
+private struct LyricsContent: Decodable {
+  let lyric: String
+
+  var hasContent: Bool { !lyric.isEmpty }
+
+  private enum CodingKeys: String, CodingKey {
+    case lyric
+  }
 
   init(from decoder: Decoder) throws {
-    _ = try decoder.container(keyedBy: NoKeys.self)
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    lyric = try container.decodeIfPresent(String.self, forKey: .lyric) ?? ""
   }
 }
 
@@ -1903,8 +1907,8 @@ private struct LenientObjectMarker: Decodable {
 
 private struct LyricsProbePayload: Decodable {
   let code: Int
-  let lrc: ObjectMarker?
-  let yrc: ObjectMarker?
+  let lrc: LyricsContent?
+  let yrc: LyricsContent?
   let nolyric: Bool?
   let uncollected: Bool?
 }

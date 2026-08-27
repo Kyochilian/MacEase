@@ -320,7 +320,8 @@ public enum NeteaseCrypto {
     _ input: Data,
     limit: Int = maximumInflatedByteCount
   ) throws -> Data {
-    guard !input.isEmpty else {      throw NeteaseCryptoError.decompressionFailed(status: Z_DATA_ERROR)
+    guard !input.isEmpty else {
+      throw NeteaseCryptoError.decompressionFailed(status: Z_DATA_ERROR)
     }
 
     var stream = z_stream()

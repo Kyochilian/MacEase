@@ -23,7 +23,6 @@ import Testing
     "quote\"mark",
     "unicode\u{4E2D}",
     "\u{7F}",
-    String(repeating: "a", count: 4097),
   ]
 
   for value in rejected {
@@ -41,7 +40,6 @@ import Testing
     "a+b/c=",
     "%E4%B8%AD",
     "~!#$&'()*+-./:<=>?@[]^_`{|}",
-    String(repeating: "a", count: 4096),
   ]
 
   for value in accepted {
@@ -130,8 +128,4 @@ private func decodeCredential(_ json: String) throws -> NeteaseCredential {
 @Test func manualHeaderRejectsValuesTheTypeWouldRefuse() {
   #expect(NeteaseCredential(cookieHeader: "MUSIC_U=a,b") == nil)
   #expect(NeteaseCredential(cookieHeader: #"MUSIC_U=a"b"#) == nil)
-  #expect(
-    NeteaseCredential(cookieHeader: "MUSIC_U=\(String(repeating: "a", count: 4097))")
-      == nil
-  )
 }

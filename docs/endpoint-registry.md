@@ -2,6 +2,8 @@
 
 > 本表由 `Sources/NeteaseKit/NeteaseSession.swift` 的实际常量整理，
 > 新增端点必须同时更新本表、golden test 与 `THIRD_PARTY_NOTICES.md` 的证据来源。
+> 2026-08-26 已对照本地 `api-enhanced` commit `a7e8d485f31c` 的相关 `module/*.js`、
+> `util/option.js`、`util/request.js` 与 `util/config.json`。
 
 ## 规则
 
@@ -11,8 +13,12 @@
   加密时使用未经改写的 `/api/...` path。
 - 成功仅认 `code == 200`。任何其它值分类为 `NeteaseServiceError` 并停止。
 - **retry policy 一律为 none。** 参考实现在 512 上自动重发，MacEase 不复制。
-- 只有 `user/playlist` 的 service `301` 具有已实证的凭据失效语义；其余端点的
-  `301` 只分类不清除凭据。
+- 已有证据支持凭据失效语义的 service `301` 仅限 account-status 验证、
+  `user/playlist` 首页读取和 `songURL` 播放解析；详情、Discover、likelist 与其它
+  端点的 `301` 只分类，不清除凭据。该列表不是对未来端点的推测性泛化。
+- 当前参考实现的 `song_url_v1` 默认 xeapi、`likelist` 默认 eapi；MacEase 分别保留
+  历史固定 artifact 使用的 eapi 与 weapi 路径，不在运行时猜测或回退协议。当前 HEAD
+  的 live 验收仍须单独进行。
 
 ## weapi
 
@@ -52,7 +58,7 @@
 | `/api/batch` 内层子响应状态 | **未验证**。当前只检查顶层 `code == 200`。是否存在「顶层 200、子请求失败」需一手脱敏响应证据；在此之前不宣称 rename 已证明保留 description/tags。 |
 | playlist subscribe / unsubscribe | 已实现且不发送反作弊 token。是否被服务端接受需 live 判定；`-460` 即视为需要 token，功能停用而非补指纹。 |
 | xeapi | 全部 Hold。错误处理已完成不等于批准 live。 |
-| 歌词 `lrc` / `yrc` 内层字段名 | **未验证**。Gate A 的 live 证据刻意不保存歌词文本，因此只锁定「必须是 JSON 对象」，未按 `lyric` 之类的字段名解析。取得一手脱敏样本后可再收紧。 |
+| 歌词 `lrc` / `yrc` 内层字段 | 本地权威参考文档与 tests 锁定最小 `lyric: String`；空对象和空字符串不是内容。时间轴、翻译与逐字字段仍需一手脱敏样本后再接入 app。 |
 | `freeTrialInfo` 内层字段 | **未验证**。参考实现本身只判断非 null，MacEase 收紧为「必须是对象」；非对象值记为非试听而不使整次解析失败。 |
 
 ## 请求预算
