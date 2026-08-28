@@ -128,7 +128,7 @@ private func makeLibrary(
   await library.settleForTesting()
 
   #expect(await transport.callCount() == 1)
-  #expect(library.status == "Playlist network or response error")
+  #expect(library.status == "Playlist could not reach NetEase (transport)")
   #expect(library.playlists.isEmpty)
 }
 
@@ -152,7 +152,7 @@ private func makeLibrary(
   await library.settleForTesting()
 
   #expect(library.playlists.count == 1)
-  #expect(library.status == "Delete playlist service error -460")
+  #expect(library.status == "NetEase is rate limiting this account; stop and try again later (riskControl=-460)")
 }
 
 @Test @MainActor func serviceThreeOhOneOnAPageInvalidatesTheStoredSession() async {
@@ -189,7 +189,7 @@ private func makeLibrary(
   await library.settleForTesting()
 
   #expect(session.invalidations.isEmpty)
-  #expect(library.status == "Liked songs service error 301")
+  #expect(library.status == "NetEase refused liked songs (service=301)")
 }
 
 // MARK: - Liked writes

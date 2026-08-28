@@ -139,7 +139,7 @@ scrobble 记为 `experimental-nonshipping` 是**目标态**，当前尚未建立
 | 红心三态（unknown / liked / not liked） | `implemented-offline` | `LikedSongs` |
 | 写操作 unknown / remote-only 结果分类 | `implemented-offline` | `OperationArbiter` |
 | 类型化播放失败与可恢复 allow-list | `implemented-offline` | `PlaybackFailureClassifier` |
-| 类型化错误层级与超时策略 | `hold` | 当前错误分类分散在各 coordinator |
+| 类型化错误层级与超时策略 | `implemented-offline` | `OperationFailure` 单点分类；用户文案与诊断分离；请求/资源超时由 transport 固定 |
 | Now Playing 状态投影 | `implemented-offline` | `PlaybackSnapshot` + `NowPlayingCoordinator`；无专辑与封面，随 canonical Track 补齐 |
 | Remote Command / 媒体键 | `implemented-offline` | play/pause/toggle/next/previous/seek/like，均先经投影校验再转为 intent |
 | CoreAudio 输出设备变化 | `missing` | — |
@@ -176,10 +176,10 @@ scrobble 记为 `experimental-nonshipping` 是**目标态**，当前尚未建立
 | 状态 | 条目数 |
 |---|---|
 | `historical-live-observed` | 18 |
-| `implemented-offline` | 15 |
+| `implemented-offline` | 16 |
 | `probe-only` | 2 |
 | `missing` | 39 |
-| `hold` | 7 |
+| `hold` | 6 |
 | `experimental-nonshipping` | 1 |
 | `excluded` | 6 |
 

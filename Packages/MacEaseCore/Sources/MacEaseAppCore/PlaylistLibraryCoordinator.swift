@@ -743,13 +743,19 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
           status = "Stored session expired; sign in again"
         }
       } else {
-        status = "\(operation) \(serviceError.source.rawValue) error \(serviceError.statusCode)"
+        report(error, operation: operation)
       }
-    } else if let vaultError = error as? CredentialVaultError {
-      status = "Keychain error \(vaultError.diagnostic)"
     } else {
-      status = "\(operation) network or response error"
+      report(error, operation: operation)
     }
+  }
+
+  /// One classification for every failure this coordinator surfaces, so the
+  /// same error does not read differently depending on where it was caught.
+  private func report(_ error: any Error, operation: String) {
+    let failure = OperationFailure.classify(error, cancelled: Task.isCancelled)
+    guard failure.isReportable else { return }
+    status = failure.statusText(operation: operation)
   }
 
   private func finish(generation: Int) {

@@ -686,10 +686,11 @@ package final class PlaybackController {
       case .failed:
         abandonPlayback(status: "Session invalidation failed")
       }
-    case let error as NeteaseServiceError:
+    case is NeteaseServiceError:
       phase = .failed
-      status = "Song URL \(error.source.rawValue) error \(error.statusCode)"
+      status = OperationFailure.classify(error).statusText(operation: "Song URL")
     case NeteasePlaybackError.nonHTTPSURL(let host):
+      // MacEase refused the address, so a retry would refuse it again.
       attempt = nil
       phase = .failed
       status = "Rejected non-HTTPS playback host \(host)"

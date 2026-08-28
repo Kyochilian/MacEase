@@ -383,13 +383,10 @@ package final class DiscoveryCoordinator: SessionGuardedCoordinator {
   private func handle(_ error: Error, generation: Int, operation: String) {
     guard self.generation == generation else { return }
 
-    if let serviceError = error as? NeteaseServiceError {
-      status = "\(operation) \(serviceError.source.rawValue) error \(serviceError.statusCode)"
-    } else if let vaultError = error as? CredentialVaultError {
-      status = "Keychain error \(vaultError.diagnostic)"
-    } else {
-      status = "\(operation) network or response error"
-    }
+    let failure = OperationFailure.classify(error, cancelled: Task.isCancelled)
+    // A superseded section must not report itself as a network problem.
+    guard failure.isReportable else { return }
+    status = failure.statusText(operation: operation)
   }
 
   private func finish(generation: Int) {

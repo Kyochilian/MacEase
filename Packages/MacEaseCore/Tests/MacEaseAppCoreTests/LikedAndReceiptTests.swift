@@ -188,7 +188,7 @@ private func makeLibraryRig() -> (FakeTransport, PlaylistLibraryCoordinator, Fak
 
   #expect(library.lastCreateReceipt?.outcome == .appliedRemotelyOnly)
   #expect(arbiter.unresolvedOutcomes.map(\.kind) == [.appliedRemotelyOnly])
-  #expect(library.status == "Keychain error status=-25300")
+  #expect(library.status == "Create playlist could not read the stored session (keychain status=-25300)")
 }
 
 /// Each write gets its own receipt id, so a view can tell its own action's

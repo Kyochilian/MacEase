@@ -383,7 +383,7 @@ private struct Rig {
   rig.library.load(reset: true, session: rig.session)
   await rig.library.settleForTesting()
   #expect(rig.arbiter.canStart())
-  #expect(rig.library.status == "Keychain error status=-25300")
+  #expect(rig.library.status == "Playlist could not read the stored session (keychain status=-25300)")
 
   // Transport throws: released on the failure path.
   await rig.vault.setLoadError(nil)
@@ -395,7 +395,7 @@ private struct Rig {
   rig.library.load(reset: true, session: rig.session)
   await rig.library.settleForTesting()
   #expect(rig.arbiter.canStart())
-  #expect(rig.library.status == "Playlist http error 500")
+  #expect(rig.library.status == "Playlist failed; NetEase did not answer the request (http=500)")
 }
 
 @Test @MainActor func stoppingPlaybackFreesTheArbiterImmediately() async {

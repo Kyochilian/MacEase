@@ -12,8 +12,8 @@
 | verified-at-commit | working-tree (SYS-001 in progress) |
 | toolchain | Swift 6.1.2 / Xcode 16.4 |
 | platform | macOS 15, arm64 only |
-| debug-tests | 293 |
-| release-tests | 293 |
+| debug-tests | 306 |
+| release-tests | 306 |
 | release-build | pass |
 | live-requests-this-round | 0 |
 
