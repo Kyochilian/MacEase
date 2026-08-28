@@ -113,7 +113,7 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
 
     do {
       try await vault.save(credential)
-      status = "Saved \(credential.cookies.count) whitelisted cookie names"
+      status = "Saved \(credential.cookies.count) approved cookie names"
       // Storage is proven, identity is not: the previous account must not be
       // carried over onto a credential nobody has validated.
       return commit(.storedNewCredential)

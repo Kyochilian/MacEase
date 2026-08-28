@@ -114,7 +114,7 @@ private func makeLibraryRig() -> (FakeTransport, PlaylistLibraryCoordinator, Fak
 @Test @MainActor func aFailedCreatePublishesAFailedReceipt() async {
   let (transport, library, session) = makeLibraryRig()
   await transport.setWriteResult(
-    .failure(NeteaseServiceError(source: .service, statusCode: -460))
+    .failure(NeteaseServiceError(source: .service, statusCode: 500))
   )
 
   library.createPlaylist(named: "canary", session: session)

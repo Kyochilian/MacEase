@@ -486,9 +486,7 @@ public actor NeteaseSession {
     )
   }
 
-  /// The first write endpoint: it mutates the server-side liked-songs list.
-  /// Registered under init.md §3.2 and approved 2026-08-22. No automatic
-  /// retry: any non-200 is reported to the user and stops.
+  /// Mutates the server-side liked-songs list.
   package func setSongLiked(
     songID: Int64,
     liked: Bool,
@@ -586,13 +584,6 @@ public actor NeteaseSession {
   }
 
   /// Subscribes to or unsubscribes from someone else's playlist.
-  ///
-  /// The reference implementation forces an anti-cheat (Yidun) token on the
-  /// subscribe branch, which it obtains by running the fingerprinting SDK in a
-  /// spoofed browser. MacEase does not do that and sends the same honest
-  /// platform identity every other write uses. Whether the endpoint actually
-  /// requires the token is decided by live test: a `-460` here means it does,
-  /// and the feature stops rather than gaining a spoofed fingerprint.
   package func setPlaylistSubscribed(
     _ subscribed: Bool,
     playlistID: Int64,

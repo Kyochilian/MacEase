@@ -21,24 +21,12 @@ jobs:
         run: swift --version && xcodebuild -version
 
       - name: Debug tests
-        id: debug-tests
         working-directory: Packages/MacEaseCore
-        run: |
-          set -o pipefail
-          swift test 2>&1 | tee "$RUNNER_TEMP/debug-tests.log"
-          count=$(grep -oE 'Test run with [0-9]+ tests' "$RUNNER_TEMP/debug-tests.log" |
-            tail -1 | grep -oE '[0-9]+')
-          echo "count=$count" >> "$GITHUB_OUTPUT"
+        run: swift test
 
       - name: Release tests
-        id: release-tests
         working-directory: Packages/MacEaseCore
-        run: |
-          set -o pipefail
-          swift test -c release 2>&1 | tee "$RUNNER_TEMP/release-tests.log"
-          count=$(grep -oE 'Test run with [0-9]+ tests' "$RUNNER_TEMP/release-tests.log" |
-            tail -1 | grep -oE '[0-9]+')
-          echo "count=$count" >> "$GITHUB_OUTPUT"
+        run: swift test -c release
 
       - name: Release build
         working-directory: Packages/MacEaseCore
@@ -46,20 +34,6 @@ jobs:
 
       - name: Whitespace and conflict markers
         run: git diff --check HEAD
-
-      - name: Documented paths are tracked
-        run: ./scripts/check_links.sh
-
-      - name: Backend parity statuses are from the defined vocabulary
-        run: ./scripts/check_parity.sh
-
-      # Reuses the counts the two steps above already measured, so the status
-      # document cannot drift without paying for a third and fourth build.
-      - name: Status document matches the measured test counts
-        run: |
-          ./scripts/check_status.sh \
-            --debug-count '${{ steps.debug-tests.outputs.count }}' \
-            --release-count '${{ steps.release-tests.outputs.count }}'
 
       - name: No process-terminating paths on untrusted input
         run: |

@@ -5,7 +5,7 @@ import Testing
 
 private let accountCredential = testCredential(musicU: "music-u-test", csrf: "csrf-test")
 
-@Test func accountStatusRequestUsesWhitelistedSessionContext() throws {
+@Test func accountStatusRequestUsesApprovedSessionContext() throws {
   let request = try NeteaseSession.accountStatusRequest(
     credential: accountCredential,
     secretKey: "0123456789abcdef"

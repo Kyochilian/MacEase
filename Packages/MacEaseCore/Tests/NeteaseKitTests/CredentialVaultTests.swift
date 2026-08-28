@@ -62,7 +62,7 @@ import Testing
   try await deletingVault.delete()
 }
 
-@Test func manualCookieHeaderParsesWhitelistedValues() {
+@Test func manualCookieHeaderParsesApprovedValues() {
   let credential = NeteaseCredential(
     cookieHeader: "ignored=x; MUSIC_U=value==; __csrf=csrf"
   )

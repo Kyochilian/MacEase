@@ -24,9 +24,6 @@ package enum OperationFailure: Equatable, Sendable {
   case http(status: Int)
   /// The application answered with a code other than 200.
   case service(code: Int)
-  /// The account is being rate limited or challenged. Distinct from a plain
-  /// service error because the response is to stop, never to work around it.
-  case riskControl(code: Int)
   /// A response arrived and did not parse into what the contract promises.
   case decode
   /// The Keychain refused, or held something that is not a usable credential.
@@ -34,10 +31,6 @@ package enum OperationFailure: Equatable, Sendable {
   /// MacEase refused the resource before any request: a non-HTTPS media URL,
   /// or a host that is not on the approved list.
   case refusedResource
-
-  /// Service codes that mean the account itself is being challenged. `-460` is
-  /// the one the endpoint registry documents; nothing else is assumed.
-  package static let riskControlCodes: Set<Int> = [-460]
 
   /// Classifies a thrown error. `cancelled` is checked first and separately,
   /// because a cancelled task can surface as almost anything underneath and
@@ -52,10 +45,7 @@ package enum OperationFailure: Equatable, Sendable {
     case let error as NeteaseServiceError:
       switch error.source {
       case .http: return .http(status: error.statusCode)
-      case .service:
-        return riskControlCodes.contains(error.statusCode)
-          ? .riskControl(code: error.statusCode)
-          : .service(code: error.statusCode)
+      case .service: return .service(code: error.statusCode)
       }
     case let error as CredentialVaultError:
       return .credential(error)
@@ -95,8 +85,6 @@ package enum OperationFailure: Equatable, Sendable {
       "\(operation) failed; NetEase did not answer the request"
     case .service:
       "NetEase refused \(operation.lowercased())"
-    case .riskControl:
-      "NetEase is rate limiting this account; stop and try again later"
     case .decode:
       "\(operation) returned something MacEase does not understand"
     case .credential:
@@ -115,7 +103,6 @@ package enum OperationFailure: Equatable, Sendable {
     case .transport: "transport"
     case .http(let status): "http=\(status)"
     case .service(let code): "service=\(code)"
-    case .riskControl(let code): "riskControl=\(code)"
     case .decode: "decode"
     case .credential(let error): "keychain \(error.diagnostic)"
     case .refusedResource: "refusedResource"

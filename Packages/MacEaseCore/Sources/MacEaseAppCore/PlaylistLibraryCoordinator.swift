@@ -467,9 +467,7 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
     }
   }
 
-  /// Subscribes to a playlist discovered elsewhere (1 request). See
-  /// `NeteaseSession.setPlaylistSubscribed` for the anti-cheat token note: a
-  /// `-460` here means the endpoint demands one and the action simply stops.
+  /// Subscribes to a playlist discovered elsewhere.
   package func setSubscribed(
     _ subscribed: Bool,
     playlistID: Int64,

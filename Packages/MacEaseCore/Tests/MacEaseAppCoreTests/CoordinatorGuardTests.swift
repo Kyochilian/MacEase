@@ -146,13 +146,13 @@ private func makeLibrary(
   #expect(library.playlists.count == 1)
 
   await transport.setWriteResult(
-    .failure(NeteaseServiceError(source: .service, statusCode: -460))
+    .failure(NeteaseServiceError(source: .service, statusCode: 500))
   )
   library.deletePlaylist(library.playlists[0], session: session)
   await library.settleForTesting()
 
   #expect(library.playlists.count == 1)
-  #expect(library.status == "NetEase is rate limiting this account; stop and try again later (riskControl=-460)")
+  #expect(library.status == "NetEase refused delete playlist (service=500)")
 }
 
 @Test @MainActor func serviceThreeOhOneOnAPageInvalidatesTheStoredSession() async {

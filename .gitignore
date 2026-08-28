@@ -28,18 +28,5 @@ secrets/
 *.mobileprovision
 *.provisionprofile
 
-# Local working notes and gate evidence. `docs/` is deny-by-default so raw
-# gate evidence and maintainer handover notes cannot be committed by accident;
-# every document a clean clone needs is listed explicitly below. Use `docs/*`
-# rather than `docs/`, because git does not descend into an excluded directory
-# and the negations would otherwise never be considered.
-init.md
-AGENTS.md
-CLAUDE.md
-docs/*
-!docs/architecture.md
-!docs/backend-parity.md
-!docs/endpoint-registry.md
-!docs/roadmap-features.md
-!docs/status.md
-!docs/testing.md
+# Project documentation is local-only.
+*.md

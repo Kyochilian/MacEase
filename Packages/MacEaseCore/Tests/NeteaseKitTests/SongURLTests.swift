@@ -231,7 +231,7 @@ private let playbackCredential = testCredential(musicU: "music-u-test", csrf: "c
   }
 }
 
-@Test func songURLAllowsRemainingWhitelistBranchesCaseInsensitively() throws {
+@Test func songURLAllowsApprovedHostBranchesCaseInsensitively() throws {
   let response = HTTPURLResponse(
     url: URL(string: "https://interfacepc.music.163.com")!,
     statusCode: 200,
@@ -265,7 +265,7 @@ private let playbackCredential = testCredential(musicU: "music-u-test", csrf: "c
   guard
     case .resolved(let uppercase) = try resolve("HTTPS://M10.MUSIC.126.NET/audio.flac")
   else {
-    Issue.record("Expected uppercase whitelisted URL to resolve")
+    Issue.record("Expected uppercase approved URL to resolve")
     return
   }
   #expect(uppercase.sourceScheme == "https")
