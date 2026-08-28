@@ -214,7 +214,12 @@ package final class DiscoveryCoordinator: SessionGuardedCoordinator {
     if let operationToken {
       release(operationToken, outcome: .cancelled)
     }
-    hasPrefetched = false
+    // `hasPrefetched` is deliberately not cleared. Discarding the data an
+    // identity was allowed to see and restoring the launch-scoped prefetch
+    // budget are different things: re-arming it turns "up to four requests per
+    // app run" into "up to four per credential change", which is hidden
+    // network the user did not ask for. After a new sign-in the sections load
+    // on an explicit action.
     clearAll()
     isLoading = false
     status = "Validate the session, then load each section explicitly"

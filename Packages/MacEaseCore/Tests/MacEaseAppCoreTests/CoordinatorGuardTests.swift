@@ -244,7 +244,12 @@ private func makeLibrary(
   #expect(await transport.callCount() == 1)
 }
 
-@Test @MainActor func discoveryResetAllowsTheNextIdentityToPrefetchOnce() async {
+/// The prefetch budget is scoped to the app run, not to the identity. Signing
+/// in as someone else clears what the previous identity was allowed to see,
+/// but it does not buy another four implicit requests: the sections load on an
+/// explicit action from then on. Reported by the 2026-08-27 review, which
+/// found this test asserting the opposite.
+@Test @MainActor func discoveryResetDoesNotRestoreTheLaunchPrefetchBudget() async {
   let credentialA = makeCredential()
   let credentialB = makeCredential("replacement")
   let transport = FakeTransport()
@@ -269,10 +274,9 @@ private func makeLibrary(
   discovery.prefetch(session: session)
   await discovery.settleForTesting()
 
-  #expect(
-    await transport.recordedCalls()
-      == [.dailyRecommendedSongs, .dailyRecommendedSongs]
-  )
+  // Still one request in total: the second prefetch sent nothing.
+  #expect(await transport.recordedCalls() == [.dailyRecommendedSongs])
+  #expect(discovery.dailySongs.isEmpty)
 }
 
 @Test @MainActor func searchRunsOnlyFromAnExplicitNonEmptyQuery() async {
