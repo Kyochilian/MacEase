@@ -230,3 +230,89 @@ private func makeLibraryRig() -> (FakeTransport, PlaylistLibraryCoordinator, Fak
   #expect(library.lastCreateReceipt?.outcome == .appliedRemotelyOnly)
   #expect(library.lastCreateReceipt?.succeeded == false)
 }
+
+// MARK: - A sent write that got no answer stays unknown
+//
+// Regression for the 2026-08-27 review. Every write is marked `requestSent`
+// before the endpoint call, so what comes back has to prove the server did not
+// act before the result may be published as a failure. An HTTP 5xx proves the
+// server broke, not that it did nothing, and repeating a create or a like on
+// that basis can duplicate a mutation that already landed.
+
+@MainActor
+private func makeWriteRig() -> (
+  transport: FakeTransport,
+  arbiter: OperationArbiter,
+  session: FakeSession,
+  library: PlaylistLibraryCoordinator
+) {
+  let credential = makeCredential()
+  let transport = FakeTransport()
+  let vault = FakeVault(stored: credential)
+  let arbiter = OperationArbiter()
+  let session = FakeSession(credential: credential)
+  let library = PlaylistLibraryCoordinator(
+    transport: transport,
+    vault: vault,
+    arbiter: arbiter
+  )
+  return (transport, arbiter, session, library)
+}
+
+@Test(arguments: [500, 502, 503, 504])
+@MainActor func aServerSideHTTPFailureOnASentWriteStaysUnknown(status: Int) async {
+  let rig = makeWriteRig()
+  await rig.transport.setWriteResult(
+    .failure(NeteaseServiceError(source: .http, statusCode: status))
+  )
+
+  rig.library.createPlaylist(named: "canary", session: rig.session)
+  await rig.library.settleForTesting()
+
+  #expect(rig.library.lastCreateReceipt?.outcome == .outcomeUnknown)
+  #expect(rig.library.lastCreateReceipt?.succeeded == false)
+  #expect(rig.arbiter.unresolvedOutcomes.map(\.kind) == [.unknown])
+}
+
+@Test @MainActor func aServerSideHTTPFailureOnALikeStaysUnknown() async {
+  let rig = makeWriteRig()
+  await rig.transport.setWriteResult(
+    .failure(NeteaseServiceError(source: .http, statusCode: 503))
+  )
+
+  rig.library.setLiked(true, for: makeTracks([101])[0], session: rig.session)
+  await rig.library.settleForTesting()
+
+  #expect(rig.arbiter.unresolvedOutcomes.map(\.kind) == [.unknown])
+  // The local set must not record a state the server may or may not hold.
+  #expect(rig.library.liked.state(of: 101) == .unknown)
+}
+
+@Test @MainActor func anApplicationLevelRejectionIsAProvenFailure() async {
+  let rig = makeWriteRig()
+  // The endpoint answered. It reached the application layer and said no, so
+  // there is nothing for the user to reconcile.
+  await rig.transport.setWriteResult(
+    .failure(NeteaseServiceError(source: .service, statusCode: 401))
+  )
+
+  rig.library.createPlaylist(named: "canary", session: rig.session)
+  await rig.library.settleForTesting()
+
+  #expect(rig.library.lastCreateReceipt?.outcome == .failed)
+  #expect(rig.arbiter.unresolvedOutcomes.isEmpty)
+}
+
+@Test @MainActor func anHTTPRejectionBeforeHandlingIsAProvenFailure() async {
+  let rig = makeWriteRig()
+  // 403 refused the request rather than failing while handling it.
+  await rig.transport.setWriteResult(
+    .failure(NeteaseServiceError(source: .http, statusCode: 403))
+  )
+
+  rig.library.createPlaylist(named: "canary", session: rig.session)
+  await rig.library.settleForTesting()
+
+  #expect(rig.library.lastCreateReceipt?.outcome == .failed)
+  #expect(rig.arbiter.unresolvedOutcomes.isEmpty)
+}

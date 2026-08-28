@@ -575,12 +575,14 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
       } catch {
         if Task.isCancelled {
           outcome = .cancelled
-        } else if error is NeteaseServiceError {
-          // An HTTP or service status is an explicit rejection.
+        } else if let service = error as? NeteaseServiceError,
+          Self.provesTheWriteDidNotRun(service)
+        {
           outcome = .failed
         } else if arbiter.abandoningLosesTheOutcome(claim.token) {
-          // The request left the client, but no authoritative application
-          // response arrived. The user must reload before repeating it.
+          // The request left the client and nothing came back that proves what
+          // the server did with it. Reporting a failure here would invite the
+          // user to repeat a mutation that may already have been applied.
           outcome = .outcomeUnknown
         }
         await handle(
@@ -597,7 +599,19 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
     return true
   }
 
-  /// Clears this coordinator's own state only. It never cancels another
+  /// Whether a classified error is evidence that a write which had already
+  /// been sent did not take effect.
+  ///
+  /// A `service` error is an application-layer answer: the request reached the
+  /// endpoint, the endpoint decided, and it said no. A `http` 5xx is not an
+  /// answer — the server failed while handling the request, and nothing in the
+  /// response says whether it failed before or after applying the mutation. So
+  /// only the first is a proven failure; the second must stay unknown.
+  private static func provesTheWriteDidNotRun(_ error: NeteaseServiceError) -> Bool {
+    guard error.source == .http else { return true }
+    return !(500...599).contains(error.statusCode)
+  }
+
   /// module's work, and it never cancels a write whose request is already in
   /// flight: that request is left to finish so the arbiter can classify what
   /// the server did, instead of the client guessing.

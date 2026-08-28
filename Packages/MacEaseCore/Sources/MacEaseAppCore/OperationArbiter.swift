@@ -38,8 +38,10 @@ package struct ActiveOperation: Equatable, Sendable {
 package enum OperationOutcome: Equatable, Sendable {
   /// Finished and its result was published.
   case applied
-  /// The request did not leave the client, or the server explicitly rejected
-  /// it with an HTTP or service status.
+  /// The request did not leave the client, or something came back that proves
+  /// the server did not act: an application-layer rejection, or an HTTP status
+  /// that refused the request before it was handled. An HTTP 5xx is not in
+  /// this category — it says the server broke, not that it did nothing.
   case failed
   /// Abandoned by the client.
   case cancelled
