@@ -50,38 +50,13 @@ struct MacEaseApp: App {
     )
     playback.attach(session: login)
     // Now Playing and the media keys read a projection of playback and route
-    // commands back as intents. They never call the transport themselves.
+    // commands back as intents. The router lives in MacEaseAppCore so this
+    // exact wiring is covered by tests; it never calls the transport itself.
+    let router = SystemMediaRouter(playback: playback, library: library, session: login)
     let nowPlaying = NowPlayingCoordinator(
       surface: MPSystemMediaController(),
-      snapshotProvider: { [weak playback, weak library] in
-        guard let playback else { return .empty }
-        let liked =
-          playback.currentTrack
-          .map { library?.liked.state(of: $0.id) ?? .unknown } ?? .unknown
-        return playback.snapshot(liked: liked)
-      },
-      performIntent: { [weak playback, weak library, weak login] command in
-        guard let playback, let login else { return false }
-        switch command {
-        case .play:
-          playback.resume()
-        case .pause:
-          playback.pause()
-        case .next:
-          playback.playNext(session: login)
-        case .previous:
-          playback.playPrevious(session: login)
-        case .seek(let seconds):
-          playback.seek(to: seconds)
-        case .setLiked(let liked):
-          guard let library, let track = playback.currentTrack else { return false }
-          library.setLiked(liked, for: track, session: login)
-        case .toggle:
-          // Resolved to play or pause before dispatch.
-          return false
-        }
-        return true
-      }
+      snapshotProvider: { router.snapshot() },
+      performIntent: { router.perform($0) }
     )
     nowPlaying.startObserving()
     // A divergence found by any coordinator invalidates the identity for all

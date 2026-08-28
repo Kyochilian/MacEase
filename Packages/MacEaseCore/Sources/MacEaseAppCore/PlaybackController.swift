@@ -178,11 +178,15 @@ package final class PlaybackController {
     )
   }
 
-  package func playNext(session: any SessionProviding) {
+  /// Returns whether the step was accepted. A caller that reports success to
+  /// the system — the media keys do — must not assume it was.
+  @discardableResult
+  package func playNext(session: any SessionProviding) -> Bool {
     step(to: queue?.nextIndex(), session: session)
   }
 
-  package func playPrevious(session: any SessionProviding) {
+  @discardableResult
+  package func playPrevious(session: any SessionProviding) -> Bool {
     step(to: queue?.previousIndex(), session: session)
   }
 
@@ -221,30 +225,36 @@ package final class PlaybackController {
     await playTask?.value
   }
 
-  package func pause() {
-    guard phase == .playing, hasLoadedItem else { return }
+  @discardableResult
+  package func pause() -> Bool {
+    guard phase == .playing, hasLoadedItem else { return false }
     output.pause()
     phase = .paused
     attempt?.desiredState = .paused
     status = "Paused"
+    return true
   }
 
-  package func resume() {
-    guard phase == .paused, hasLoadedItem else { return }
+  @discardableResult
+  package func resume() -> Bool {
+    guard phase == .paused, hasLoadedItem else { return false }
     output.play()
     phase = .playing
     attempt?.desiredState = .playing
     status = currentAssetSummary.map { "Playing: " + $0 } ?? "Playing"
+    return true
   }
 
-  /// Local AVPlayer seek; it never issues a NetEase request.
-  package func seek(to seconds: Double) {
+  /// Local AVPlayer seek; it never issues a NetEase request. Returns whether
+  /// there was something to seek within.
+  @discardableResult
+  package func seek(to seconds: Double) -> Bool {
     guard
       phase == .playing || phase == .paused,
       hasLoadedItem,
       let duration = durationSeconds,
       let token = activeToken
-    else { return }
+    else { return false }
 
     let target = min(max(seconds, 0), duration)
     movePosition(to: target)
@@ -257,6 +267,7 @@ package final class PlaybackController {
         // Superseded by a newer seek or intent; the newer owner updates state.
       }
     }
+    return true
   }
 
   package func stop() {
@@ -315,13 +326,13 @@ package final class PlaybackController {
     }
   }
 
-  private func step(to target: Int?, session: any SessionProviding) {
-    guard canClaimResolution else { return }
+  private func step(to target: Int?, session: any SessionProviding) -> Bool {
+    guard canClaimResolution else { return false }
     guard let account = session.account else {
       status = "Validate the session before playback"
-      return
+      return false
     }
-    guard let target, queue?.moveTo(target) == true else { return }
+    guard let target, queue?.moveTo(target) == true else { return false }
 
     clearPendingSleepStop()
     startEntry(
@@ -330,6 +341,7 @@ package final class PlaybackController {
       session: session,
       auto: false
     )
+    return true
   }
 
   private func startEntry(

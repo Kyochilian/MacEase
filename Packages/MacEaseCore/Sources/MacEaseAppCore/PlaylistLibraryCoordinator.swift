@@ -273,11 +273,14 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
   /// Toggles the server-side liked state for one track (1 request). On
   /// success only `likedIDs` is updated locally; the liked list is never
   /// auto-refreshed. Any failure is reported and stops.
+  /// Returns whether the request was started, so a system control can report
+  /// what actually happened instead of assuming it worked.
+  @discardableResult
   package func setLiked(
     _ liked: Bool,
     for track: PlaylistTrack,
     session: any SessionProviding
-  ) {
+  ) -> Bool {
     write(
       loadingStatus: liked
         ? "Liking the track (1 request)" : "Unliking the track (1 request)",
@@ -503,6 +506,10 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
 
   /// The write body performs the request and returns the local-state update,
   /// which runs only after the postflight session check passes.
+  /// Returns whether the write was started. It says nothing about the
+  /// server's answer, which arrives later; a caller that reports acceptance
+  /// synchronously — the system media surface does — needs exactly this.
+  @discardableResult
   private func write(
     loadingStatus: String,
     operation: String,
@@ -510,7 +517,7 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
     noAccountStatus: String = "Validate the session before changing playlists",
     recordsCreateReceipt: Bool = false,
     body: @escaping @MainActor (NeteaseCredential) async throws -> @MainActor () -> String
-  ) {
+  ) -> Bool {
     guard
       let claim = claim(
         operation,
@@ -518,7 +525,7 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
         session: session,
         noAccountStatus: noAccountStatus
       )
-    else { return }
+    else { return false }
 
     let currentGeneration = generation
     let account = claim.account
@@ -587,6 +594,7 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
         )
       }
     }
+    return true
   }
 
   /// Clears this coordinator's own state only. It never cancels another
