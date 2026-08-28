@@ -10,19 +10,32 @@ struct MacEaseApp: App {
   private enum MainTab: Hashable {
     case session
     case library
+    case collections
     case discover
     case search
     case records
+    case lyrics
+    case settings
   }
 
   @State private var session: LoginCoordinator
   @State private var library: PlaylistLibraryCoordinator
   @State private var discovery: DiscoveryCoordinator
+  @State private var collections: CollectionsCoordinator
+  @State private var lyrics: LyricsCoordinator
   @State private var playback: PlaybackController
   @State private var arbiter: OperationArbiter
+  @State private var settings: AppSettings
+  @State private var artwork: ArtworkLoader
   /// Held so the Now Playing bridge lives as long as the app does; the views
   /// never read it.
   @State private var nowPlaying: NowPlayingCoordinator
+  /// Same: the machine-state observer must outlive the initialiser that
+  /// started it, or sleep and device changes would stop being reported.
+  @State private var systemEvents: MacSystemEventObserver
+  /// nil when the store could not be opened. Persistence is a convenience:
+  /// losing it costs the resume point, not the app.
+  @State private var queuePersistence: QueuePersistence?
   @State private var selectedTab: MainTab = .session
 
   init() {
@@ -32,6 +45,10 @@ struct MacEaseApp: App {
     let vault = CredentialVault()
     // One arbiter protects writes and destructive session mutations.
     let arbiter = OperationArbiter()
+    let settings = AppSettings()
+    let artwork = ArtworkLoader(
+      diskCapacityBytes: Int(settings.imageCacheLimitBytes)
+    )
     let login = LoginCoordinator(transport: transport, vault: vault, arbiter: arbiter)
     let library = PlaylistLibraryCoordinator(
       transport: transport,
@@ -43,12 +60,27 @@ struct MacEaseApp: App {
       vault: vault,
       arbiter: arbiter
     )
+    let collections = CollectionsCoordinator(
+      transport: transport,
+      vault: vault,
+      arbiter: arbiter
+    )
+    let lyrics = LyricsCoordinator(
+      transport: transport,
+      vault: vault,
+      arbiter: arbiter
+    )
     let playback = PlaybackController(
       transport: transport,
       vault: vault,
       arbiter: arbiter
     )
     playback.attach(session: login)
+    // Sleep, wake, the output device going away and the network coming and
+    // going. The decisions live in PlaybackController, which is tested; this
+    // only delivers the events.
+    let systemEvents = MacSystemEventObserver()
+    playback.observe(system: systemEvents)
     // Now Playing and the media keys read a projection of playback and route
     // commands back as intents. The router lives in MacEaseAppCore so this
     // exact wiring is covered by tests; it never calls the transport itself.
@@ -62,10 +94,13 @@ struct MacEaseApp: App {
     // A divergence found by any coordinator invalidates the identity for all
     // of them, so the session owner clears everything, not just the reporter.
     login.onIdentityChanged = {
-      [weak playback, weak library, weak discovery, weak nowPlaying] in
+      [weak playback, weak library, weak discovery, weak collections, weak lyrics,
+        weak nowPlaying] in
       playback?.stop()
       library?.reset()
       discovery?.reset()
+      collections?.reset()
+      lyrics?.reset()
       // The system surface must not keep advertising a track that belonged to
       // a session that no longer exists.
       nowPlaying?.clear()
@@ -73,9 +108,21 @@ struct MacEaseApp: App {
     _session = State(initialValue: login)
     _library = State(initialValue: library)
     _discovery = State(initialValue: discovery)
+    _collections = State(initialValue: collections)
+    _lyrics = State(initialValue: lyrics)
     _playback = State(initialValue: playback)
     _arbiter = State(initialValue: arbiter)
+    _settings = State(initialValue: settings)
+    _artwork = State(initialValue: artwork)
     _nowPlaying = State(initialValue: nowPlaying)
+    _systemEvents = State(initialValue: systemEvents)
+    // A store that will not open is not a reason to refuse to run: the queue
+    // simply does not survive a relaunch, and everything else is unaffected.
+    _queuePersistence = State(
+      initialValue: LibraryStore.defaultPath()
+        .flatMap { try? LibraryStore(path: $0) }
+        .map { QueuePersistence(store: $0, playback: playback) }
+    )
   }
 
   var body: some Scene {
@@ -86,8 +133,10 @@ struct MacEaseApp: App {
             session: session,
             library: library,
             discovery: discovery,
+            collections: collections,
             playback: playback,
-            arbiter: arbiter
+            arbiter: arbiter,
+            queuePersistence: queuePersistence
           )
           .tabItem { Label("Session", systemImage: "person.crop.circle") }
           .tag(MainTab.session)
@@ -96,16 +145,27 @@ struct MacEaseApp: App {
             library: library,
             discovery: discovery,
             playback: playback,
-            arbiter: arbiter
+            arbiter: arbiter,
+            artwork: artwork
           )
           .tabItem { Label("Library", systemImage: "music.note.list") }
           .tag(MainTab.library)
+          CollectionsView(
+            session: session,
+            collections: collections,
+            playback: playback,
+            arbiter: arbiter,
+            artwork: artwork
+          )
+          .tabItem { Label("Collections", systemImage: "square.stack") }
+          .tag(MainTab.collections)
           DiscoverView(
             session: session,
             library: library,
             discovery: discovery,
             playback: playback,
             arbiter: arbiter,
+            artwork: artwork,
             openPlaylist: { playlist in
               library.loadTracks(
                 for: UserPlaylist(
@@ -126,7 +186,8 @@ struct MacEaseApp: App {
             library: library,
             discovery: discovery,
             playback: playback,
-            arbiter: arbiter
+            arbiter: arbiter,
+            artwork: artwork
           )
           .tabItem { Label("Search", systemImage: "magnifyingglass") }
           .tag(MainTab.search)
@@ -135,10 +196,23 @@ struct MacEaseApp: App {
             library: library,
             discovery: discovery,
             playback: playback,
-            arbiter: arbiter
+            arbiter: arbiter,
+            artwork: artwork
           )
           .tabItem { Label("Records", systemImage: "chart.bar") }
           .tag(MainTab.records)
+          LyricsView(
+            session: session,
+            playback: playback,
+            lyrics: lyrics,
+            artwork: artwork,
+            settings: settings
+          )
+          .tabItem { Label("Lyrics", systemImage: "text.quote") }
+          .tag(MainTab.lyrics)
+          SettingsView(settings: settings, artwork: artwork)
+            .tabItem { Label("Settings", systemImage: "gearshape") }
+            .tag(MainTab.settings)
         }
         Divider()
         UnresolvedOutcomeBanner(arbiter: arbiter)
@@ -151,6 +225,20 @@ struct MacEaseApp: App {
         )
       }
       .frame(minWidth: 760, minHeight: 600)
+      .preferredColorScheme(settings.theme.colorScheme)
+      // A queue is worth remembering when it changes in a way the user would
+      // notice: a new track or a seek bumps the epoch, and pausing or stopping
+      // changes the phase. The slow tick inside `QueuePersistence` covers the
+      // position moving on its own. None of this is a request.
+      .onChange(of: playback.positionEpoch) {
+        Task { await queuePersistence?.save() }
+      }
+      .onChange(of: playback.phase) {
+        Task { await queuePersistence?.save() }
+      }
+      .onChange(of: library.playlists.count) {
+        Task { await queuePersistence?.savePlaylists(library.playlists) }
+      }
       .task {
         await session.start()
       }
@@ -163,8 +251,11 @@ private struct SessionView: View {
   @Bindable var session: LoginCoordinator
   let library: PlaylistLibraryCoordinator
   let discovery: DiscoveryCoordinator
+  let collections: CollectionsCoordinator
   let playback: PlaybackController
   let arbiter: OperationArbiter
+  let queuePersistence: QueuePersistence?
+  @State private var showsWebLogin = false
 
   var body: some View {
     VStack(spacing: 0) {
@@ -179,36 +270,63 @@ private struct SessionView: View {
 
         Spacer()
 
-        Button("Open Login", systemImage: "arrow.clockwise") {
-          session.loadLoginPage()
-        }
-        Button("Save Session", systemImage: "key.fill") {
-          mutateSession(session.saveSession)
-        }
         Button("Validate Session", systemImage: "checkmark.shield") {
           mutateSession(session.validateSession)
         }
-        Button("Clear Session", systemImage: "trash") {
-          mutateSession(session.clearSession)
+        Button("Refresh Token · 1 request", systemImage: "arrow.triangle.2.circlepath") {
+          mutateSession(session.refreshSession)
         }
+        .help("Exchanges the stored session for a fresh one")
+        Button("Sign Out · up to 2 requests", systemImage: "rectangle.portrait.and.arrow.right") {
+          mutateSession(session.signOutEverywhere)
+        }
+        .help("Revokes the session on NetEase, then clears it here")
       }
       .padding(12)
       .disabled(arbiter.isBusy)
 
       Divider()
 
-      LoginWebView(webView: session.webView)
+      NativeSignInView(
+        session: session,
+        arbiter: arbiter,
+        mutate: mutateSession
+      )
 
       Divider()
 
-      HStack(spacing: 8) {
-        SecureField("Cookie header", text: $session.manualCookieHeader)
-        Button("Import Session", systemImage: "square.and.arrow.down") {
-          mutateSession(session.importSession)
+      DisclosureGroup("Other ways to sign in", isExpanded: $showsWebLogin) {
+        VStack(spacing: 0) {
+          HStack(spacing: 8) {
+            Button("Open Login Page", systemImage: "safari") {
+              session.loadLoginPage()
+            }
+            Button("Save Session From Page", systemImage: "key.fill") {
+              mutateSession(session.saveSession)
+            }
+            Button("Clear Session", systemImage: "trash") {
+              mutateSession(session.clearSession)
+            }
+            .help("Clears locally only; Sign Out also revokes on NetEase")
+            Spacer()
+          }
+          .padding(.vertical, 8)
+          .disabled(arbiter.isBusy)
+
+          LoginWebView(webView: session.webView)
+            .frame(minHeight: 320)
+
+          HStack(spacing: 8) {
+            SecureField("Cookie header", text: $session.manualCookieHeader)
+            Button("Import Session", systemImage: "square.and.arrow.down") {
+              mutateSession(session.importSession)
+            }
+            .disabled(arbiter.isBusy)
+          }
+          .padding(.vertical, 8)
         }
-        .disabled(arbiter.isBusy)
       }
-      .padding(12)
+      .padding(.horizontal, 12)
 
       Divider()
 
@@ -243,24 +361,38 @@ private struct SessionView: View {
   ) {
     Task {
       switch await operation() {
-      case .unchangedValidated:
+      case .unchangedValidated(let account):
         // Same account: playback and everything loaded still belong to it.
         // Roadmap decision: one launch-scoped Discover prefetch after the
         // first successful validation; refreshes stay user-triggered.
         discovery.prefetch(session: session)
+        await activate(account)
       case .credentialReplaced(let account):
-        if account != nil {
+        if let account {
           discovery.prefetch(session: session)
+          // Binding the new account is what restores its queue; the previous
+          // account's stored queue is left on disk untouched.
+          await activate(account)
+        } else {
+          await queuePersistence?.deactivate()
         }
       case .signedOut, .storedUnvalidated, .storedPresenceUnknown:
         // LoginCoordinator committed the identity change and cleared all
         // session-scoped modules before releasing its operation lease.
-        break
+        await queuePersistence?.deactivate()
       case .rejected:
         // Nothing was established, so nothing confirmed is thrown away.
         break
       }
     }
+  }
+
+  /// Binds the confirmed account to its stored data: the queue it left off in
+  /// and the playlists it last saw. Neither issues a request.
+  private func activate(_ account: NeteaseAccount) async {
+    guard let queuePersistence else { return }
+    await queuePersistence.activate(accountID: account.userID)
+    library.restore(playlists: await queuePersistence.storedPlaylists())
   }
 }
 
@@ -270,6 +402,7 @@ private struct PlaylistLibraryView: View {
   let discovery: DiscoveryCoordinator
   let playback: PlaybackController
   let arbiter: OperationArbiter
+  let artwork: ArtworkLoader
   @State private var newPlaylistName = ""
   @State private var submittedPlaylistName: String?
   @State private var renameText = ""
@@ -517,9 +650,9 @@ private struct PlaylistLibraryView: View {
     .padding(12)
   }
 
-  @ViewBuilder private func trackRow(_ track: PlaylistTrack) -> some View {
+  @ViewBuilder private func trackRow(_ track: Track) -> some View {
     HStack {
-      TrackLabel(track: track)
+      TrackRowLabel(track: track, loader: artwork)
       Spacer()
       LikeButton(
         track: track,
@@ -549,6 +682,7 @@ private struct PlaylistLibraryView: View {
       PlayTrackButton(
         track: track,
         tracks: library.tracks,
+        context: playbackContext,
         playback: playback,
         session: session,
         disabled: session.account == nil || requestInFlight
@@ -557,13 +691,22 @@ private struct PlaylistLibraryView: View {
     }
     .padding(.vertical, 3)
   }
+
+  /// The open playlist is what a restored queue names, so a relaunch can say
+  /// what the user was listening to rather than just how many tracks it held.
+  private var playbackContext: PlaybackContext {
+    guard let playlist = library.selectedPlaylist else {
+      return .dailyRecommendations
+    }
+    return .playlist(id: playlist.id, name: playlist.name)
+  }
 }
 
 /// The heart is tri-state. "Not loaded yet" is shown as a distinct neutral
 /// state and offers an explicit Like, rather than an empty heart whose toggle
 /// would be guessing the starting value.
 private struct LikeButton: View {
-  let track: PlaylistTrack
+  let track: Track
   let library: PlaylistLibraryCoordinator
   let session: LoginCoordinator
   let disabled: Bool
@@ -603,46 +746,9 @@ private struct LikeButton: View {
   }
 }
 
-private struct TrackLabel: View {
-  let track: PlaylistTrack
-
-  var body: some View {
-    VStack(alignment: .leading, spacing: 3) {
-      Text(track.name)
-      if !track.artists.isEmpty {
-        Text(track.artists.joined(separator: ", "))
-          .font(.caption)
-          .foregroundStyle(.secondary)
-      }
-    }
-  }
-}
-
-/// Resolves the row's position at action time from the track id, so a list
-/// that changed between render and click cannot start the wrong track.
-private struct PlayTrackButton: View {
-  let track: PlaylistTrack
-  let tracks: [PlaylistTrack]
-  let playback: PlaybackController
-  let session: LoginCoordinator
-  let disabled: Bool
-
-  var body: some View {
-    Button("Play · 1 request", systemImage: "play.fill") {
-      guard let index = tracks.firstIndex(where: { $0.id == track.id }) else {
-        return
-      }
-      playback.play(tracks: tracks, startIndex: index, session: session)
-    }
-    .buttonStyle(.borderless)
-    .disabled(disabled)
-    .accessibilityLabel("Play \(track.name)")
-  }
-}
-
 /// Shared by the library and search rows so both add through the same path.
 private struct AddToPlaylistMenu: View {
-  let track: PlaylistTrack
+  let track: Track
   let library: PlaylistLibraryCoordinator
   let session: LoginCoordinator
   let disabled: Bool
@@ -671,6 +777,7 @@ private struct DiscoverView: View {
   let discovery: DiscoveryCoordinator
   let playback: PlaybackController
   let arbiter: OperationArbiter
+  let artwork: ArtworkLoader
   let openPlaylist: (DiscoveredPlaylist) -> Void
 
   private var requestInFlight: Bool { discovery.isLoading || arbiter.isBusy }
@@ -685,11 +792,12 @@ private struct DiscoverView: View {
         Section {
           ForEach(discovery.dailySongs, id: \.id) { track in
             HStack {
-              TrackLabel(track: track)
+              TrackRowLabel(track: track, loader: artwork)
               Spacer()
               PlayTrackButton(
                 track: track,
                 tracks: discovery.dailySongs,
+                context: .dailyRecommendations,
                 playback: playback,
                 session: session,
                 disabled: loadDisabled
@@ -729,11 +837,12 @@ private struct DiscoverView: View {
         Section {
           ForEach(discovery.similarSongs, id: \.id) { track in
             HStack {
-              TrackLabel(track: track)
+              TrackRowLabel(track: track, loader: artwork)
               Spacer()
               PlayTrackButton(
                 track: track,
                 tracks: discovery.similarSongs,
+                context: .similarSongs(seedName: discovery.similarSeedName ?? "the current track"),
                 playback: playback,
                 session: session,
                 disabled: loadDisabled
@@ -821,6 +930,7 @@ private struct SearchView: View {
   @Bindable var discovery: DiscoveryCoordinator
   let playback: PlaybackController
   let arbiter: OperationArbiter
+  let artwork: ArtworkLoader
 
   private var requestInFlight: Bool { discovery.isLoading || arbiter.isBusy }
 
@@ -853,7 +963,7 @@ private struct SearchView: View {
       } else {
         List(discovery.searchResults, id: \.id) { track in
           HStack {
-            TrackLabel(track: track)
+            TrackRowLabel(track: track, loader: artwork)
             Spacer()
             LikeButton(
               track: track,
@@ -870,6 +980,7 @@ private struct SearchView: View {
             PlayTrackButton(
               track: track,
               tracks: discovery.searchResults,
+              context: .searchResults(keywords: discovery.searchQuery),
               playback: playback,
               session: session,
               disabled: session.account == nil || requestInFlight
@@ -888,6 +999,7 @@ private struct PlayRecordsView: View {
   @Bindable var discovery: DiscoveryCoordinator
   let playback: PlaybackController
   let arbiter: OperationArbiter
+  let artwork: ArtworkLoader
 
   private var requestInFlight: Bool { discovery.isLoading || arbiter.isBusy }
 
@@ -927,7 +1039,7 @@ private struct PlayRecordsView: View {
               .font(.caption.monospacedDigit())
               .foregroundStyle(.secondary)
               .frame(width: 28, alignment: .trailing)
-            TrackLabel(track: entry.track)
+            TrackRowLabel(track: entry.track, loader: artwork)
             Spacer()
             Text("\(entry.playCount) plays")
               .font(.caption.monospacedDigit())
@@ -935,6 +1047,7 @@ private struct PlayRecordsView: View {
             PlayTrackButton(
               track: entry.track,
               tracks: discovery.records.map(\.track),
+              context: .listeningRankings,
               playback: playback,
               session: session,
               disabled: session.account == nil || requestInFlight

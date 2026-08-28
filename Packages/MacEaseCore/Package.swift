@@ -15,8 +15,11 @@ let package = Package(
   ],
   targets: [
     .target(name: "NeteaseKit"),
-    // App state, coordinators and the operation arbiter. Deliberately free
-    // of AppKit and WebKit so its tests run without a GUI stack.
+    // App state, coordinators and the operation arbiter. It reaches system
+    // frameworks only through the protocols in this target — AudioOutput,
+    // SystemMediaControlling, SystemEventObserving — so every decision they
+    // guard is testable without a running media server, audio device or
+    // window server.
     .target(
       name: "MacEaseAppCore",
       dependencies: ["NeteaseKit"]

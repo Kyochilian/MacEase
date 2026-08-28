@@ -1,5 +1,5 @@
 /// User-selected order strategy for an explicitly started queue.
-package enum PlaybackMode: String, CaseIterable, Sendable {
+package enum PlaybackMode: String, CaseIterable, Sendable, Codable {
   case sequential
   case repeatAll
   case repeatOne

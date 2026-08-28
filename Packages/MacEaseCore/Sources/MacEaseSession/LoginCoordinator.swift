@@ -12,6 +12,12 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
 {
   private static let loginURL = URL(string: "https://music.163.com/login")!
 
+  /// How often a QR sign-in asks whether the phone has confirmed. Short enough
+  /// that the app does not feel stuck after a scan, long enough that a code
+  /// left open for its full lifetime is a few dozen requests rather than
+  /// thousands.
+  package static let qrPollIntervalSeconds = 2.0
+
   @ObservationIgnored private let dataStore: WKWebsiteDataStore
   @ObservationIgnored private let transport: any NeteaseTransporting
   @ObservationIgnored private let vault: any CredentialStoring
@@ -26,6 +32,20 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
   /// Display only. No logic reads or compares it.
   package var status = "Ready"
   package var manualCookieHeader = ""
+
+  /// The QR sign-in in progress, and how far it has got. Both are nil until
+  /// the user asks for a code.
+  package private(set) var qrSession: QRLoginSession?
+  package private(set) var qrStatus: QRLoginStatus?
+  @ObservationIgnored private var qrPollTask: Task<Void, Never>?
+
+  /// SMS sign-in form state. The code is only ever a code: MacEase never asks
+  /// for the NetEase password, which a third-party client has no business
+  /// holding even for the moment it would take to hash it.
+  package var phoneNumber = ""
+  package var countryCode = "86"
+  package var verificationCode = ""
+  package private(set) var codeWasSent = false
 
   package var account: NeteaseAccount? { snapshot.account }
   package var storedSessionPresence: StoredSessionPresence {
@@ -190,6 +210,288 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
       status = keychainErrorMessage(error)
       return commit(.inconclusive(failure(error)))
     }
+  }
+
+  // MARK: - QR sign-in
+
+  /// Asks for a fresh sign-in code (1 request) and starts polling it.
+  ///
+  /// This is the one repeating request in MacEase, and it exists because the
+  /// endpoint has no other shape: the phone confirms out of band, so the
+  /// desktop has to ask. It stops on its own at the first terminal answer —
+  /// authorised or expired — and on any transport failure. Nothing re-arms it.
+  package func startQRLogin() async -> SessionMutationResult {
+    cancelQRPolling()
+    guard beginOperation("QR sign-in") else { return .rejected(.busy) }
+    defer { endOperation() }
+
+    do {
+      let session = try await transport.beginQRLogin()
+      qrSession = session
+      qrStatus = .waiting
+      status = "Scan the code with the NetEase Cloud Music app"
+      beginPolling(key: session.key)
+      return commit(.inconclusive(.busy))
+    } catch let error as NeteaseServiceError {
+      status = "QR sign-in \(error.source.rawValue) error \(error.statusCode)"
+      return commit(.inconclusive(.service(error)))
+    } catch {
+      status = "QR sign-in could not reach NetEase"
+      return commit(.inconclusive(.transport))
+    }
+  }
+
+  package func cancelQRLogin() {
+    cancelQRPolling()
+    qrSession = nil
+    qrStatus = nil
+    status = "QR sign-in cancelled"
+  }
+
+  private func cancelQRPolling() {
+    qrPollTask?.cancel()
+    qrPollTask = nil
+  }
+
+  private func beginPolling(key: String) {
+    qrPollTask = Task { [weak self] in
+      while !Task.isCancelled {
+        try? await Task.sleep(for: .seconds(Self.qrPollIntervalSeconds))
+        guard !Task.isCancelled else { return }
+        guard let self, self.qrSession?.key == key else { return }
+        guard await self.pollOnce(key: key) else { return }
+      }
+    }
+  }
+
+  /// One poll. Returns whether polling should continue.
+  private func pollOnce(key: String) async -> Bool {
+    let status: QRLoginStatus
+    do {
+      status = try await transport.pollQRLogin(key: key)
+    } catch {
+      // A failed poll stops the loop rather than retrying forever against an
+      // endpoint that may be refusing this client.
+      guard qrSession?.key == key else { return false }
+      qrStatus = nil
+      self.status = OperationFailure.classify(error, cancelled: Task.isCancelled)
+        .statusText(operation: "QR sign-in")
+      return false
+    }
+    guard qrSession?.key == key else { return false }
+
+    qrStatus = status
+    switch status {
+    case .waiting:
+      return true
+    case .scanned:
+      self.status = "Scanned; confirm the sign-in on your phone"
+      return true
+    case .expired:
+      self.status = "The code expired; ask for a new one"
+      return false
+    case .authorised(let credential):
+      await adopt(credential, source: "QR")
+      return false
+    }
+  }
+
+  // MARK: - SMS sign-in
+
+  /// Asks the service to text a code (1 request).
+  package func sendVerificationCode() async -> SessionMutationResult {
+    guard beginOperation("Send code") else { return .rejected(.busy) }
+    defer { endOperation() }
+
+    do {
+      try await transport.sendLoginCode(
+        phone: phoneNumber.trimmingCharacters(in: .whitespaces),
+        countryCode: countryCode.trimmingCharacters(in: .whitespaces)
+      )
+      codeWasSent = true
+      status = "Code sent; enter it to sign in"
+      return commit(.inconclusive(.busy))
+    } catch NeteaseAuthError.invalidPhoneNumber {
+      status = "Enter a phone number and country code made of digits only"
+      return commit(.inconclusive(.invalidManualHeader))
+    } catch let error as NeteaseServiceError {
+      status = "Sending the code failed: \(error.source.rawValue) \(error.statusCode)"
+      return commit(.inconclusive(.service(error)))
+    } catch {
+      status = "Sending the code could not reach NetEase"
+      return commit(.inconclusive(.transport))
+    }
+  }
+
+  /// Exchanges the texted code for a session (1 request), then stores it.
+  package func signInWithVerificationCode() async -> SessionMutationResult {
+    guard beginOperation("Phone sign-in") else { return .rejected(.busy) }
+    defer { endOperation() }
+
+    do {
+      let credential = try await transport.signIn(
+        phone: phoneNumber.trimmingCharacters(in: .whitespaces),
+        code: verificationCode.trimmingCharacters(in: .whitespaces),
+        countryCode: countryCode.trimmingCharacters(in: .whitespaces)
+      )
+      return await adopt(credential, source: "Phone")
+    } catch NeteaseAuthError.invalidPhoneNumber {
+      status = "Enter a phone number and code made of digits only"
+      return commit(.inconclusive(.invalidManualHeader))
+    } catch NeteaseAuthError.noSessionInResponse {
+      status = "NetEase accepted the code but returned no session"
+      return commit(.inconclusive(.notAuthenticated))
+    } catch let error as NeteaseServiceError {
+      status = "Phone sign-in \(error.source.rawValue) error \(error.statusCode)"
+      return commit(.inconclusive(.service(error)))
+    } catch {
+      status = "Phone sign-in could not reach NetEase"
+      return commit(.inconclusive(.transport))
+    }
+  }
+
+  // MARK: - Server sign-out and refresh
+
+  /// Ends the session on the server, then locally (2 requests at most).
+  ///
+  /// Order matters. Deleting the Keychain item first would leave a cookie the
+  /// server still honours and nothing left to revoke it with. If the server
+  /// call fails the local state is still cleared — the user asked to sign out
+  /// — but the status says the cookie may still be live rather than claiming a
+  /// clean break.
+  package func signOutEverywhere() async -> SessionMutationResult {
+    guard beginOperation("Sign out") else { return .rejected(.busy) }
+    defer { endOperation() }
+
+    var serverMessage = "Signed out on NetEase and locally"
+    if let credential = try? await vault.load() {
+      do {
+        try await transport.signOut(credential: credential)
+      } catch {
+        serverMessage =
+          "Signed out locally; NetEase did not confirm, so the session may still be live"
+      }
+    } else {
+      serverMessage = "Signed out locally; there was no stored session to revoke"
+    }
+
+    webView.stopLoading()
+    var keychainError: (any Error)?
+    do {
+      try await vault.delete()
+    } catch {
+      keychainError = error
+    }
+    await dataStore.removeData(
+      ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(),
+      modifiedSince: .distantPast
+    )
+    resetSignInForms()
+    load(Self.loginURL)
+
+    if let keychainError {
+      status =
+        keychainErrorMessage(keychainError)
+        + "; WebKit data cleared, the stored session may remain"
+      return commit(.storedItemPresenceUnknown)
+    }
+    status = serverMessage
+    return commit(.signedOut)
+  }
+
+  /// Exchanges the stored session for a fresh one (1 request).
+  ///
+  /// The refreshed cookie is stored only after the service returns one. A
+  /// refresh that answers 200 without a new cookie refreshed nothing, and
+  /// overwriting a working credential with itself would hide that.
+  package func refreshSession() async -> SessionMutationResult {
+    guard beginOperation("Refresh session") else { return .rejected(.busy) }
+    defer { endOperation() }
+
+    let stored: NeteaseCredential?
+    do {
+      stored = try await vault.load()
+    } catch {
+      status = keychainErrorMessage(error)
+      return commit(.inconclusive(failure(error)))
+    }
+    guard let stored else {
+      status = "No stored session to refresh"
+      return commit(.storedItemChanged(hasStoredItem: false))
+    }
+
+    do {
+      let refreshed = try await transport.refreshSession(credential: stored)
+      // The item may have been replaced while the request was in flight; the
+      // refreshed cookie belongs to the one that was sent, not to whatever is
+      // there now.
+      guard try await vault.load() == stored else {
+        status = "Stored session changed; validate again"
+        return commit(.storedItemChanged(hasStoredItem: true))
+      }
+      try await vault.save(refreshed)
+      // A refreshed cookie proves storage, not identity: the account is only
+      // re-established by a validate, so this does not claim one.
+      status = "Session refreshed; validate to confirm the account"
+      return commit(.storedNewCredential)
+    } catch NeteaseAuthError.noSessionInResponse {
+      status = "NetEase accepted the refresh but returned no new session"
+      return commit(.inconclusive(.notAuthenticated))
+    } catch let error as NeteaseServiceError {
+      status = "Refresh \(error.source.rawValue) error \(error.statusCode)"
+      return commit(.inconclusive(.service(error)))
+    } catch let error as CredentialVaultError {
+      status = keychainErrorMessage(error)
+      return commit(.inconclusive(.keychain(error)))
+    } catch {
+      status = "Refresh could not reach NetEase"
+      return commit(.inconclusive(.transport))
+    }
+  }
+
+  /// Stores a credential a sign-in produced and confirms whose it is.
+  ///
+  /// The sign-in response says a session was granted; it does not say which
+  /// account, in a form this app has already agreed to trust. One
+  /// account-status request settles that, so nothing downstream has to work
+  /// from an identity nobody checked.
+  private func adopt(
+    _ credential: NeteaseCredential,
+    source: String
+  ) async -> SessionMutationResult {
+    do {
+      try await vault.save(credential)
+    } catch {
+      status = keychainErrorMessage(error)
+      return commit(.inconclusive(failure(error)))
+    }
+
+    let state: AccountSessionState
+    do {
+      state = try await transport.accountStatus(credential: credential)
+    } catch let error as NeteaseServiceError {
+      status = "\(source) sign-in stored; validation \(error.source.rawValue) \(error.statusCode)"
+      return commit(.storedNewCredential)
+    } catch {
+      status = "\(source) sign-in stored; validate the session to confirm the account"
+      return commit(.storedNewCredential)
+    }
+
+    guard case .authenticated(let account) = state else {
+      status = "\(source) sign-in returned a session NetEase does not recognise"
+      return commit(.storedNewCredential)
+    }
+    resetSignInForms()
+    status = "\(source) sign-in complete"
+    return commit(.validated(account, credential))
+  }
+
+  private func resetSignInForms() {
+    cancelQRPolling()
+    qrSession = nil
+    qrStatus = nil
+    verificationCode = ""
+    codeWasSent = false
   }
 
   /// Reads and validates into locals, then commits once. A timeout, a Keychain

@@ -25,14 +25,14 @@ package final class DiscoveryCoordinator: SessionGuardedCoordinator {
     clearAll()
   }
 
-  package var dailySongs: [PlaylistTrack] = []
+  package var dailySongs: [Track] = []
   package var dailyPlaylists: [DiscoveredPlaylist] = []
   package var personalized: [DiscoveredPlaylist] = []
   package var toplists: [DiscoveredPlaylist] = []
   package var records: [PlayRecordEntry] = []
-  package var similarSongs: [PlaylistTrack] = []
+  package var similarSongs: [Track] = []
   package var similarSeedName: String?
-  package var searchResults: [PlaylistTrack] = []
+  package var searchResults: [Track] = []
   package var searchQuery = ""
   package var recordScope: PlayRecordScope = .allTime
   package var isLoading = false
@@ -142,7 +142,7 @@ package final class DiscoveryCoordinator: SessionGuardedCoordinator {
 
   /// Similar songs for one explicitly chosen seed track (1 request).
   package func loadSimilarSongs(
-    seed: PlaylistTrack,
+    seed: Track,
     session: any SessionProviding
   ) {
     load(

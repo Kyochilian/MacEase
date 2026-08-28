@@ -25,7 +25,7 @@ package protocol NeteaseTransporting: Sendable {
   func songDetails(
     songIDs: [Int64],
     credential: NeteaseCredential
-  ) async throws -> [PlaylistTrack]
+  ) async throws -> [Track]
 
   func likedSongIDs(
     userID: Int64,
@@ -40,7 +40,7 @@ package protocol NeteaseTransporting: Sendable {
 
   func dailyRecommendedSongs(
     credential: NeteaseCredential
-  ) async throws -> [PlaylistTrack]
+  ) async throws -> [Track]
 
   func dailyRecommendedPlaylists(
     credential: NeteaseCredential
@@ -55,12 +55,14 @@ package protocol NeteaseTransporting: Sendable {
   func similarSongs(
     songID: Int64,
     credential: NeteaseCredential
-  ) async throws -> [PlaylistTrack]
+  ) async throws -> [Track]
 
   func searchSongs(
     keywords: String,
     credential: NeteaseCredential
-  ) async throws -> [PlaylistTrack]
+  ) async throws -> [Track]
+
+  func lyrics(songID: Int64, credential: NeteaseCredential) async throws -> Lyrics
 
   func setSongLiked(
     songID: Int64,
@@ -96,6 +98,66 @@ package protocol NeteaseTransporting: Sendable {
     quality: PlaybackQuality,
     credential: NeteaseCredential
   ) async throws -> SongURLResolution
+
+  // MARK: - Sign-in, sign-out and refresh
+
+  func beginQRLogin() async throws -> QRLoginSession
+
+  func pollQRLogin(key: String) async throws -> QRLoginStatus
+
+  func sendLoginCode(phone: String, countryCode: String) async throws
+
+  func signIn(
+    phone: String,
+    code: String,
+    countryCode: String
+  ) async throws -> NeteaseCredential
+
+  func signOut(credential: NeteaseCredential) async throws
+
+  func refreshSession(
+    credential: NeteaseCredential
+  ) async throws -> NeteaseCredential
+
+  // MARK: - Collections
+
+  func collectedAlbums(
+    limit: Int,
+    offset: Int,
+    credential: NeteaseCredential
+  ) async throws -> CatalogPage<Album>
+
+  func followedArtists(
+    limit: Int,
+    offset: Int,
+    credential: NeteaseCredential
+  ) async throws -> CatalogPage<Artist>
+
+  func setAlbumCollected(
+    _ collected: Bool,
+    albumID: Int64,
+    credential: NeteaseCredential
+  ) async throws
+
+  func setArtistFollowed(
+    _ followed: Bool,
+    artistID: Int64,
+    credential: NeteaseCredential
+  ) async throws
+
+  func cloudSongs(
+    limit: Int,
+    offset: Int,
+    credential: NeteaseCredential
+  ) async throws -> CloudPage
+
+  func deleteCloudSong(songID: Int64, credential: NeteaseCredential) async throws
+
+  func setPlaylistPrivate(
+    _ isPrivate: Bool,
+    playlistID: Int64,
+    credential: NeteaseCredential
+  ) async throws
 }
 
 extension NeteaseSession: NeteaseTransporting {}

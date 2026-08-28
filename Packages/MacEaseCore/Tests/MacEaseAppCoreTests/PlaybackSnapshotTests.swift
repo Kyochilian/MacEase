@@ -34,7 +34,7 @@ private struct SnapshotRig {
   /// audio. Tests that need a failure override the transport first.
   func play(_ ids: [Int64] = [101], startIndex: Int = 0) async {
     await transport.setSongURL(.success(makeResolvedAsset(songID: ids[startIndex])))
-    playback.play(tracks: makeTracks(ids), startIndex: startIndex, session: session)
+    playback.play(tracks: makeTracks(ids), startIndex: startIndex, context: .dailyRecommendations, session: session)
     await playback.settleForTesting()
   }
 }
@@ -111,7 +111,7 @@ private struct SnapshotRig {
 @Test @MainActor func aFailedResolveProjectsStoppedRatherThanPlaying() async {
   let rig = SnapshotRig()
 
-  rig.playback.play(tracks: makeTracks([101]), startIndex: 0, session: rig.session)
+  rig.playback.play(tracks: makeTracks([101]), startIndex: 0, context: .dailyRecommendations, session: rig.session)
   await rig.playback.settleForTesting()
   await rig.transport.setSongURL(.failure(URLError(.timedOut)))
   rig.playback.playAgain(session: rig.session)

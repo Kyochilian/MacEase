@@ -11,7 +11,7 @@ import NeteaseKit
 ///
 /// It deliberately carries only what the system surface can express. Album and
 /// artwork are absent because the domain has no field for them yet: the queue
-/// is built from `PlaylistTrack`, which is an id, a name and artist names.
+/// is built from `Track`, which is an id, a name and artist names.
 /// Publishing an empty album string would be indistinguishable from a track
 /// that really has none.
 package struct PlaybackSnapshot: Equatable, Sendable {

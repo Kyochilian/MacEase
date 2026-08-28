@@ -145,10 +145,10 @@ private struct Rig {
   await transport.setSongURL(.success(makeResolvedAsset(songID: 202)))
   await transport.gate.close()
 
-  playback.play(tracks: makeTracks([101]), startIndex: 0, session: session)
+  playback.play(tracks: makeTracks([101]), startIndex: 0, context: .dailyRecommendations, session: session)
   while await transport.gate.arrivalCount() == 0 { await Task.yield() }
 
-  playback.play(tracks: makeTracks([202]), startIndex: 0, session: session)
+  playback.play(tracks: makeTracks([202]), startIndex: 0, context: .dailyRecommendations, session: session)
   #expect(playback.phase == .resolving)
 
   await transport.gate.open()

@@ -40,10 +40,23 @@ package final class PlaybackController {
   @ObservationIgnored private var attempt: PlaybackAttempt?
   @ObservationIgnored private var currentAssetSummary: String?
   @ObservationIgnored private var activeToken: PlaybackIntentGate.Token?
-  @ObservationIgnored private var queueTracks: [PlaylistTrack] = []
+  @ObservationIgnored private var queueTracks: [Track] = []
+  /// Where the queue came from. A restored queue that says only "these forty
+  /// tracks" cannot tell the user what they were listening to.
+  @ObservationIgnored private var queueContext: PlaybackContext?
   @ObservationIgnored private weak var attachedSession: (any SessionProviding)?
   @ObservationIgnored private var sleepTask: Task<Void, Never>?
   @ObservationIgnored private var sleepGeneration = 0
+  /// Playback the machine interrupted, not the user. Kept apart from an
+  /// ordinary pause so the status can say why it stopped, and so a wake or a
+  /// reconnect does not claim credit for a pause the user asked for.
+  @ObservationIgnored private var machinePausedReason: MachinePause?
+
+  /// Why the machine, rather than the user, stopped playback.
+  package enum MachinePause: Equatable, Sendable {
+    case systemSleep
+    case audioOutputLost
+  }
 
   package private(set) var phase: Phase = .idle
   package private(set) var queue: PlaybackQueue?
@@ -79,7 +92,12 @@ package final class PlaybackController {
   package var isActive: Bool {
     phase == .resolving || phase == .playing || phase == .paused
   }
-  package var canPlayAgain: Bool { phase == .failed && attempt != nil }
+  package var canPlayAgain: Bool {
+    // A queue restored at launch also has an entry point, and it sits at
+    // `.idle` because nothing has failed. Every other `.idle` path clears the
+    // attempt, so this cannot resurrect an abandoned one.
+    attempt != nil && (phase == .failed || phase == .idle)
+  }
   /// Whether the retry will resume playback or restore a paused track, so the
   /// button can say which.
   package var retryResumesPlayback: Bool { attempt?.desiredState != .paused }
@@ -89,7 +107,7 @@ package final class PlaybackController {
     queue.map { "\($0.currentIndex + 1) of \($0.count)" }
   }
   /// The entry a similar-songs seed refers to, when a queue is active.
-  package var currentTrack: PlaylistTrack? {
+  package var currentTrack: Track? {
     guard let index = queue?.currentIndex, queueTracks.indices.contains(index) else {
       return nil
     }
@@ -114,7 +132,7 @@ package final class PlaybackController {
       state: state,
       trackID: track?.id,
       title: track?.name ?? trackName,
-      artist: track.flatMap { $0.artists.isEmpty ? nil : $0.artists.joined(separator: ", ") },
+      artist: track?.artistDisplayName,
       durationSeconds: durationSeconds,
       elapsedSeconds: positionSeconds,
       positionEpoch: positionEpoch,
@@ -148,9 +166,77 @@ package final class PlaybackController {
     attachedSession = session
   }
 
+  /// Starts answering for what the machine does: sleep, wake, the output
+  /// device going away and the network coming and going.
+  package func observe(system observer: any SystemEventObserving) {
+    observer.onEvent = { [weak self] event in
+      self?.handle(system: event)
+    }
+    observer.start()
+  }
+
+  /// The Gate C decisions, in one place.
+  ///
+  /// Only two events stop playback, and both are cases where continuing would
+  /// be wrong rather than merely unhelpful: audio during sleep is not heard,
+  /// and audio after the headphones come out is heard by the room. Everything
+  /// else reports and leaves the queue alone — in particular, losing the
+  /// network does not stop a track that is already buffered, and regaining it
+  /// never restarts anything on its own.
+  package func handle(system event: SystemPlaybackEvent) {
+    switch event {
+    case .willSleep:
+      pauseForMachine(.systemSleep, status: "Paused for sleep")
+    case .didWake:
+      guard machinePausedReason == .systemSleep else { return }
+      machinePausedReason = nil
+      // The song URL is short-lived and the machine was away for an unknown
+      // length of time, so the held URL may already be dead. Resume is left to
+      // the user, and it re-resolves if the item has expired.
+      status = "Paused while asleep; press Resume to continue"
+    case .audioOutputDeviceLost:
+      pauseForMachine(.audioOutputLost, status: "Paused: the output device was disconnected")
+    case .audioOutputDeviceChanged:
+      // The previous device still exists, so this is the user choosing a
+      // different destination. AVPlayer follows the system default on its own.
+      guard isActive else { return }
+      status = phase == .playing ? "Playing on the new output device" : status
+    case .networkReachabilityChanged(let reachable):
+      handleReachability(reachable)
+    }
+  }
+
+  private func pauseForMachine(_ reason: MachinePause, status newStatus: String) {
+    guard phase == .playing, pause() else { return }
+    machinePausedReason = reason
+    status = newStatus
+  }
+
+  private func handleReachability(_ reachable: Bool) {
+    guard !reachable else {
+      // Coming back does not resume and does not re-request. It only tells a
+      // user staring at a failure that the button in front of them can now
+      // work, which they otherwise have to discover by pressing it.
+      guard phase == .failed, attempt != nil else { return }
+      status =
+        "Network is back; "
+        + (retryResumesPlayback ? "Play Again" : "Restore Paused")
+        + " re-resolves the song URL"
+      return
+    }
+    guard isActive || phase == .failed else { return }
+    status =
+      phase == .playing
+      // A playing item has buffered audio, and it keeps it. Stopping here
+      // would throw away sound the user can still hear.
+      ? "Network unavailable; playing from what is already buffered"
+      : "Network unavailable"
+  }
+
   package func play(
-    tracks: [PlaylistTrack],
+    tracks: [Track],
     startIndex: Int,
+    context: PlaybackContext,
     session: any SessionProviding
   ) {
     guard canClaimResolution else { return }
@@ -168,6 +254,7 @@ package final class PlaybackController {
     else { return }
 
     queueTracks = tracks
+    queueContext = context
     self.queue = queue
     clearPendingSleepStop()
     startEntry(
@@ -176,6 +263,65 @@ package final class PlaybackController {
       session: session,
       auto: false
     )
+  }
+
+  /// What the queue is, in a form that survives a relaunch, or nil when there
+  /// is nothing worth restoring.
+  ///
+  /// It carries no URL. A song URL expires in minutes, so storing one would
+  /// guarantee a dead address on the next launch; the track and the position
+  /// are what survive, and resuming re-resolves.
+  package func persistedQueue() -> PersistedQueue? {
+    guard let queue, let context = queueContext, !queueTracks.isEmpty else {
+      return nil
+    }
+    return PersistedQueue(
+      tracks: queueTracks,
+      currentIndex: queue.currentIndex,
+      mode: playbackMode,
+      context: context,
+      positionSeconds: currentPosition(),
+      quality: quality,
+      wasPlaying: phase == .playing
+    )
+  }
+
+  /// Puts a stored queue back without playing anything.
+  ///
+  /// Restoring must not issue a request: the user has just launched the app
+  /// and has not asked for audio. It rebuilds the queue and leaves a retry
+  /// entry point, so continuing costs the same single resolve that any other
+  /// explicit play does, and lands at the position that was stored.
+  package func restore(_ persisted: PersistedQueue) {
+    guard !isActive, !persisted.tracks.isEmpty else { return }
+    guard
+      let queue = PlaybackQueue(
+        count: persisted.tracks.count,
+        startIndex: persisted.currentIndex,
+        mode: persisted.mode,
+        using: &rng
+      )
+    else { return }
+
+    queueTracks = persisted.tracks
+    queueContext = persisted.context
+    self.queue = queue
+    playbackMode = persisted.mode
+    quality = persisted.quality
+    let track = persisted.tracks[persisted.currentIndex]
+    trackName = track.name
+    attempt = PlaybackAttempt(
+      songID: track.id,
+      quality: persisted.quality,
+      queueIndex: persisted.currentIndex,
+      resumePosition: persisted.positionSeconds,
+      desiredState: persisted.wasPlaying ? .playing : .paused
+    )
+    movePosition(to: persisted.positionSeconds)
+    status =
+      "Restored \(persisted.context.label); "
+      + (persisted.wasPlaying ? "Resume" : "Restore Paused")
+      + " continues from \(Int(persisted.positionSeconds))s"
   }
 
   /// Returns whether the step was accepted. A caller that reports success to
@@ -231,6 +377,9 @@ package final class PlaybackController {
     output.pause()
     phase = .paused
     attempt?.desiredState = .paused
+    // A user pause owns the pause. `pauseForMachine` re-stamps this
+    // immediately afterwards for the two cases that are not the user.
+    machinePausedReason = nil
     status = "Paused"
     return true
   }
@@ -241,6 +390,7 @@ package final class PlaybackController {
     output.play()
     phase = .playing
     attempt?.desiredState = .playing
+    machinePausedReason = nil
     status = currentAssetSummary.map { "Playing: " + $0 } ?? "Playing"
     return true
   }
@@ -280,8 +430,10 @@ package final class PlaybackController {
     }
     // An explicit Stop retires the retry entry point.
     attempt = nil
+    machinePausedReason = nil
     queue = nil
     queueTracks = []
+    queueContext = nil
     clearPendingSleepStop()
     releasePlayback()
     phase = .idle
@@ -714,6 +866,7 @@ package final class PlaybackController {
     attempt = nil
     queue = nil
     queueTracks = []
+    queueContext = nil
     clearPendingSleepStop()
     releasePlayback()
     phase = .idle
@@ -738,6 +891,7 @@ package final class PlaybackController {
   private func beginIntent() -> PlaybackIntentGate.Token {
     let token = gate.begin()
     activeToken = token
+    machinePausedReason = nil
     playTask?.cancel()
     playTask = nil
     if let operationToken {

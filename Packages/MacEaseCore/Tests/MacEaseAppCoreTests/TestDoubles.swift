@@ -18,8 +18,20 @@ func makeCredential(_ value: String = "music-u") -> NeteaseCredential {
   return credential
 }
 
-func makeTracks(_ ids: [Int64]) -> [PlaylistTrack] {
-  ids.map { PlaylistTrack(id: $0, name: "track-\($0)", artists: ["artist"]) }
+func makeTracks(_ ids: [Int64]) -> [Track] {
+  ids.map {
+    Track(
+      id: $0,
+      name: "track-\($0)",
+      artists: [ArtistRef(id: 900 + $0, name: "artist")],
+      album: AlbumRef(
+        id: 800 + $0,
+        name: "album-\($0)",
+        artworkURL: URL(string: "https://p1.music.126.net/cover-\($0).jpg")
+      ),
+      durationMilliseconds: 200_000
+    )
+  }
 }
 
 func makePlaylists(_ ids: [Int64], owned: Bool = true) -> [UserPlaylist] {
@@ -74,6 +86,7 @@ actor FakeTransport: NeteaseTransporting {
     case toplists
     case similarSongs(Int64)
     case searchSongs(String)
+    case lyrics(Int64)
     case setSongLiked(Int64, Bool)
     case createPlaylist(String)
     case deletePlaylist(Int64)
@@ -81,6 +94,19 @@ actor FakeTransport: NeteaseTransporting {
     case renamePlaylist(Int64, String)
     case setPlaylistSubscribed(Bool, Int64)
     case resolveSongURL(Int64, PlaybackQuality)
+    case beginQRLogin
+    case pollQRLogin(String)
+    case sendLoginCode(String)
+    case signIn(String, String)
+    case signOut
+    case refreshSession
+    case collectedAlbums(offset: Int)
+    case followedArtists(offset: Int)
+    case setAlbumCollected(Int64, Bool)
+    case setArtistFollowed(Int64, Bool)
+    case cloudSongs(offset: Int)
+    case deleteCloudSong(Int64)
+    case setPlaylistPrivate(Int64, Bool)
   }
 
   struct Unprogrammed: Error, Equatable {
@@ -96,15 +122,139 @@ actor FakeTransport: NeteaseTransporting {
   var playlistPages: [UserPlaylistPage] = []
   var playlistPageError: (any Error)?
   var playlistDetailResult: Result<PlaylistDetail, any Error>?
-  var songDetailBatches: [[PlaylistTrack]] = []
+  var songDetailBatches: [[Track]] = []
   var likedIDsResult: Result<[Int64], any Error> = .success([])
-  var discoveryTracksResult: Result<[PlaylistTrack], any Error> = .success([])
+  var discoveryTracksResult: Result<[Track], any Error> = .success([])
   var discoveryPlaylistsResult: Result<[DiscoveredPlaylist], any Error> = .success([])
   var recordsResult: Result<[PlayRecordEntry], any Error> = .success([])
   var writeResult: Result<Void, any Error> = .success(())
   var songURLResult: Result<SongURLResolution, any Error> = .success(
     .unavailable(itemCode: 404, fee: nil)
   )
+  var lyricsResult: Result<Lyrics, any Error> = .success(.none)
+
+  func setLyrics(_ value: Result<Lyrics, any Error>) { lyricsResult = value }
+
+  var qrSessionResult: Result<QRLoginSession, any Error> = .success(
+    QRLoginSession(key: "key", url: URL(string: "https://music.163.com/login?codekey=key")!)
+  )
+  /// Consumed one per poll, so a test can script the whole scan lifecycle.
+  var qrPollResults: [Result<QRLoginStatus, any Error>] = []
+  var signInResult: Result<NeteaseCredential, any Error> = .success(makeCredential("signed-in"))
+  var refreshResult: Result<NeteaseCredential, any Error> = .success(makeCredential("refreshed"))
+  var albumPages: [CatalogPage<Album>] = []
+  var artistPages: [CatalogPage<Artist>] = []
+  var cloudPages: [CloudPage] = []
+  var collectionError: (any Error)?
+
+  func setQRSession(_ value: Result<QRLoginSession, any Error>) { qrSessionResult = value }
+  func setQRPolls(_ value: [Result<QRLoginStatus, any Error>]) { qrPollResults = value }
+  func setSignIn(_ value: Result<NeteaseCredential, any Error>) { signInResult = value }
+  func setRefresh(_ value: Result<NeteaseCredential, any Error>) { refreshResult = value }
+  func setAlbumPages(_ value: [CatalogPage<Album>]) { albumPages = value }
+  func setArtistPages(_ value: [CatalogPage<Artist>]) { artistPages = value }
+  func setCloudPages(_ value: [CloudPage]) { cloudPages = value }
+  func setCollectionError(_ value: (any Error)?) { collectionError = value }
+
+  func beginQRLogin() async throws -> QRLoginSession {
+    await record(.beginQRLogin)
+    return try qrSessionResult.get()
+  }
+
+  func pollQRLogin(key: String) async throws -> QRLoginStatus {
+    await record(.pollQRLogin(key))
+    guard !qrPollResults.isEmpty else { throw Unprogrammed(call: "pollQRLogin") }
+    return try qrPollResults.removeFirst().get()
+  }
+
+  func sendLoginCode(phone: String, countryCode: String) async throws {
+    await record(.sendLoginCode(phone))
+    try writeResult.get()
+  }
+
+  func signIn(
+    phone: String,
+    code: String,
+    countryCode: String
+  ) async throws -> NeteaseCredential {
+    await record(.signIn(phone, code))
+    return try signInResult.get()
+  }
+
+  func signOut(credential: NeteaseCredential) async throws {
+    await record(.signOut)
+    try writeResult.get()
+  }
+
+  func refreshSession(credential: NeteaseCredential) async throws -> NeteaseCredential {
+    await record(.refreshSession)
+    return try refreshResult.get()
+  }
+
+  func collectedAlbums(
+    limit: Int,
+    offset: Int,
+    credential: NeteaseCredential
+  ) async throws -> CatalogPage<Album> {
+    await record(.collectedAlbums(offset: offset))
+    if let collectionError { throw collectionError }
+    guard !albumPages.isEmpty else { throw Unprogrammed(call: "collectedAlbums") }
+    return albumPages.removeFirst()
+  }
+
+  func followedArtists(
+    limit: Int,
+    offset: Int,
+    credential: NeteaseCredential
+  ) async throws -> CatalogPage<Artist> {
+    await record(.followedArtists(offset: offset))
+    if let collectionError { throw collectionError }
+    guard !artistPages.isEmpty else { throw Unprogrammed(call: "followedArtists") }
+    return artistPages.removeFirst()
+  }
+
+  func setAlbumCollected(
+    _ collected: Bool,
+    albumID: Int64,
+    credential: NeteaseCredential
+  ) async throws {
+    await record(.setAlbumCollected(albumID, collected))
+    try writeResult.get()
+  }
+
+  func setArtistFollowed(
+    _ followed: Bool,
+    artistID: Int64,
+    credential: NeteaseCredential
+  ) async throws {
+    await record(.setArtistFollowed(artistID, followed))
+    try writeResult.get()
+  }
+
+  func cloudSongs(
+    limit: Int,
+    offset: Int,
+    credential: NeteaseCredential
+  ) async throws -> CloudPage {
+    await record(.cloudSongs(offset: offset))
+    if let collectionError { throw collectionError }
+    guard !cloudPages.isEmpty else { throw Unprogrammed(call: "cloudSongs") }
+    return cloudPages.removeFirst()
+  }
+
+  func deleteCloudSong(songID: Int64, credential: NeteaseCredential) async throws {
+    await record(.deleteCloudSong(songID))
+    try writeResult.get()
+  }
+
+  func setPlaylistPrivate(
+    _ isPrivate: Bool,
+    playlistID: Int64,
+    credential: NeteaseCredential
+  ) async throws {
+    await record(.setPlaylistPrivate(playlistID, isPrivate))
+    try writeResult.get()
+  }
 
   func setAccountStatus(_ value: Result<AccountSessionState, any Error>) {
     accountStatusResult = value
@@ -114,9 +264,9 @@ actor FakeTransport: NeteaseTransporting {
   func setPlaylistDetail(_ value: Result<PlaylistDetail, any Error>) {
     playlistDetailResult = value
   }
-  func setSongDetailBatches(_ value: [[PlaylistTrack]]) { songDetailBatches = value }
+  func setSongDetailBatches(_ value: [[Track]]) { songDetailBatches = value }
   func setLikedIDs(_ value: Result<[Int64], any Error>) { likedIDsResult = value }
-  func setDiscoveryTracks(_ value: Result<[PlaylistTrack], any Error>) {
+  func setDiscoveryTracks(_ value: Result<[Track], any Error>) {
     discoveryTracksResult = value
   }
   func setDiscoveryPlaylists(_ value: Result<[DiscoveredPlaylist], any Error>) {
@@ -167,7 +317,7 @@ actor FakeTransport: NeteaseTransporting {
   func songDetails(
     songIDs: [Int64],
     credential: NeteaseCredential
-  ) async throws -> [PlaylistTrack] {
+  ) async throws -> [Track] {
     await record(.songDetails(songIDs))
     guard !songDetailBatches.isEmpty else {
       throw Unprogrammed(call: "songDetails")
@@ -183,6 +333,11 @@ actor FakeTransport: NeteaseTransporting {
     return try likedIDsResult.get()
   }
 
+  func lyrics(songID: Int64, credential: NeteaseCredential) async throws -> Lyrics {
+    await record(.lyrics(songID))
+    return try lyricsResult.get()
+  }
+
   func playRecords(
     userID: Int64,
     scope: PlayRecordScope,
@@ -194,7 +349,7 @@ actor FakeTransport: NeteaseTransporting {
 
   func dailyRecommendedSongs(
     credential: NeteaseCredential
-  ) async throws -> [PlaylistTrack] {
+  ) async throws -> [Track] {
     await record(.dailyRecommendedSongs)
     return try discoveryTracksResult.get()
   }
@@ -221,7 +376,7 @@ actor FakeTransport: NeteaseTransporting {
   func similarSongs(
     songID: Int64,
     credential: NeteaseCredential
-  ) async throws -> [PlaylistTrack] {
+  ) async throws -> [Track] {
     await record(.similarSongs(songID))
     return try discoveryTracksResult.get()
   }
@@ -229,7 +384,7 @@ actor FakeTransport: NeteaseTransporting {
   func searchSongs(
     keywords: String,
     credential: NeteaseCredential
-  ) async throws -> [PlaylistTrack] {
+  ) async throws -> [Track] {
     await record(.searchSongs(keywords))
     return try discoveryTracksResult.get()
   }
@@ -304,6 +459,9 @@ actor FakeVault: CredentialStoring {
   }
 
   func setStored(_ credential: NeteaseCredential?) { stored = credential }
+  /// Reads without counting as a `load()`, so a test can check what was
+  /// written without disturbing the load-count assertions.
+  func storedForTesting() -> NeteaseCredential? { stored }
   func setLoadError(_ error: (any Error)?) { loadError = error }
   func setDeleteError(_ error: (any Error)?) { deleteError = error }
 

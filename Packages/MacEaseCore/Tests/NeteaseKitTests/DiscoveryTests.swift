@@ -59,10 +59,9 @@ private func expectWeAPIBody(
 }
 
 @Test func playRecordsClassifiesOnlyTheRequestedScope() throws {
-  let allData = Data(
+  let allData = Data((
     #"{"code":200,"allData":[{"playCount":12,"score":100,"song":{"id":7,"name":"Seven","ar":[{"name":"A"}]}}]}"#
-      .utf8
-  )
+    ).utf8)
 
   let entries = try NeteaseSession.classifyPlayRecords(
     data: allData,
@@ -72,7 +71,7 @@ private func expectWeAPIBody(
   #expect(
     entries == [
       PlayRecordEntry(
-        track: PlaylistTrack(id: 7, name: "Seven", artists: ["A"]),
+        track: Track(id: 7, name: "Seven", artists: [ArtistRef(id: nil, name: "A")]),
         playCount: 12
       )
     ]
@@ -102,14 +101,21 @@ private func expectWeAPIBody(
 
 @Test func dailyRecommendedSongsDecodeDailySongs() throws {
   let tracks = try NeteaseSession.classifyDailyRecommendedSongs(
-    data: Data(
+    data: Data((
       #"{"code":200,"data":{"dailySongs":[{"id":1,"name":"First","ar":[{"name":"A"},{"name":"B"}]}]}}"#
-        .utf8
-    ),
+      ).utf8),
     response: okResponse
   )
 
-  #expect(tracks == [PlaylistTrack(id: 1, name: "First", artists: ["A", "B"])])
+  #expect(
+    tracks == [
+      Track(
+        id: 1,
+        name: "First",
+        artists: [ArtistRef(id: nil, name: "A"), ArtistRef(id: nil, name: "B")]
+      )
+    ]
+  )
 }
 
 @Test func dailyRecommendedPlaylistsRequestAndDecode() throws {
@@ -181,10 +187,9 @@ private func expectWeAPIBody(
 
 @Test func toplistsDecodeTheSummaryList() throws {
   let toplists = try NeteaseSession.classifyToplists(
-    data: Data(
+    data: Data((
       #"{"code":200,"list":[{"id":3778678,"name":"热歌榜"},{"id":19723756,"name":"飙升榜"}]}"#
-        .utf8
-    ),
+      ).utf8),
     response: okResponse
   )
 
@@ -220,27 +225,51 @@ private func expectWeAPIBody(
 }
 
 @Test func similarSongsDecodeTheLegacyArtistsField() throws {
-  // This legacy endpoint returns `artists`, unlike the `ar` used elsewhere.
+  // This legacy endpoint returns `artists`/`album`/`duration`, unlike the
+  // `ar`/`al`/`dt` used elsewhere.
   let tracks = try NeteaseSession.classifySimilarSongs(
-    data: Data(
-      #"{"code":200,"songs":[{"id":33894312,"name":"Later","artists":[{"name":"A"},{"name":"B"}],"album":{"fee":0}}]}"#
-        .utf8
-    ),
+    data: Data((
+      #"{"code":200,"songs":[{"id":33894312,"name":"Later","duration":198000,"#
+        + #""artists":[{"id":5,"name":"A"},{"id":6,"name":"B"}],"#
+        + #""album":{"id":9,"name":"Rec","fee":0}}]}"#
+      ).utf8),
     response: okResponse
   )
 
-  #expect(tracks == [PlaylistTrack(id: 33_894_312, name: "Later", artists: ["A", "B"])])
+  #expect(
+    tracks == [
+      Track(
+        id: 33_894_312,
+        name: "Later",
+        artists: [ArtistRef(id: 5, name: "A"), ArtistRef(id: 6, name: "B")],
+        album: AlbumRef(id: 9, name: "Rec", artworkURL: nil),
+        durationMilliseconds: 198_000
+      )
+    ]
+  )
 }
 
-@Test func similarSongsRejectAnArResponseShape() throws {
-  // Guards the `artists` vs `ar` distinction: an `ar`-shaped payload must
-  // fail loudly rather than silently decode to empty artists.
-  #expect(throws: (any Error).self) {
-    try NeteaseSession.classifySimilarSongs(
-      data: Data(#"{"code":200,"songs":[{"id":1,"name":"X","ar":[{"name":"A"}]}]}"#.utf8),
-      response: okResponse
-    )
-  }
+/// The two spellings are the same fields, so one row decoder reads both. What
+/// must never happen is either spelling decoding to empty artists — that was
+/// the real defect the previous per-endpoint decoders allowed.
+@Test func bothSongRowSpellingsDecodeToTheSameTrack() throws {
+  let legacy = try NeteaseSession.classifySimilarSongs(
+    data: Data((
+      #"{"code":200,"songs":[{"id":1,"name":"X","duration":1000,"#
+        + #""artists":[{"id":7,"name":"A"}],"album":{"id":8,"name":"Al"}}]}"#
+      ).utf8),
+    response: okResponse
+  )
+  let modern = try NeteaseSession.classifySimilarSongs(
+    data: Data((
+      #"{"code":200,"songs":[{"id":1,"name":"X","dt":1000,"#
+        + #""ar":[{"id":7,"name":"A"}],"al":{"id":8,"name":"Al"}}]}"#
+      ).utf8),
+    response: okResponse
+  )
+
+  #expect(legacy == modern)
+  #expect(legacy.first?.artists == [ArtistRef(id: 7, name: "A")])
 }
 
 @Test func searchSongsUsesTheCloudsearchContract() throws {
@@ -270,32 +299,42 @@ private func expectWeAPIBody(
 }
 
 @Test func searchSongsDecodeTheModernArShape() throws {
-  // Cloudsearch returns `ar`, unlike the legacy simiSong endpoint's `artists`.
   let tracks = try NeteaseSession.classifySearchSongs(
-    data: Data(
-      #"{"code":200,"result":{"songCount":1,"songs":[{"id":509781655,"name":"想你就写信 (Live)","dt":238698,"ar":[{"id":6452,"name":"周杰伦"},{"id":12010120,"name":"李硕"}],"al":{"id":36412633,"name":"专辑"}}]}}"#
-        .utf8
-    ),
+    data: Data((
+      #"{"code":200,"result":{"songCount":1,"songs":[{"id":509781655,"name":"想你就写信 (Live)","dt":238698,"ar":[{"id":6452,"name":"周杰伦"},{"id":12010120,"name":"李硕"}],"al":{"id":36412633,"name":"专辑","picUrl":"https://p1.music.126.net/a.jpg"}}]}}"#
+      ).utf8),
     response: okResponse
   )
 
   #expect(
     tracks == [
-      PlaylistTrack(id: 509_781_655, name: "想你就写信 (Live)", artists: ["周杰伦", "李硕"])
+      Track(
+        id: 509_781_655,
+        name: "想你就写信 (Live)",
+        artists: [
+          ArtistRef(id: 6452, name: "周杰伦"),
+          ArtistRef(id: 12_010_120, name: "李硕"),
+        ],
+        album: AlbumRef(
+          id: 36_412_633,
+          name: "专辑",
+          artworkURL: URL(string: "https://p1.music.126.net/a.jpg")
+        ),
+        durationMilliseconds: 238_698
+      )
     ]
   )
 }
 
-@Test func searchSongsRejectALegacyArtistsShape() throws {
-  #expect(throws: (any Error).self) {
-    try NeteaseSession.classifySearchSongs(
-      data: Data(
-        #"{"code":200,"result":{"songs":[{"id":1,"name":"X","artists":[{"name":"A"}]}]}}"#
-          .utf8
-      ),
-      response: okResponse
-    )
-  }
+/// A song row with neither artist spelling is still a usable row: the track
+/// plays. It must decode with no artists rather than throwing away the page.
+@Test func searchSongsDecodeARowWithNoArtistField() throws {
+  let tracks = try NeteaseSession.classifySearchSongs(
+    data: Data(#"{"code":200,"result":{"songs":[{"id":1,"name":"X"}]}}"#.utf8),
+    response: okResponse
+  )
+
+  #expect(tracks == [Track(id: 1, name: "X")])
 }
 
 @Test func discoveryClassifiersDistinguishServiceAndHTTPErrors() throws {

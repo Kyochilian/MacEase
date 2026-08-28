@@ -28,7 +28,7 @@ public struct NeteaseServiceError: Error, Equatable, Sendable {
   }
 }
 
-public enum PlaybackQuality: String, CaseIterable, Sendable {
+public enum PlaybackQuality: String, CaseIterable, Sendable, Codable {
   case standard
   case higher
   case exhigh
@@ -91,28 +91,16 @@ package struct PlaylistDetail: Equatable, Sendable {
   }
 }
 
-package struct PlaylistTrack: Equatable, Sendable {
-  package let id: Int64
-  package let name: String
-  package let artists: [String]
-
-  package init(id: Int64, name: String, artists: [String]) {
-    self.id = id
-    self.name = name
-    self.artists = artists
-  }
-}
-
 package enum PlayRecordScope: Int, CaseIterable, Sendable {
   case allTime = 0
   case lastWeek = 1
 }
 
 package struct PlayRecordEntry: Equatable, Sendable {
-  package let track: PlaylistTrack
+  package let track: Track
   package let playCount: Int
 
-  package init(track: PlaylistTrack, playCount: Int) {
+  package init(track: Track, playCount: Int) {
     self.track = track
     self.playCount = playCount
   }
@@ -270,7 +258,7 @@ public actor NeteaseSession {
   package static let resourceTimeoutSeconds: TimeInterval = 60
 
   private let redirectBlocker: RedirectBlocker
-  private let urlSession: URLSession
+  let urlSession: URLSession
 
   public init() {
     self.init(configuration: URLSessionConfiguration.ephemeral)
@@ -301,7 +289,7 @@ public actor NeteaseSession {
   /// Every endpoint funnels its `URLResponse` through here. A non-HTTP
   /// response is a transport fault with no status code to classify, and the
   /// network is an untrusted boundary, so it is never force-cast.
-  private static func requireHTTPResponse(
+  static func requireHTTPResponse(
     _ response: URLResponse
   ) throws -> HTTPURLResponse {
     guard let http = response as? HTTPURLResponse else {
@@ -367,7 +355,7 @@ public actor NeteaseSession {
   package func songDetails(
     songIDs: [Int64],
     credential: NeteaseCredential
-  ) async throws -> [PlaylistTrack] {
+  ) async throws -> [Track] {
     let request = try Self.songDetailsRequest(
       songIDs: songIDs,
       credential: credential
@@ -418,7 +406,7 @@ public actor NeteaseSession {
 
   package func dailyRecommendedSongs(
     credential: NeteaseCredential
-  ) async throws -> [PlaylistTrack] {
+  ) async throws -> [Track] {
     let request = try Self.dailyRecommendedSongsRequest(credential: credential)
     let (data, response) = try await urlSession.data(for: request)
     let httpResponse = try Self.requireHTTPResponse(response)
@@ -473,7 +461,7 @@ public actor NeteaseSession {
   package func similarSongs(
     songID: Int64,
     credential: NeteaseCredential
-  ) async throws -> [PlaylistTrack] {
+  ) async throws -> [Track] {
     let request = try Self.similarSongsRequest(
       songID: songID,
       credential: credential
@@ -611,7 +599,7 @@ public actor NeteaseSession {
   package func searchSongs(
     keywords: String,
     credential: NeteaseCredential
-  ) async throws -> [PlaylistTrack] {
+  ) async throws -> [Track] {
     let timestamp = Date().timeIntervalSince1970
     let request = try Self.searchSongsRequest(
       keywords: keywords,
@@ -626,6 +614,29 @@ public actor NeteaseSession {
       data: data,
       response: httpResponse
     )
+  }
+
+  /// The song's lyric document (1 request).
+  ///
+  /// This is the same endpoint the Gate A probe uses, but sent with the
+  /// account's credential rather than anonymously: the probe only had to prove
+  /// the endpoint answers, whereas the product needs the account's own
+  /// translation entitlement to decide whether `tlyric` comes back.
+  package func lyrics(
+    songID: Int64,
+    credential: NeteaseCredential
+  ) async throws -> Lyrics {
+    let timestamp = Date().timeIntervalSince1970
+    let request = try Self.lyricsRequest(
+      songID: songID,
+      credential: credential,
+      osVersion: Self.osVersion,
+      buildVersion: String(Int(timestamp)),
+      requestID: Self.requestID(timestamp: timestamp)
+    )
+    let (data, response) = try await urlSession.data(for: request)
+    let httpResponse = try Self.requireHTTPResponse(response)
+    return try Self.classifyLyrics(data: data, response: httpResponse)
   }
 
   public func resolveSongURL(
@@ -811,7 +822,7 @@ public actor NeteaseSession {
     data: Data,
     response: HTTPURLResponse,
     songIDs: [Int64]
-  ) throws -> [PlaylistTrack] {
+  ) throws -> [Track] {
     guard (200..<300).contains(response.statusCode) else {
       throw NeteaseServiceError(source: .http, statusCode: response.statusCode)
     }
@@ -821,13 +832,9 @@ public actor NeteaseSession {
       throw NeteaseServiceError(source: .service, statusCode: code)
     }
     let songs = try JSONDecoder().decode(SongDetailsPayload.self, from: data).songs
-    var tracksByID: [Int64: PlaylistTrack] = [:]
+    var tracksByID: [Int64: Track] = [:]
     for song in songs {
-      tracksByID[song.id] = PlaylistTrack(
-        id: song.id,
-        name: song.name,
-        artists: song.ar.map(\.name)
-      )
+      tracksByID[song.id] = song.track
     }
     return songIDs.compactMap { tracksByID[$0] }
   }
@@ -897,14 +904,7 @@ public actor NeteaseSession {
       throw NeteaseCatalogError.invalidResponse
     }
     return items.map {
-      PlayRecordEntry(
-        track: PlaylistTrack(
-          id: $0.song.id,
-          name: $0.song.name,
-          artists: $0.song.ar.map(\.name)
-        ),
-        playCount: $0.playCount
-      )
+      PlayRecordEntry(track: $0.song.track, playCount: $0.playCount)
     }
   }
 
@@ -923,7 +923,7 @@ public actor NeteaseSession {
   package static func classifyDailyRecommendedSongs(
     data: Data,
     response: HTTPURLResponse
-  ) throws -> [PlaylistTrack] {
+  ) throws -> [Track] {
     guard (200..<300).contains(response.statusCode) else {
       throw NeteaseServiceError(source: .http, statusCode: response.statusCode)
     }
@@ -934,9 +934,7 @@ public actor NeteaseSession {
     }
     let songs = try JSONDecoder().decode(DailyRecommendedSongsPayload.self, from: data)
       .data.dailySongs
-    return songs.map {
-      PlaylistTrack(id: $0.id, name: $0.name, artists: $0.ar.map(\.name))
-    }
+    return songs.map { $0.track }
   }
 
   package static func dailyRecommendedPlaylistsRequest(
@@ -1050,7 +1048,7 @@ public actor NeteaseSession {
   package static func classifySimilarSongs(
     data: Data,
     response: HTTPURLResponse
-  ) throws -> [PlaylistTrack] {
+  ) throws -> [Track] {
     guard (200..<300).contains(response.statusCode) else {
       throw NeteaseServiceError(source: .http, statusCode: response.statusCode)
     }
@@ -1060,9 +1058,7 @@ public actor NeteaseSession {
       throw NeteaseServiceError(source: .service, statusCode: code)
     }
     return try JSONDecoder().decode(SimilarSongsPayload.self, from: data)
-      .songs.map {
-        PlaylistTrack(id: $0.id, name: $0.name, artists: $0.artists.map(\.name))
-      }
+      .songs.map { $0.track }
   }
 
   package static func likeSongRequest(
@@ -1239,7 +1235,7 @@ public actor NeteaseSession {
   package static func classifySearchSongs(
     data: Data,
     response: HTTPURLResponse
-  ) throws -> [PlaylistTrack] {
+  ) throws -> [Track] {
     guard (200..<300).contains(response.statusCode) else {
       throw NeteaseServiceError(source: .http, statusCode: response.statusCode)
     }
@@ -1249,9 +1245,7 @@ public actor NeteaseSession {
       throw NeteaseServiceError(source: .service, statusCode: code)
     }
     return try JSONDecoder().decode(SearchSongsPayload.self, from: data)
-      .result.songs.map {
-        PlaylistTrack(id: $0.id, name: $0.name, artists: $0.ar.map(\.name))
-      }
+      .result.songs.map { $0.track }
   }
 
   /// Every write endpoint acknowledges with `code == 200` and carries no other
@@ -1364,6 +1358,61 @@ public actor NeteaseSession {
     )
   }
 
+  /// The lyric request the product uses. The version fields are all `0`,
+  /// which is how this endpoint is asked for every document it holds rather
+  /// than for a delta against a version the client already has; `cp:false`
+  /// suppresses the copyright banner, which is not lyric content.
+  package static func lyricsRequest(
+    songID: Int64,
+    credential: NeteaseCredential,
+    osVersion: String,
+    buildVersion: String,
+    requestID: String
+  ) throws -> URLRequest {
+    let headerFields = eapiHeaderFields(
+      credential: credential,
+      osVersion: osVersion,
+      buildVersion: buildVersion,
+      requestID: requestID
+    )
+    let header = try eapiHeaderJSON(headerFields)
+    let json =
+      #"{"id":"\#(songID)","cp":false,"tv":0,"lv":0,"rv":0,"kv":0,"yv":0,"#
+      + #""ytv":0,"yrv":0,"e_r":false,"header":\#(header)}"#
+    return try eapiRequest(
+      endpoint: lyricsEndpoint,
+      json: json,
+      headerFields: headerFields
+    )
+  }
+
+  /// A song with no lyrics is a fact, not a failure. An instrumental answers
+  /// `nolyric`, an unindexed upload answers `uncollected`, and a track whose
+  /// document is present but empty is the same thing said a third way. All
+  /// three become `.none`, so the panel says "no lyrics" instead of offering a
+  /// retry that cannot change the answer.
+  package static func classifyLyrics(
+    data: Data,
+    response: HTTPURLResponse
+  ) throws -> Lyrics {
+    guard (200..<300).contains(response.statusCode) else {
+      throw NeteaseServiceError(source: .http, statusCode: response.statusCode)
+    }
+
+    let payload = try JSONDecoder().decode(LyricsPayload.self, from: data)
+    guard payload.code == 200 else {
+      throw NeteaseServiceError(source: .service, statusCode: payload.code)
+    }
+    guard payload.nolyric != true, payload.uncollected != true else {
+      return .none
+    }
+    return LyricsParser.parse(
+      lrc: payload.lrc?.lyric,
+      translation: payload.tlyric?.lyric,
+      romanisation: payload.romalrc?.lyric
+    )
+  }
+
   package static func lyricsProbeRequest(songID: Int64) throws -> URLRequest {
     let json =
       #"{"id":"\#(songID)","cp":false,"tv":0,"lv":0,"rv":0,"kv":0,"yv":0,"ytv":0,"yrv":0,"e_r":false,"header":{}}"#
@@ -1419,7 +1468,7 @@ public actor NeteaseSession {
     return LyricsProbeOutcome(status: status, setsCookie: setsCookie)
   }
 
-  private static func cookieHeader(_ credential: NeteaseCredential) -> String {
+  static func cookieHeader(_ credential: NeteaseCredential) -> String {
     credential.cookies
       .map { "\($0.name.rawValue)=\($0.value)" }
       .joined(separator: "; ")
@@ -1527,7 +1576,7 @@ public actor NeteaseSession {
       #"{"alg":"itembased","trackId":\#(songID),"like":\#(liked),"time":"3","csrf_token":\#(csrf)}"#
   }
 
-  private static func eapiHeaderFields(
+  static func eapiHeaderFields(
     credential: NeteaseCredential,
     osVersion: String,
     buildVersion: String,
@@ -1545,7 +1594,7 @@ public actor NeteaseSession {
     ]
   }
 
-  private static func eapiHeaderJSON(
+  static func eapiHeaderJSON(
     _ fields: [(String, String)]
   ) throws -> String {
     "{"
@@ -1578,7 +1627,7 @@ public actor NeteaseSession {
     return request
   }
 
-  private static func weapiParameters(
+  static func weapiParameters(
     json: String,
     secretKey: String?
   ) throws -> WeAPIParameters {
@@ -1588,7 +1637,7 @@ public actor NeteaseSession {
     return try NeteaseCrypto.weapi(json: json)
   }
 
-  private static func csrfJSONValue(
+  static func csrfJSONValue(
     _ credential: NeteaseCredential
   ) throws -> String {
     String(
@@ -1601,11 +1650,11 @@ public actor NeteaseSession {
   /// path sends. It states the real OS and MacEase's own version/channel; it
   /// never claims to be the official NetEase client and carries no fabricated
   /// device or tracking identifier.
-  private static func platformCookies() -> String {
+  static func platformCookies() -> String {
     "os=osx; osver=\(osVersion); appver=0.1; channel=github"
   }
 
-  private static func weapiRequest(
+  static func weapiRequest(
     url: URL,
     parameters: WeAPIParameters,
     credential: NeteaseCredential,
@@ -1632,12 +1681,12 @@ public actor NeteaseSession {
     return request
   }
 
-  private static var osVersion: String {
+  static var osVersion: String {
     let version = ProcessInfo.processInfo.operatingSystemVersion
     return "\(version.majorVersion).\(version.minorVersion)"
   }
 
-  private static func requestID(timestamp: TimeInterval) -> String {
+  static func requestID(timestamp: TimeInterval) -> String {
     "\(Int(timestamp * 1000))_\(String(format: "%04d", Int.random(in: 0..<1000)))"
   }
 }
@@ -1741,17 +1790,7 @@ private struct PlaylistDetailPayload: Decodable {
 }
 
 private struct SongDetailsPayload: Decodable {
-  let songs: [Song]
-
-  struct Song: Decodable {
-    let id: Int64
-    let name: String
-    let ar: [Artist]
-  }
-
-  struct Artist: Decodable {
-    let name: String
-  }
+  let songs: [SongRowPayload]
 }
 
 private struct LikedSongIDsPayload: Decodable {
@@ -1764,17 +1803,7 @@ private struct PlayRecordsPayload: Decodable {
 
   struct Item: Decodable {
     let playCount: Int
-    let song: Song
-  }
-
-  struct Song: Decodable {
-    let id: Int64
-    let name: String
-    let ar: [Artist]
-  }
-
-  struct Artist: Decodable {
-    let name: String
+    let song: SongRowPayload
   }
 }
 
@@ -1782,17 +1811,7 @@ private struct DailyRecommendedSongsPayload: Decodable {
   let data: Inner
 
   struct Inner: Decodable {
-    let dailySongs: [Song]
-  }
-
-  struct Song: Decodable {
-    let id: Int64
-    let name: String
-    let ar: [Artist]
-  }
-
-  struct Artist: Decodable {
-    let name: String
+    let dailySongs: [SongRowPayload]
   }
 }
 
@@ -1827,32 +1846,12 @@ private struct SearchSongsPayload: Decodable {
   let result: Result
 
   struct Result: Decodable {
-    let songs: [Song]
-  }
-
-  struct Song: Decodable {
-    let id: Int64
-    let name: String
-    let ar: [Artist]
-  }
-
-  struct Artist: Decodable {
-    let name: String
+    let songs: [SongRowPayload]
   }
 }
 
 private struct SimilarSongsPayload: Decodable {
-  let songs: [Song]
-
-  struct Song: Decodable {
-    let id: Int64
-    let name: String
-    let artists: [Artist]
-  }
-
-  struct Artist: Decodable {
-    let name: String
-  }
+  let songs: [SongRowPayload]
 }
 
 /// The minimum lyric payload documented by the authoritative local API
@@ -1890,6 +1889,17 @@ private struct LyricsProbePayload: Decodable {
   let code: Int
   let lrc: LyricsContent?
   let yrc: LyricsContent?
+  let nolyric: Bool?
+  let uncollected: Bool?
+}
+
+/// The product lyric payload. `tlyric` is the translation and `romalrc` the
+/// romanisation; both are separate LRC documents keyed to the same timeline.
+private struct LyricsPayload: Decodable {
+  let code: Int
+  let lrc: LyricsContent?
+  let tlyric: LyricsContent?
+  let romalrc: LyricsContent?
   let nolyric: Bool?
   let uncollected: Bool?
 }

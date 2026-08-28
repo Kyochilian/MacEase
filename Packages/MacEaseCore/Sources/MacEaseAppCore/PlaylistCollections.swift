@@ -57,6 +57,20 @@ package struct PlaylistCollection: Equatable, Sendable {
     freshness = .staleAfterMutation
   }
 
+  /// Seeds the list from what was stored for this account at the last launch.
+  ///
+  /// It is marked stale on purpose. These rows are what the server said some
+  /// time ago, so they are worth showing instead of an empty window, but the
+  /// cursor they came with no longer names a server position and paging from
+  /// it could skip or repeat rows. Reloading replaces them.
+  package mutating func restore(_ playlists: [UserPlaylist]) {
+    guard self.playlists.isEmpty, !playlists.isEmpty else { return }
+    self.playlists = playlists
+    nextOffset = 0
+    serverHasMore = false
+    freshness = .staleAfterMutation
+  }
+
   package mutating func remove(id: Int64) {
     playlists.removeAll { $0.id == id }
   }
@@ -93,7 +107,7 @@ package struct PlaylistCollection: Equatable, Sendable {
 package struct PlaylistTrackCollection: Equatable, Sendable {
   package private(set) var trackIDs: [Int64] = []
   package private(set) var loadedIDCount = 0
-  package private(set) var tracks: [PlaylistTrack] = []
+  package private(set) var tracks: [Track] = []
   package private(set) var freshness: CollectionFreshness = .empty
 
   package init() {}
@@ -128,7 +142,7 @@ package struct PlaylistTrackCollection: Equatable, Sendable {
   /// for, which is what advances the cursor: the server may omit tracks it no
   /// longer serves, and the cursor must not stall on them.
   package mutating func appendBatch(
-    _ batch: [PlaylistTrack],
+    _ batch: [Track],
     requestedCount: Int
   ) {
     tracks.append(contentsOf: batch)

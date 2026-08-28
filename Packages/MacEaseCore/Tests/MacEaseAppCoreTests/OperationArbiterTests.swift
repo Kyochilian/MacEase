@@ -282,7 +282,7 @@ private struct Rig {
 
   rig.discovery.loadDailySongs(session: rig.session)
   await rig.waitForFirstRequest()
-  rig.playback.play(tracks: makeTracks([7]), startIndex: 0, session: rig.session)
+  rig.playback.play(tracks: makeTracks([7]), startIndex: 0, context: .dailyRecommendations, session: rig.session)
 
   while await rig.transport.gate.arrivalCount() < 2 { await Task.yield() }
   #expect(await rig.transport.callCount() == 2)
@@ -402,7 +402,7 @@ private struct Rig {
   let rig = Rig()
   await rig.transport.gate.close()
 
-  rig.playback.play(tracks: makeTracks([9]), startIndex: 0, session: rig.session)
+  rig.playback.play(tracks: makeTracks([9]), startIndex: 0, context: .dailyRecommendations, session: rig.session)
   await rig.waitForFirstRequest()
   #expect(rig.arbiter.canStart())
 
@@ -420,7 +420,12 @@ private struct Rig {
 @Test @MainActor func autoAdvanceRunsAlongsideAnIndependentRead() async {
   let rig = Rig()
   await rig.transport.setSongURL(.success(makeResolvedAsset(songID: 1)))
-  rig.playback.play(tracks: makeTracks([1, 2]), startIndex: 0, session: rig.session)
+  rig.playback.play(
+    tracks: makeTracks([1, 2]),
+    startIndex: 0,
+    context: .dailyRecommendations,
+    session: rig.session
+  )
   await rig.playback.settleForTesting()
   #expect(rig.playback.phase == .playing)
 

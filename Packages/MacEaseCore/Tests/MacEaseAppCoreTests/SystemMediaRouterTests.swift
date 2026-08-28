@@ -42,7 +42,7 @@ private final class RouterRig {
 
   func play(_ ids: [Int64] = [101, 102]) async {
     await transport.setSongURL(.success(makeResolvedAsset(songID: ids[0])))
-    playback.play(tracks: makeTracks(ids), startIndex: 0, session: session)
+    playback.play(tracks: makeTracks(ids), startIndex: 0, context: .dailyRecommendations, session: session)
     await playback.settleForTesting()
   }
 }

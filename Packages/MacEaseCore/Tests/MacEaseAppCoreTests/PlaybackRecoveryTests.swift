@@ -31,7 +31,7 @@ private struct PlaybackRig {
   }
 
   func play(_ ids: [Int64] = [101], startIndex: Int = 0) async {
-    playback.play(tracks: makeTracks(ids), startIndex: startIndex, session: session)
+    playback.play(tracks: makeTracks(ids), startIndex: startIndex, context: .dailyRecommendations, session: session)
     await playback.settleForTesting()
   }
 
@@ -350,13 +350,13 @@ private struct PlaybackRig {
     .success(makeResolvedAsset(songID: 101, urlString: "https://m8.music.126.net/old.mp3"))
   )
   rig.output.blockNextPrepare()
-  rig.playback.play(tracks: makeTracks([101]), startIndex: 0, session: rig.session)
+  rig.playback.play(tracks: makeTracks([101]), startIndex: 0, context: .dailyRecommendations, session: rig.session)
   while !rig.output.prepareIsBlocked { await Task.yield() }
 
   await rig.transport.setSongURL(
     .success(makeResolvedAsset(songID: 202, urlString: "https://m8.music.126.net/new.mp3"))
   )
-  rig.playback.play(tracks: makeTracks([202]), startIndex: 0, session: rig.session)
+  rig.playback.play(tracks: makeTracks([202]), startIndex: 0, context: .dailyRecommendations, session: rig.session)
   await rig.playback.settleForTesting()
   rig.output.resumeBlockedPrepare()
   await Task.yield()

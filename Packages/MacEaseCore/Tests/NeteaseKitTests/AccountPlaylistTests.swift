@@ -136,10 +136,9 @@ private let accountCredential = testCredential(musicU: "music-u-test", csrf: "cs
     headerFields: nil
   )!
   let page = try NeteaseSession.classifyUserPlaylists(
-    data: Data(
+    data: Data((
       #"{"code":200,"more":true,"playlist":[{"id":1,"name":"Created","trackCount":12,"creator":{"userId":987654321}},{"id":2,"name":"Saved","trackCount":4,"creator":{"userId":123}}]}"#
-        .utf8
-    ),
+      ).utf8),
     response: response,
     userID: 987_654_321
   )
@@ -223,10 +222,9 @@ private let accountCredential = testCredential(musicU: "music-u-test", csrf: "cs
     headerFields: nil
   )!
   let detail = try NeteaseSession.classifyPlaylistDetail(
-    data: Data(
+    data: Data((
       #"{"code":200,"playlist":{"id":24381616,"name":"Mix","trackIds":[{"id":3},{"id":1},{"id":2}],"tracks":[{"id":3}]}}"#
-        .utf8
-    ),
+      ).utf8),
     response: response,
     playlistID: 24_381_616
   )
@@ -297,7 +295,7 @@ private let accountCredential = testCredential(musicU: "music-u-test", csrf: "cs
   }
 }
 
-@Test func songDetailsDecodesMinimalTrackMetadata() throws {
+@Test func songDetailsDecodesTrackMetadata() throws {
   let response = HTTPURLResponse(
     url: URL(string: "https://music.163.com")!,
     statusCode: 200,
@@ -305,20 +303,86 @@ private let accountCredential = testCredential(musicU: "music-u-test", csrf: "cs
     headerFields: nil
   )!
   let tracks = try NeteaseSession.classifySongDetails(
-    data: Data(
-      #"{"code":200,"songs":[{"id":1,"name":"First","ar":[]},{"id":3,"name":"Third","ar":[{"name":"A"},{"name":"B"}]},{"id":99,"name":"Extra","ar":[]}]}"#
-        .utf8
-    ),
+    data: Data((
+      #"{"code":200,"songs":["#
+        + #"{"id":1,"name":"First","ar":[]},"#
+        + #"{"id":3,"name":"Third","dt":215000,"ar":[{"id":11,"name":"A"},{"id":12,"name":"B"}],"#
+        + #""al":{"id":80,"name":"Album","picUrl":"https://p1.music.126.net/cover.jpg"}},"#
+        + #"{"id":99,"name":"Extra","ar":[]}]}"#
+      ).utf8),
     response: response,
     songIDs: [3, 1, 3]
   )
 
+  let third = Track(
+    id: 3,
+    name: "Third",
+    artists: [ArtistRef(id: 11, name: "A"), ArtistRef(id: 12, name: "B")],
+    album: AlbumRef(
+      id: 80,
+      name: "Album",
+      artworkURL: URL(string: "https://p1.music.126.net/cover.jpg")
+    ),
+    durationMilliseconds: 215000
+  )
+  #expect(tracks == [third, Track(id: 1, name: "First"), third])
+  #expect(tracks[0].artistDisplayName == "A, B")
+  #expect(tracks[0].durationSeconds == 215)
+  #expect(tracks[1].artistDisplayName == nil)
+}
+
+/// NetEase writes "no artist page" both as a missing `id` and as `id: 0`. A
+/// row that spells it either way must not become a link onto nothing.
+@Test func songDetailsTreatsAbsentAndZeroIdentifiersAsNotNavigable() throws {
+  let response = HTTPURLResponse(
+    url: URL(string: "https://music.163.com")!,
+    statusCode: 200,
+    httpVersion: nil,
+    headerFields: nil
+  )!
+  let tracks = try NeteaseSession.classifySongDetails(
+    data: Data((
+      #"{"code":200,"songs":[{"id":1,"name":"First","#
+        + #""ar":[{"name":"Nameless"},{"id":0,"name":"Zero"}],"#
+        + #""al":{"id":0,"name":"Single"}}]}"#
+      ).utf8),
+    response: response,
+    songIDs: [1]
+  )
+
+  #expect(tracks[0].artists == [
+    ArtistRef(id: nil, name: "Nameless"),
+    ArtistRef(id: nil, name: "Zero"),
+  ])
+  #expect(tracks[0].album == AlbumRef(id: nil, name: "Single", artworkURL: nil))
+}
+
+/// Artwork is an address the server chose, so it is validated like any other.
+/// A host MacEase does not serve from is dropped rather than failing the
+/// playlist that carried it.
+@Test func songDetailsRefusesArtworkFromAnUnapprovedHost() throws {
+  let response = HTTPURLResponse(
+    url: URL(string: "https://music.163.com")!,
+    statusCode: 200,
+    httpVersion: nil,
+    headerFields: nil
+  )!
+  let tracks = try NeteaseSession.classifySongDetails(
+    data: Data((
+      #"{"code":200,"songs":[{"id":1,"name":"First","ar":[],"#
+        + #""al":{"id":5,"name":"A","picUrl":"https://evil.example.com/cover.jpg"}},"#
+        + #"{"id":2,"name":"Second","ar":[],"#
+        + #""al":{"id":6,"name":"B","picUrl":"http://p2.music.126.net/cover.jpg"}}]}"#
+      ).utf8),
+    response: response,
+    songIDs: [1, 2]
+  )
+
+  #expect(tracks[0].artworkURL == nil)
+  // Served over TLS on the same host, so the legacy http spelling is upgraded
+  // rather than refused.
   #expect(
-    tracks == [
-      PlaylistTrack(id: 3, name: "Third", artists: ["A", "B"]),
-      PlaylistTrack(id: 1, name: "First", artists: []),
-      PlaylistTrack(id: 3, name: "Third", artists: ["A", "B"]),
-    ]
+    tracks[1].artworkURL == URL(string: "https://p2.music.126.net/cover.jpg")
   )
 }
 
@@ -356,7 +420,7 @@ private let accountCredential = testCredential(musicU: "music-u-test", csrf: "cs
     songIDs: [3, 1]
   )
 
-  #expect(tracks == [PlaylistTrack(id: 3, name: "Third", artists: [])])
+  #expect(tracks == [Track(id: 3, name: "Third", artists: [])])
 }
 
 @Test func playlistAndSongDetailsDistinguishHTTPAndServiceErrors() throws {

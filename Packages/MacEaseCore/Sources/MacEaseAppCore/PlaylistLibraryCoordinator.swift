@@ -30,7 +30,7 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
   package var status = "Validate the session before loading playlists"
 
   package var playlists: [UserPlaylist] { collection.playlists }
-  package var tracks: [PlaylistTrack] { detail.tracks }
+  package var tracks: [Track] { detail.tracks }
   /// Only true when the cursor still names the same server position.
   package var canLoadMore: Bool { collection.canLoadMore }
   package var canLoadMoreTracks: Bool { detail.canLoadMore }
@@ -47,6 +47,16 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
     self.transport = transport
     self.vault = vault
     self.arbiter = arbiter
+  }
+
+  /// Shows what was stored for this account at the last launch, so the window
+  /// is not empty while the user decides whether to reload. It issues no
+  /// request and never overwrites rows the server has already confirmed this
+  /// run.
+  package func restore(playlists: [UserPlaylist]) {
+    guard !playlists.isEmpty, collection.playlists.isEmpty else { return }
+    collection.restore(playlists)
+    status = "Showing \(playlists.count) playlists from your last session; reload to refresh"
   }
 
   package func load(reset: Bool, session: any SessionProviding) {
@@ -278,7 +288,7 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
   @discardableResult
   package func setLiked(
     _ liked: Bool,
-    for track: PlaylistTrack,
+    for track: Track,
     session: any SessionProviding
   ) -> Bool {
     write(
@@ -384,7 +394,7 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
   }
 
   package func addTrack(
-    _ track: PlaylistTrack,
+    _ track: Track,
     to playlist: UserPlaylist,
     session: any SessionProviding
   ) {
