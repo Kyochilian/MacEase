@@ -389,3 +389,31 @@ private let okResponse = HTTPURLResponse(
 
   #expect(outcome.status == .noLyrics)
 }
+
+// MARK: - Timeout policy
+//
+// M1-05: a request that stalls has to stop. With no retry anywhere, an
+// unbounded request would hold its operation slot for the life of the process.
+
+@Test func theSessionPinsItsOwnTimeoutsRegardlessOfTheConfigurationGivenToIt() {
+  let configuration = URLSessionConfiguration.ephemeral
+  // A caller trying to widen the policy, including the seven-day resource
+  // default `ephemeral` would otherwise supply.
+  configuration.timeoutIntervalForRequest = 3600
+  configuration.timeoutIntervalForResource = 604_800
+  configuration.waitsForConnectivity = true
+
+  _ = NeteaseSession(configuration: configuration)
+
+  #expect(configuration.timeoutIntervalForRequest == NeteaseSession.requestTimeoutSeconds)
+  #expect(configuration.timeoutIntervalForResource == NeteaseSession.resourceTimeoutSeconds)
+  // Queueing a request until connectivity returns would fire it later without
+  // the user asking, which is the same problem as a retry.
+  #expect(configuration.waitsForConnectivity == false)
+}
+
+@Test func theResourceCeilingIsNotBelowTheRequestTimeout() {
+  // A resource ceiling under the per-request timeout would cut requests short
+  // of the bound the request timeout promises.
+  #expect(NeteaseSession.resourceTimeoutSeconds >= NeteaseSession.requestTimeoutSeconds)
+}

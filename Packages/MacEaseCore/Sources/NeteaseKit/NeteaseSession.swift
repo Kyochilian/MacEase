@@ -258,6 +258,17 @@ public actor NeteaseSession {
     url: URL(string: "https://interfacepc.music.163.com/eapi/playlist/unsubscribe")!
   )
 
+  /// How long a single request may wait for the next byte before the task
+  /// fails. Every NetEase endpoint here answers in well under a second on a
+  /// working connection; a request still open after this is not slow, it is
+  /// stuck. There is no retry, so this is a stop, not a backoff.
+  package static let requestTimeoutSeconds: TimeInterval = 20
+
+  /// The ceiling on one request from start to finish. `ephemeral` defaults to
+  /// seven days, which for an app that never retries means a wedged request
+  /// holds its operation slot until the process ends.
+  package static let resourceTimeoutSeconds: TimeInterval = 60
+
   private let redirectBlocker: RedirectBlocker
   private let urlSession: URLSession
 
@@ -266,12 +277,18 @@ public actor NeteaseSession {
   }
 
   /// Package-scoped so tests can install a `URLProtocol` stub. Callers cannot
-  /// widen the cookie or cache policy: both are pinned here regardless of the
-  /// configuration passed in.
+  /// widen the cookie, cache or timeout policy: all are pinned here regardless
+  /// of the configuration passed in.
   package init(configuration: URLSessionConfiguration) {
     configuration.httpCookieStorage = nil
     configuration.httpShouldSetCookies = false
     configuration.urlCache = nil
+    configuration.timeoutIntervalForRequest = Self.requestTimeoutSeconds
+    configuration.timeoutIntervalForResource = Self.resourceTimeoutSeconds
+    // A request that fails because the network is down must surface as a
+    // failure the user can see and act on, not sit in a queue waiting for
+    // connectivity to return and then fire without being asked.
+    configuration.waitsForConnectivity = false
     let redirectBlocker = RedirectBlocker()
     self.redirectBlocker = redirectBlocker
     self.urlSession = URLSession(
