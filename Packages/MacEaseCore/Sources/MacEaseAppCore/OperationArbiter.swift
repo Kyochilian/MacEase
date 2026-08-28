@@ -145,14 +145,25 @@ package final class OperationArbiter {
     return OperationToken(id: id, kind: .exclusive)
   }
 
-  /// Atomically turns the only active read into a session mutation. No gap is
-  /// exposed in which another read or exclusive operation can enter.
+  /// Turns an active read into a session mutation without exposing a gap in
+  /// which another operation could enter.
+  ///
+  /// Unlike `begin`, this does not wait for the read side to empty. `begin`
+  /// starts a session mutation the user asked for, and can reasonably wait for
+  /// a quiet moment. Promotion happens when a read has already proved the
+  /// credential is dead, and refusing it because an unrelated read is running
+  /// would leave the app using a credential it knows is invalid — the identity
+  /// truth would depend on request timing. The concurrent reads are about to be
+  /// cleared by the identity change anyway.
+  ///
+  /// It still refuses while a write or another session mutation owns the
+  /// exclusive slot, because that is the guarantee that stops a sent write
+  /// from being cancelled.
   package func promote(
     _ readToken: OperationToken,
     name: String
   ) -> OperationToken? {
     guard readToken.kind == .read, active == nil,
-      activeReadTokens.count == 1,
       activeReadTokens.contains(readToken.id)
     else { return nil }
 

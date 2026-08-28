@@ -735,10 +735,12 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
         case .notCurrent:
           status = "Session changed; validate again"
         case .busy:
-          status = "Another read is active; validate again"
+          status = "Session busy; validate again"
         case .failed:
+          // The credential has stopped being validated even if the Keychain
+          // item could not be deleted, so its data must go too.
           clearLibrary()
-          status = "Session invalidation failed"
+          status = "Stored session expired; sign in again"
         }
       } else {
         status = "\(operation) \(serviceError.source.rawValue) error \(serviceError.statusCode)"

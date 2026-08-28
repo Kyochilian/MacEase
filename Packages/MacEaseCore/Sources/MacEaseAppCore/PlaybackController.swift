@@ -682,7 +682,7 @@ package final class PlaybackController {
         abandonPlayback(status: "Session changed; validate again")
       case .busy:
         phase = .failed
-        status = "Another read is active; validate again"
+        status = "Session busy; validate again"
       case .failed:
         abandonPlayback(status: "Session invalidation failed")
       }

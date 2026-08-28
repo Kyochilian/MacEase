@@ -63,7 +63,7 @@ import Testing
   #expect(arbiter.activeReadCount == 0)
 }
 
-@Test @MainActor func onlyTheSoleReadCanPromoteToSessionMutation() {
+@Test @MainActor func aReadPromotesToSessionMutationWithoutAGap() {
   let arbiter = OperationArbiter()
   let read = arbiter.begin(name: "Playlist", effect: .read)!
   let promoted = arbiter.promote(read, name: "Invalidate session")!
@@ -75,12 +75,41 @@ import Testing
   #expect(arbiter.begin(name: "Import", effect: .sessionMutation) == nil)
   #expect(arbiter.end(read, outcome: .cancelled) == nil)
   #expect(arbiter.end(promoted, outcome: .applied) == .applied)
+}
 
-  let first = arbiter.begin(name: "Playlist", effect: .read)!
-  let second = arbiter.begin(name: "Discover", effect: .read)!
-  #expect(arbiter.promote(first, name: "Invalidate session") == nil)
-  arbiter.end(first, outcome: .cancelled)
-  arbiter.end(second, outcome: .cancelled)
+/// An unrelated read must not decide whether a credential the server has
+/// already disproved gets retired. Promotion is forced by evidence in hand,
+/// unlike `begin`, which starts a mutation the user asked for and can wait.
+/// Reported by the 2026-08-27 review.
+@Test @MainActor func anUnrelatedReadDoesNotBlockPromotion() {
+  let arbiter = OperationArbiter()
+  let playlist = arbiter.begin(name: "Playlist", effect: .read)!
+  let discovery = arbiter.begin(name: "Discover", effect: .read)!
+
+  let promoted = arbiter.promote(playlist, name: "Invalidate session")
+  #expect(promoted != nil)
+  #expect(arbiter.active?.effect == .sessionMutation)
+  // The other read keeps running; it is cleared by the identity change.
+  #expect(arbiter.activeReadCount == 1)
+
+  arbiter.end(discovery, outcome: .cancelled)
+  #expect(arbiter.end(promoted!, outcome: .applied) == .applied)
+}
+
+/// Promotion still refuses a token that does not own a live read, so a stale
+/// completion cannot take the exclusive slot out from under someone else.
+@Test @MainActor func promotionRefusesATokenThatOwnsNothing() {
+  let arbiter = OperationArbiter()
+
+  let stale = arbiter.begin(name: "Playlist", effect: .read)!
+  arbiter.end(stale, outcome: .cancelled)
+  #expect(arbiter.promote(stale, name: "Invalidate session") == nil)
+
+  let write = arbiter.begin(name: "Like", effect: .write)!
+  // A write's token is exclusive, not a read, so it cannot be promoted.
+  #expect(arbiter.promote(write, name: "Invalidate session") == nil)
+  #expect(arbiter.active?.effect == .write)
+  arbiter.end(write, outcome: .applied)
 }
 
 @Test @MainActor func aWriteCancelledBeforeItIsSentIsJustCancelled() {

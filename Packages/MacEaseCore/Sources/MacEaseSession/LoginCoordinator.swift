@@ -246,8 +246,14 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
   }
 
   /// Called from another coordinator's 301 error path with its active read
-  /// token. Promotion is atomic: a second active read makes this return busy,
-  /// and the request is left for the user to validate again.
+  /// token. Promotion does not wait for other reads, so an unrelated read can
+  /// no longer decide whether a proven-dead credential is retired.
+  ///
+  /// If a write owns the exclusive slot the Keychain delete cannot run without
+  /// risking that write, but the identity fact must not be thrown away either:
+  /// the credential stops being validated immediately, and the stored item is
+  /// reported as being of unknown state rather than silently left as if it
+  /// were still good.
   package func invalidateStoredSession(
     matching credential: NeteaseCredential,
     message: String,
@@ -260,7 +266,11 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
         name: "Invalidate session"
       )
     else {
-      return .busy
+      // The server disproved this credential. Keeping it validated until the
+      // user happens to press Validate would let later requests use it.
+      status = "Stored session expired while a write was in flight; sign in again"
+      commit(.storedItemPresenceUnknown)
+      return .failed
     }
     defer { arbiter.end(mutationToken, outcome: .applied) }
     return await deleteStoredSession(

@@ -181,7 +181,13 @@ private actor BlockingDeleteVault: CredentialStoring {
   #expect(identityChangeCount == 1)
 }
 
-@Test @MainActor func invalidationIsBusyWhileAnotherReadIsActive() async throws {
+/// A service 301 on `user/playlist` is registered evidence that the credential
+/// is dead. Whether that fact takes effect must not depend on how many other
+/// reads happen to be running: the previous behaviour returned `.busy`, left
+/// the session validated and kept the Keychain item, so a later write could
+/// still use a credential the server had already rejected.
+/// Reported by the 2026-08-27 review, which found this test asserting that.
+@Test @MainActor func aConcurrentReadDoesNotStopTheInvalidation() async throws {
   let credential = makeCredential()
   let transport = FakeTransport()
   let vault = FakeVault(stored: credential)
@@ -201,11 +207,45 @@ private actor BlockingDeleteVault: CredentialStoring {
     readToken: playlist
   )
 
-  #expect(result == .busy)
-  #expect(login.matchesValidatedSession(credential, account: testAccount))
-  #expect(try await vault.load() == credential)
-  arbiter.end(playlist, outcome: .failed)
+  #expect(result == .deleted)
+  #expect(!login.matchesValidatedSession(credential, account: testAccount))
+  #expect(login.account == nil)
+  #expect(try await vault.load() == nil)
   arbiter.end(discovery, outcome: .applied)
+}
+
+/// If the exclusive slot cannot be taken, the Keychain item survives — but the
+/// credential still stops counting as validated, so nothing can keep using it
+/// while the user has not signed in again.
+@Test @MainActor func aRefusedPromotionStillRetiresTheCredential() async throws {
+  let credential = makeCredential()
+  let transport = FakeTransport()
+  let vault = FakeVault(stored: credential)
+  let arbiter = OperationArbiter()
+  let login = LoginCoordinator(
+    transport: transport,
+    vault: vault,
+    arbiter: arbiter
+  )
+  #expect(await login.validateSession() == .credentialReplaced(testAccount))
+
+  // A token that owns no live read cannot be promoted.
+  let stale = arbiter.begin(name: "Playlist", effect: .read)!
+  arbiter.end(stale, outcome: .cancelled)
+
+  let result = await login.invalidateStoredSession(
+    matching: credential,
+    message: "Stored session expired; sign in again",
+    readToken: stale
+  )
+
+  #expect(result == .failed)
+  // The identity fact is not discarded.
+  #expect(!login.matchesValidatedSession(credential, account: testAccount))
+  #expect(login.account == nil)
+  #expect(login.storedSessionPresence == .unknown)
+  // The item is still there; it is simply no longer treated as validated.
+  #expect(try await vault.load() == credential)
 }
 
 @Test @MainActor func validateDeletesTheReplacementCredentialItActuallyChecked() async {
