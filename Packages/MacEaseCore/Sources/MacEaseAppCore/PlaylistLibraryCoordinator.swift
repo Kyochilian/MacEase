@@ -13,6 +13,11 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
   @ObservationIgnored package private(set) var generation = 0
   @ObservationIgnored private var loadTask: Task<Void, Never>?
   @ObservationIgnored private var operationToken: OperationToken?
+  /// Emits only server-confirmed list state. Reset and disk restore never call
+  /// it, so transient account changes cannot be mistaken for authoritative
+  /// empty libraries.
+  @ObservationIgnored package var onPersistablePlaylistsChanged:
+    (@MainActor (Int64, [UserPlaylist]) async -> Void)?
 
   package var noStoredSessionStatus: String { "No stored session to load library" }
 
@@ -101,6 +106,10 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
 
         self.collection.apply(page: page, replacingAll: reset)
         self.status = "Loaded \(self.collection.playlists.count) playlists"
+        // Persistence is the terminal await. Keeping it after every state
+        // transition prevents an identity reset from entering halfway through
+        // this apply and leaving the old task to publish more state afterwards.
+        await self.persistPlaylists(for: account)
         return true
       }
     }
@@ -150,15 +159,19 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
           id: playlist.id,
           name: detail.name,
           trackCount: detail.trackIDs.count,
-          owned: playlist.owned
+          owned: playlist.owned,
+          isPrivate: playlist.isPrivate
         )
         self.selectedPlaylist = opened
         // The detail is authoritative for the name and count, so the row in
         // the list cannot be left saying something different.
+        let previousPlaylists = self.collection.playlists
         self.collection.replace(opened)
+        let playlistsChanged = self.collection.playlists != previousPlaylists
         guard !detail.trackIDs.isEmpty else {
           self.detail.begin(trackIDs: [])
           self.status = "Loaded an empty playlist (1 request)"
+          if playlistsChanged { await self.persistPlaylists(for: account) }
           return true
         }
 
@@ -184,6 +197,10 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
         self.status =
           "Loaded \(batch.count) tracks from \(batchIDs.count) "
           + "of \(detail.trackIDs.count) IDs"
+        // Do not await local storage between the two server requests. A
+        // concurrent read may invalidate the session while this task yields;
+        // persistence therefore runs only after the complete local apply.
+        if playlistsChanged { await self.persistPlaylists(for: account) }
         return true
       }
     }
@@ -316,21 +333,82 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
   /// Playlist write actions (1 request each). None of them triggers an
   /// automatic reload: the user reloads explicitly, so the request count stays
   /// exactly what the button promises.
-  package func createPlaylist(named name: String, session: any SessionProviding) {
+  package func createPlaylist(
+    named name: String,
+    isPrivate: Bool,
+    session: any SessionProviding
+  ) {
     let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !trimmed.isEmpty else { return }
     write(
-      loadingStatus: "Creating the playlist (1 request)",
+      loadingStatus: isPrivate
+        ? "Creating the private playlist (1 request)"
+        : "Creating the playlist (1 request)",
       operation: "Create playlist",
       session: session,
       recordsCreateReceipt: true
     ) { credential in
-      try await self.transport.createPlaylist(name: trimmed, credential: credential)
+      try await self.transport.createPlaylist(
+        name: trimmed,
+        isPrivate: isPrivate,
+        credential: credential
+      )
       return {
         // The new playlist changes the server-side set and its ordering, so
         // the page cursor no longer names the same position.
         self.collection.markStaleAfterMutation()
-        return "Created \(trimmed); Load Playlists to see it"
+        return
+          (isPrivate ? "Created private playlist " : "Created ") + trimmed
+          + "; Load Playlists to see it"
+      }
+    }
+  }
+
+  /// Publishes a private playlist (1 request).
+  ///
+  /// Only an owned row confirmed private by `/user/playlist` is eligible.
+  /// Success changes that row and the open detail to public without a read.
+  /// Whether the server reorders the account's playlists afterwards is not
+  /// verified, so the cursor is retired rather than trusted.
+  package func publishPlaylist(
+    _ playlist: UserPlaylist,
+    session: any SessionProviding
+  ) {
+    guard
+      let current = collection.playlists.first(where: { $0.id == playlist.id }),
+      current.owned,
+      current.isPrivate == true
+    else { return }
+    write(
+      loadingStatus: "Publishing the playlist (1 request)",
+      operation: "Publish playlist",
+      session: session
+    ) { credential in
+      try await self.transport.publishPrivatePlaylist(
+        playlistID: current.id,
+        credential: credential
+      )
+      return {
+        self.collection.replace(
+          UserPlaylist(
+            id: current.id,
+            name: current.name,
+            trackCount: current.trackCount,
+            owned: current.owned,
+            isPrivate: false
+          )
+        )
+        if let selected = self.selectedPlaylist, selected.id == current.id {
+          self.selectedPlaylist = UserPlaylist(
+            id: selected.id,
+            name: selected.name,
+            trackCount: selected.trackCount,
+            owned: selected.owned,
+            isPrivate: false
+          )
+        }
+        self.collection.markStaleAfterMutation()
+        return "Published \(current.name)"
       }
     }
   }
@@ -382,7 +460,8 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
           id: playlist.id,
           name: trimmed,
           trackCount: playlist.trackCount,
-          owned: playlist.owned
+          owned: playlist.owned,
+          isPrivate: playlist.isPrivate
         )
         self.selectedPlaylist = renamed
         // A rename changes neither membership nor the page cursor, so the
@@ -422,7 +501,8 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
             id: $0.id,
             name: $0.name,
             trackCount: $0.trackCount + 1,
-            owned: $0.owned
+            owned: $0.owned,
+            isPrivate: $0.isPrivate
           )
         }
         return
@@ -469,7 +549,8 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
             id: $0.id,
             name: $0.name,
             trackCount: max(0, $0.trackCount - 1),
-            owned: $0.owned
+            owned: $0.owned,
+            isPrivate: $0.isPrivate
           )
         }
         return "Removed \(track.name) from \(playlist.name)"
@@ -576,8 +657,12 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
           // the local change must not be applied.
           return
         }
+        let previousPlaylists = self.collection.playlists
         self.status = apply()
         outcome = .applied
+        if self.collection.playlists != previousPlaylists {
+          await self.persistPlaylists(for: account)
+        }
       } catch is CancellationError {
         outcome = .cancelled
       } catch {
@@ -796,5 +881,10 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
   private func clearDetail() {
     selectedPlaylist = nil
     detail.reset()
+  }
+
+  private func persistPlaylists(for account: NeteaseAccount) async {
+    let snapshot = collection.playlists
+    await onPersistablePlaylistsChanged?(account.userID, snapshot)
   }
 }

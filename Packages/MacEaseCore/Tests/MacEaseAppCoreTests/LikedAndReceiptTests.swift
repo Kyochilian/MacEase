@@ -105,7 +105,7 @@ private func makeLibraryRig() -> (FakeTransport, PlaylistLibraryCoordinator, Fak
 @Test @MainActor func aSuccessfulCreatePublishesASucceededReceipt() async {
   let (_, library, session) = makeLibraryRig()
 
-  library.createPlaylist(named: "canary", session: session)
+  library.createPlaylist(named: "canary", isPrivate: false, session: session)
   await library.settleForTesting()
 
   #expect(library.lastCreateReceipt?.succeeded == true)
@@ -117,7 +117,7 @@ private func makeLibraryRig() -> (FakeTransport, PlaylistLibraryCoordinator, Fak
     .failure(NeteaseServiceError(source: .service, statusCode: 500))
   )
 
-  library.createPlaylist(named: "canary", session: session)
+  library.createPlaylist(named: "canary", isPrivate: false, session: session)
   await library.settleForTesting()
 
   #expect(library.lastCreateReceipt?.succeeded == false)
@@ -137,7 +137,7 @@ private func makeLibraryRig() -> (FakeTransport, PlaylistLibraryCoordinator, Fak
   )
   await transport.setWriteResult(.failure(URLError(.timedOut)))
 
-  library.createPlaylist(named: "canary", session: session)
+  library.createPlaylist(named: "canary", isPrivate: false, session: session)
   await library.settleForTesting()
 
   #expect(library.lastCreateReceipt?.outcome == .outcomeUnknown)
@@ -160,7 +160,7 @@ private func makeLibraryRig() -> (FakeTransport, PlaylistLibraryCoordinator, Fak
   )
   await transport.setWriteResult(.failure(decodingError))
 
-  library.createPlaylist(named: "canary", session: session)
+  library.createPlaylist(named: "canary", isPrivate: false, session: session)
   await library.settleForTesting()
 
   #expect(library.lastCreateReceipt?.outcome == .outcomeUnknown)
@@ -180,7 +180,7 @@ private func makeLibraryRig() -> (FakeTransport, PlaylistLibraryCoordinator, Fak
   )
   await transport.gate.close()
 
-  library.createPlaylist(named: "canary", session: session)
+  library.createPlaylist(named: "canary", isPrivate: false, session: session)
   while await transport.gate.arrivalCount() == 0 { await Task.yield() }
   await vault.setLoadError(CredentialVaultError.keychain(-25300))
   await transport.gate.open()
@@ -196,11 +196,11 @@ private func makeLibraryRig() -> (FakeTransport, PlaylistLibraryCoordinator, Fak
 @Test @MainActor func consecutiveWritesGetDistinctReceipts() async {
   let (_, library, session) = makeLibraryRig()
 
-  library.createPlaylist(named: "one", session: session)
+  library.createPlaylist(named: "one", isPrivate: false, session: session)
   await library.settleForTesting()
   let first = library.lastCreateReceipt
 
-  library.createPlaylist(named: "two", session: session)
+  library.createPlaylist(named: "two", isPrivate: false, session: session)
   await library.settleForTesting()
   let second = library.lastCreateReceipt
 
@@ -221,7 +221,7 @@ private func makeLibraryRig() -> (FakeTransport, PlaylistLibraryCoordinator, Fak
   )
   await transport.gate.close()
 
-  library.createPlaylist(named: "canary", session: session)
+  library.createPlaylist(named: "canary", isPrivate: false, session: session)
   while await transport.gate.arrivalCount() == 0 { await Task.yield() }
   await vault.setStored(makeCredential("replacement"))
   await transport.gate.open()
@@ -266,7 +266,7 @@ private func makeWriteRig() -> (
     .failure(NeteaseServiceError(source: .http, statusCode: status))
   )
 
-  rig.library.createPlaylist(named: "canary", session: rig.session)
+  rig.library.createPlaylist(named: "canary", isPrivate: false, session: rig.session)
   await rig.library.settleForTesting()
 
   #expect(rig.library.lastCreateReceipt?.outcome == .outcomeUnknown)
@@ -296,7 +296,7 @@ private func makeWriteRig() -> (
     .failure(NeteaseServiceError(source: .service, statusCode: 401))
   )
 
-  rig.library.createPlaylist(named: "canary", session: rig.session)
+  rig.library.createPlaylist(named: "canary", isPrivate: false, session: rig.session)
   await rig.library.settleForTesting()
 
   #expect(rig.library.lastCreateReceipt?.outcome == .failed)
@@ -310,7 +310,7 @@ private func makeWriteRig() -> (
     .failure(NeteaseServiceError(source: .http, statusCode: 403))
   )
 
-  rig.library.createPlaylist(named: "canary", session: rig.session)
+  rig.library.createPlaylist(named: "canary", isPrivate: false, session: rig.session)
   await rig.library.settleForTesting()
 
   #expect(rig.library.lastCreateReceipt?.outcome == .failed)

@@ -34,9 +34,19 @@ func makeTracks(_ ids: [Int64]) -> [Track] {
   }
 }
 
-func makePlaylists(_ ids: [Int64], owned: Bool = true) -> [UserPlaylist] {
+func makePlaylists(
+  _ ids: [Int64],
+  owned: Bool = true,
+  isPrivate: Bool? = nil
+) -> [UserPlaylist] {
   ids.map {
-    UserPlaylist(id: $0, name: "playlist-\($0)", trackCount: 3, owned: owned)
+    UserPlaylist(
+      id: $0,
+      name: "playlist-\($0)",
+      trackCount: 3,
+      owned: owned,
+      isPrivate: isPrivate
+    )
   }
 }
 
@@ -88,7 +98,7 @@ actor FakeTransport: NeteaseTransporting {
     case searchSongs(String)
     case lyrics(Int64)
     case setSongLiked(Int64, Bool)
-    case createPlaylist(String)
+    case createPlaylist(String, isPrivate: Bool)
     case deletePlaylist(Int64)
     case editPlaylistTracks(PlaylistTrackEdit, Int64, [Int64])
     case renamePlaylist(Int64, String)
@@ -106,7 +116,7 @@ actor FakeTransport: NeteaseTransporting {
     case setArtistFollowed(Int64, Bool)
     case cloudSongs(offset: Int)
     case deleteCloudSong(Int64)
-    case setPlaylistPrivate(Int64, Bool)
+    case publishPrivatePlaylist(Int64)
   }
 
   struct Unprogrammed: Error, Equatable {
@@ -247,12 +257,11 @@ actor FakeTransport: NeteaseTransporting {
     try writeResult.get()
   }
 
-  func setPlaylistPrivate(
-    _ isPrivate: Bool,
+  func publishPrivatePlaylist(
     playlistID: Int64,
     credential: NeteaseCredential
   ) async throws {
-    await record(.setPlaylistPrivate(playlistID, isPrivate))
+    await record(.publishPrivatePlaylist(playlistID))
     try writeResult.get()
   }
 
@@ -398,8 +407,12 @@ actor FakeTransport: NeteaseTransporting {
     try writeResult.get()
   }
 
-  func createPlaylist(name: String, credential: NeteaseCredential) async throws {
-    await record(.createPlaylist(name))
+  func createPlaylist(
+    name: String,
+    isPrivate: Bool,
+    credential: NeteaseCredential
+  ) async throws {
+    await record(.createPlaylist(name, isPrivate: isPrivate))
     try writeResult.get()
   }
 

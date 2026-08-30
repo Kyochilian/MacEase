@@ -298,7 +298,7 @@ private struct Rig {
   let rig = Rig()
   await rig.transport.gate.close()
 
-  rig.library.createPlaylist(named: "canary", session: rig.session)
+  rig.library.createPlaylist(named: "canary", isPrivate: false, session: rig.session)
   await rig.waitForFirstRequest()
 
   // This is what the Session tab's buttons check before they run.

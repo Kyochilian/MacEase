@@ -38,6 +38,7 @@ private let eapiHeader =
 @Test func createPlaylistRequestUsesTheLockedContract() throws {
   let request = try NeteaseSession.createPlaylistRequest(
     name: "Test List",
+    isPrivate: false,
     credential: writeCredential,
     secretKey: "0123456789abcdef"
   )
@@ -54,9 +55,29 @@ private let eapiHeader =
   #expect(!cookie.contains("deviceId"))
 }
 
+/// The one verified way to get a private playlist: `privacy` is `"10"` at
+/// creation, a string, exactly as `module/playlist_create.js` sends it in
+/// `api-enhanced@a7e8d48`. Everything else about the request is unchanged.
+@Test func creatingAPrivatePlaylistSendsPrivacyTen() throws {
+  let request = try NeteaseSession.createPlaylistRequest(
+    name: "Test List",
+    isPrivate: true,
+    credential: writeCredential,
+    secretKey: "0123456789abcdef"
+  )
+
+  #expect(request.url?.absoluteString == "https://music.163.com/weapi/playlist/create")
+  try expectWeAPIWriteBody(
+    request,
+    json:
+      #"{"name":"Test List","privacy":"10","type":"NORMAL","csrf_token":"csrf-test"}"#
+  )
+}
+
 @Test func createPlaylistEscapesNamesThatWouldBreakJSON() throws {
   let request = try NeteaseSession.createPlaylistRequest(
     name: #"quote " and \ backslash"#,
+    isPrivate: false,
     credential: writeCredential,
     secretKey: "0123456789abcdef"
   )

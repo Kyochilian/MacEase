@@ -93,7 +93,8 @@ package struct PlaylistCollection: Equatable, Sendable {
       id: existing.id,
       name: existing.name,
       trackCount: max(0, existing.trackCount + delta),
-      owned: existing.owned
+      owned: existing.owned,
+      isPrivate: existing.isPrivate
     )
   }
 }

@@ -512,56 +512,31 @@ private func response(setCookie: String) -> HTTPURLResponse {
 
 // MARK: - Playlist privacy
 
-@Test func playlistPrivacySendsTheServiceValues() throws {
-  let makePrivate = try NeteaseSession.playlistPrivacyRequest(
-    true,
+/// The only privacy change MacEase makes to an existing playlist, and the only
+/// one the authority implements: `module/playlist_privacy.js` in
+/// `api-enhanced@a7e8d48` sends a fixed `privacy: 0`, and its `createOption`
+/// leaves the crypto empty, which `util/request.js` plus `APP_CONF.encrypt`
+/// resolve to eapi — not weapi, and not a bidirectional flag.
+@Test func publishingAPrivatePlaylistUsesTheEAPIContract() throws {
+  let request = try NeteaseSession.publishPrivatePlaylistRequest(
     playlistID: 24_381_616,
     credential: accountCredential,
-    secretKey: "0123456789abcdef",
     osVersion: "15.5",
     buildVersion: "1722945678",
     requestID: "1722945678123_0042"
   )
-  let publish = try NeteaseSession.playlistPrivacyRequest(
-    false,
-    playlistID: 24_381_616,
-    credential: accountCredential,
-    secretKey: "0123456789abcdef",
-    osVersion: "15.5",
-    buildVersion: "1722945678",
-    requestID: "1722945678123_0042"
-  )
+  let header =
+    #"{"osver":"15.5","os":"osx","appver":"0.1","buildver":"1722945678","#
+    + #""__csrf":"csrf-test","channel":"github","#
+    + #""requestId":"1722945678123_0042","MUSIC_U":"music-u-test"}"#
 
   #expect(
-    makePrivate.url?.absoluteString
-      == "https://music.163.com/weapi/playlist/update/privacy"
+    request.url?.absoluteString
+      == "https://interfacepc.music.163.com/eapi/playlist/update/privacy"
   )
-  let privateParameters = try NeteaseCrypto.weapi(
-    json: #"{"id":24381616,"privacy":10,"csrf_token":"csrf-test"}"#,
-    secretKey: "0123456789abcdef"
+  let params = try NeteaseCrypto.eapi(
+    path: "/api/playlist/update/privacy",
+    json: #"{"id":24381616,"privacy":0,"e_r":false,"header":\#(header)}"#
   )
-  let publicParameters = try NeteaseCrypto.weapi(
-    json: #"{"id":24381616,"privacy":0,"csrf_token":"csrf-test"}"#,
-    secretKey: "0123456789abcdef"
-  )
-  #expect(
-    String(decoding: makePrivate.httpBody!, as: UTF8.self)
-      == String(
-        decoding: FormURLEncoder.encode([
-          ("params", privateParameters.params),
-          ("encSecKey", privateParameters.encSecKey),
-        ]),
-        as: UTF8.self
-      )
-  )
-  #expect(
-    String(decoding: publish.httpBody!, as: UTF8.self)
-      == String(
-        decoding: FormURLEncoder.encode([
-          ("params", publicParameters.params),
-          ("encSecKey", publicParameters.encSecKey),
-        ]),
-        as: UTF8.self
-      )
-  )
+  #expect(String(decoding: request.httpBody!, as: UTF8.self) == "params=\(params)")
 }

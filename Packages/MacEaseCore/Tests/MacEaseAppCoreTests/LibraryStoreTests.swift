@@ -63,6 +63,23 @@ private func makeQueue(
   #expect(try await store.playlists(accountID: bob).map(\.id) == [2])
 }
 
+/// The current schema predates privacy. Restoring it as unknown is safer than
+/// offering Make Public for a row whose state was never stored.
+@Test func aStoredPlaylistRestoresPrivacyAsUnknown() async throws {
+  let store = try makeStore()
+  let playlist = UserPlaylist(
+    id: 1,
+    name: "Private",
+    trackCount: 3,
+    owned: true,
+    isPrivate: true
+  )
+
+  try await store.savePlaylists([playlist], accountID: alice)
+
+  #expect(try await store.playlists(accountID: alice)[0].isPrivate == nil)
+}
+
 @Test func theQueueRoundTripsWithItsContextAndPosition() async throws {
   let store = try makeStore()
   let queue = makeQueue()
@@ -80,6 +97,17 @@ private func makeQueue(
   try await store.saveQueue(makeQueue(ids: [9], currentIndex: 0), accountID: alice)
 
   #expect(try await store.queue(accountID: alice)?.tracks.map(\.id) == [9])
+}
+
+@Test func clearingOneQueueDoesNotTouchAnotherAccount() async throws {
+  let store = try makeStore()
+  try await store.saveQueue(makeQueue(ids: [1]), accountID: alice)
+  try await store.saveQueue(makeQueue(ids: [2]), accountID: bob)
+
+  try await store.clearQueue(accountID: alice)
+
+  #expect(try await store.queue(accountID: alice) == nil)
+  #expect(try await store.queue(accountID: bob)?.tracks.map(\.id) == [2])
 }
 
 /// Stored bytes are untrusted. An index that names no track would put playback
@@ -142,21 +170,6 @@ private func makeQueue(
   )
 
   #expect(try await store.queue(accountID: alice) == nil)
-}
-
-@Test func clearingAnAccountLeavesTheOtherAccountAlone() async throws {
-  let store = try makeStore()
-  try await store.savePlaylists(makePlaylists([1]), accountID: alice)
-  try await store.saveQueue(makeQueue(), accountID: alice)
-  try await store.savePlaylists(makePlaylists([2]), accountID: bob)
-  try await store.saveQueue(makeQueue(ids: [5], currentIndex: 0), accountID: bob)
-
-  try await store.clear(accountID: alice)
-
-  #expect(try await store.playlists(accountID: alice).isEmpty)
-  #expect(try await store.queue(accountID: alice) == nil)
-  #expect(try await store.playlists(accountID: bob).map(\.id) == [2])
-  #expect(try await store.queue(accountID: bob)?.tracks.map(\.id) == [5])
 }
 
 /// The restored queue is what the artwork, the album line and Now Playing all
@@ -236,4 +249,274 @@ private func makeQueue(
   library.restore(playlists: makePlaylists([1, 2]))
 
   #expect(library.playlists.map(\.id) == [9])
+}
+
+// MARK: - A write that failed is retried, not remembered
+
+@MainActor
+private struct PersistenceRig {
+  let store: LibraryStore
+  let persistence: QueuePersistence
+  let playback: PlaybackController
+  let library: PlaylistLibraryCoordinator
+  let transport = FakeTransport()
+  let session: FakeSession
+
+  init() throws {
+    let credential = makeCredential()
+    let vault = FakeVault(stored: credential)
+    let arbiter = OperationArbiter()
+    store = try LibraryStore(path: LibraryStore.inMemoryPath)
+    session = FakeSession(credential: credential)
+    playback = PlaybackController(
+      transport: transport,
+      vault: vault,
+      arbiter: arbiter,
+      output: FakeAudioOutput()
+    )
+    playback.attach(session: session)
+    library = PlaylistLibraryCoordinator(
+      transport: transport,
+      vault: vault,
+      arbiter: arbiter
+    )
+    persistence = QueuePersistence(store: store, playback: playback)
+  }
+}
+
+@MainActor
+private func connectPlaylistPersistence(
+  _ library: PlaylistLibraryCoordinator,
+  to persistence: QueuePersistence
+) {
+  library.onPersistablePlaylistsChanged = { accountID, playlists in
+    await persistence.savePlaylists(playlists, accountID: accountID)
+  }
+}
+
+/// `lastWritten` used to be set before the write was attempted, and the write
+/// itself was a `try?`. One failed save therefore silenced every later one:
+/// the queue looked stored and never was.
+@Test @MainActor func aFailedQueueWriteIsRetriedRatherThanRemembered() async throws {
+  let rig = try PersistenceRig()
+  await rig.persistence.activate(accountID: alice)
+  rig.playback.restore(makeQueue())
+
+  await rig.store.failNextWriteForTesting()
+  await rig.persistence.save()
+
+  #expect(rig.persistence.lastFailure != nil)
+  #expect(try await rig.store.queue(accountID: alice) == nil)
+
+  await rig.persistence.save()
+
+  #expect(rig.persistence.lastFailure == nil)
+  #expect(try await rig.store.queue(accountID: alice)?.tracks.map(\.id) == [1, 2, 3])
+  await rig.persistence.deactivate()
+}
+
+@Test @MainActor func aFailedPlaylistWriteIsReportedAndRetried() async throws {
+  let rig = try PersistenceRig()
+  await rig.persistence.activate(accountID: alice)
+
+  await rig.store.failNextWriteForTesting()
+  await rig.persistence.savePlaylists(makePlaylists([1, 2]), accountID: alice)
+
+  #expect(rig.persistence.lastFailure != nil)
+  #expect(try await rig.store.playlists(accountID: alice).isEmpty)
+
+  await rig.persistence.savePlaylists(makePlaylists([1, 2]), accountID: alice)
+
+  #expect(rig.persistence.lastFailure == nil)
+  #expect(try await rig.store.playlists(accountID: alice).map(\.id) == [1, 2])
+  await rig.persistence.deactivate()
+}
+
+// MARK: - Account-scoped playlist persistence
+
+@Test @MainActor func signingOutAndResettingKeepTheAccountsPlaylistCache() async throws {
+  let rig = try PersistenceRig()
+  let cached = makePlaylists([1, 2])
+  try await rig.store.savePlaylists(cached, accountID: alice)
+  await rig.persistence.activate(accountID: alice)
+  connectPlaylistPersistence(rig.library, to: rig.persistence)
+  rig.library.restore(
+    playlists: await rig.persistence.storedPlaylists(accountID: alice)
+  )
+
+  rig.library.reset()
+  await rig.persistence.deactivate()
+
+  #expect(try await rig.store.playlists(accountID: alice) == cached)
+}
+
+@Test @MainActor func switchingAccountsRestoresEachCacheWithoutSavingTheGap() async throws {
+  let rig = try PersistenceRig()
+  let alicePlaylists = makePlaylists([1, 2])
+  let bobPlaylists = makePlaylists([8, 9])
+  try await rig.store.savePlaylists(alicePlaylists, accountID: alice)
+  try await rig.store.savePlaylists(bobPlaylists, accountID: bob)
+  connectPlaylistPersistence(rig.library, to: rig.persistence)
+
+  await rig.persistence.activate(accountID: alice)
+  rig.library.restore(
+    playlists: await rig.persistence.storedPlaylists(accountID: alice)
+  )
+  #expect(rig.library.playlists == alicePlaylists)
+
+  rig.library.reset()
+  await rig.persistence.activate(accountID: bob)
+  rig.library.restore(
+    playlists: await rig.persistence.storedPlaylists(accountID: bob)
+  )
+
+  #expect(rig.library.playlists == bobPlaylists)
+  #expect(try await rig.store.playlists(accountID: alice) == alicePlaylists)
+  #expect(try await rig.store.playlists(accountID: bob) == bobPlaylists)
+  await rig.persistence.deactivate()
+}
+
+@Test @MainActor func aLateAliceSaveCannotWriteBob() async throws {
+  let rig = try PersistenceRig()
+  let alicePlaylists = makePlaylists([1])
+  let bobPlaylists = makePlaylists([9])
+  try await rig.store.savePlaylists(alicePlaylists, accountID: alice)
+  try await rig.store.savePlaylists(bobPlaylists, accountID: bob)
+  await rig.persistence.activate(accountID: alice)
+  let gate = RequestGate()
+  await gate.close()
+  let persistence = rig.persistence
+  let lateSave = Task { @MainActor in
+    await gate.pass()
+    await persistence.savePlaylists([], accountID: alice)
+  }
+  while await gate.arrivalCount() == 0 { await Task.yield() }
+  await rig.persistence.activate(accountID: bob)
+
+  await gate.open()
+  await lateSave.value
+
+  #expect(try await rig.store.playlists(accountID: alice) == alicePlaylists)
+  #expect(try await rig.store.playlists(accountID: bob) == bobPlaylists)
+  await rig.persistence.deactivate()
+}
+
+@Test @MainActor func anAuthoritativeEmptyPageReplacesTheOldCache() async throws {
+  let rig = try PersistenceRig()
+  try await rig.store.savePlaylists(makePlaylists([1, 2]), accountID: alice)
+  await rig.persistence.activate(accountID: alice)
+  connectPlaylistPersistence(rig.library, to: rig.persistence)
+  await rig.transport.setPlaylistPages([
+    UserPlaylistPage(playlists: [], more: false)
+  ])
+
+  rig.library.load(reset: true, session: rig.session)
+  await rig.library.settleForTesting()
+
+  #expect(try await rig.store.playlists(accountID: alice).isEmpty)
+  await rig.persistence.deactivate()
+}
+
+/// Signing out keeps this account's place. The account is part of the key, so
+/// nobody else can see it, and deactivating never touches the disk.
+@Test @MainActor func signingOutKeepsThisAccountsQueueAndHidesItFromOthers() async throws {
+  let rig = try PersistenceRig()
+  await rig.persistence.activate(accountID: alice)
+  rig.playback.restore(makeQueue())
+  await rig.persistence.save()
+
+  await rig.persistence.deactivate()
+
+  #expect(try await rig.store.queue(accountID: alice) != nil)
+  #expect(try await rig.store.queue(accountID: bob) == nil)
+}
+
+// MARK: - Changes that do not move the count
+
+/// The coordinator emits the confirmed snapshot after a rename. The count and
+/// ids do not move, so a count observer could never cover this change.
+@Test @MainActor func aRenameChangesTheListWithoutChangingItsCount() async throws {
+  let rig = try PersistenceRig()
+  await rig.persistence.activate(accountID: alice)
+  connectPlaylistPersistence(rig.library, to: rig.persistence)
+  await rig.transport.setPlaylistPages([
+    UserPlaylistPage(playlists: makePlaylists([1, 2]), more: false)
+  ])
+  rig.library.load(reset: true, session: rig.session)
+  await rig.library.settleForTesting()
+  rig.library.selectedPlaylist = rig.library.playlists[0]
+  let before = rig.library.playlists
+
+  rig.library.renameSelectedPlaylist(to: "Evening", session: rig.session)
+  await rig.library.settleForTesting()
+
+  #expect(rig.library.playlists.count == before.count)
+  #expect(rig.library.playlists != before)
+
+  #expect(
+    try await rig.store.playlists(accountID: alice).map(\.name)
+      == ["Evening", "playlist-2"]
+  )
+  await rig.persistence.deactivate()
+}
+
+// MARK: - Explicit Stop
+
+@Test @MainActor func explicitStopClearsTheStoredQueueBeforeReactivation() async throws {
+  let rig = try PersistenceRig()
+  await rig.persistence.activate(accountID: alice)
+  let persistence = rig.persistence
+  rig.playback.onExplicitStop = {
+    persistence.clearQueueAfterExplicitStop()
+  }
+  rig.playback.restore(makeQueue())
+  await rig.persistence.save()
+
+  rig.playback.stop()
+  await rig.persistence.settleQueueClearForTesting()
+  await rig.persistence.deactivate()
+  await rig.persistence.activate(accountID: alice)
+
+  #expect(try await rig.store.queue(accountID: alice) == nil)
+  #expect(rig.playback.currentTrack == nil)
+  await rig.persistence.deactivate()
+}
+
+@Test @MainActor func sessionCleanupKeepsTheQueueForTheSameAccount() async throws {
+  let rig = try PersistenceRig()
+  await rig.persistence.activate(accountID: alice)
+  rig.playback.restore(makeQueue())
+  await rig.persistence.save()
+
+  rig.playback.stopForSessionChange()
+  await rig.persistence.deactivate()
+  await rig.persistence.activate(accountID: alice)
+
+  #expect(try await rig.store.queue(accountID: alice) != nil)
+  #expect(rig.playback.currentTrack?.id == 2)
+  await rig.persistence.deactivate()
+}
+
+@Test @MainActor func aFailedExplicitStopClearIsRetried() async throws {
+  let rig = try PersistenceRig()
+  await rig.persistence.activate(accountID: alice)
+  let persistence = rig.persistence
+  rig.playback.onExplicitStop = {
+    persistence.clearQueueAfterExplicitStop()
+  }
+  rig.playback.restore(makeQueue())
+  await rig.persistence.save()
+  await rig.store.failNextWriteForTesting()
+
+  rig.playback.stop()
+  await rig.persistence.settleQueueClearForTesting()
+
+  #expect(rig.persistence.lastFailure != nil)
+  #expect(try await rig.store.queue(accountID: alice) != nil)
+
+  await rig.persistence.save()
+
+  #expect(rig.persistence.lastFailure == nil)
+  #expect(try await rig.store.queue(accountID: alice) == nil)
+  await rig.persistence.deactivate()
 }

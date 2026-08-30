@@ -88,4 +88,7 @@ package enum LibraryStoreError: Error, Equatable, Sendable {
   case sqlite(Int32)
   /// A stored row decoded into something that is not what it claims to be.
   case corruptRow
+  /// The system reported no Application Support directory, so there is
+  /// nowhere the store is allowed to live.
+  case noApplicationSupportDirectory
 }

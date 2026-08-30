@@ -5,13 +5,12 @@ import SQLite3
 /// Per-account storage for the library, the playback queue and where playback
 /// had got to.
 ///
-/// The roadmap named GRDB for this. It is not used: its package pulls a git
-/// submodule from a host this build environment cannot reach, and the storage
-/// this app actually needs — a handful of rows keyed by account, read whole at
-/// launch and written whole on change — is served by the SQLite that ships
-/// with macOS. That also keeps the project's own rule, which puts Apple's own
-/// frameworks ahead of a new dependency. Revisit if a feature arrives that
-/// genuinely needs a query planner rather than a key and a blob.
+/// The roadmap named GRDB for this. It is not used: what this app stores is a
+/// handful of rows keyed by account, read whole at launch and written whole on
+/// change, which the SQLite that ships with macOS already serves. That is also
+/// the project's own order of preference, which puts Apple's own frameworks
+/// ahead of a new dependency. Revisit if a feature arrives that genuinely
+/// needs a query planner rather than a key and a blob.
 ///
 /// Every row is scoped by account id. Signing in as someone else must never
 /// show the previous account's library, so the account is part of the key
@@ -21,6 +20,9 @@ package actor LibraryStore {
   /// itself. The pointer never changes after `init`, which is what lets
   /// `deinit` close it from outside the actor.
   private nonisolated(unsafe) let handle: OpaquePointer
+
+  /// Set by `failNextWriteForTesting`, cleared by the write it refuses.
+  private var injectedWriteFailure: Int32?
 
   /// Opens, or creates, the database at `url`. Pass
   /// `LibraryStore.inMemoryPath` for a store that leaves nothing behind.
@@ -47,23 +49,60 @@ package actor LibraryStore {
   /// The file the app uses. Application Support rather than Caches: a queue
   /// the user expects to find on relaunch is not something the system may
   /// delete to reclaim space.
-  package static func defaultPath() -> String? {
+  ///
+  /// A directory that cannot be created is reported rather than swallowed.
+  /// Handing back a path inside a directory that is not there would turn one
+  /// diagnosable failure into an unexplained failure on every later write.
+  package static func defaultPath() throws -> String {
     guard
       let base = FileManager.default
         .urls(for: .applicationSupportDirectory, in: .userDomainMask)
         .first
-    else { return nil }
+    else { throw LibraryStoreError.noApplicationSupportDirectory }
     let directory = base.appendingPathComponent("MacEase", isDirectory: true)
-    try? FileManager.default.createDirectory(
+    try FileManager.default.createDirectory(
       at: directory,
       withIntermediateDirectories: true
     )
     return directory.appendingPathComponent("library.sqlite").path
   }
 
+  /// A short account of a storage failure, for showing the user.
+  ///
+  /// Persistence is a convenience — losing it costs the resume point, not the
+  /// app — but a failure must be visible rather than being mistaken for a save
+  /// that worked.
+  package static func diagnostic(for error: any Error) -> String {
+    guard let error = error as? LibraryStoreError else {
+      return (error as NSError).localizedDescription
+    }
+    switch error {
+    case .sqlite(let code):
+      return "SQLite \(code): \(String(cString: sqlite3_errstr(code)))"
+    case .corruptRow:
+      return "a stored row did not decode"
+    case .noApplicationSupportDirectory:
+      return "there is no Application Support directory"
+    }
+  }
+
+  /// Test seam: refuses the next write with a real SQLite result code, so
+  /// "a write that failed is retried rather than remembered" can be proved
+  /// without a filesystem the test would have to break on purpose.
+  package func failNextWriteForTesting(code: Int32 = SQLITE_IOERR) {
+    injectedWriteFailure = code
+  }
+
+  private func failIfInjected() throws {
+    guard let code = injectedWriteFailure else { return }
+    injectedWriteFailure = nil
+    throw LibraryStoreError.sqlite(code)
+  }
+
   // MARK: - Playlists
 
   package func savePlaylists(_ playlists: [UserPlaylist], accountID: Int64) throws {
+    try failIfInjected()
     try transaction {
       try run(
         "DELETE FROM playlist WHERE account_id = ?",
@@ -106,7 +145,10 @@ package actor LibraryStore {
             id: sqlite3_column_int64(statement, 0),
             name: name,
             trackCount: Int(sqlite3_column_int64(statement, 2)),
-            owned: sqlite3_column_int64(statement, 3) != 0
+            owned: sqlite3_column_int64(statement, 3) != 0,
+            // The existing schema never stored privacy. Unknown is the safe
+            // restore value until the next authoritative server load.
+            isPrivate: nil
           )
         )
       }
@@ -119,6 +161,7 @@ package actor LibraryStore {
   /// Replaces the stored queue. There is exactly one per account: a second
   /// queue would be a second answer to "what was I listening to".
   package func saveQueue(_ queue: PersistedQueue, accountID: Int64) throws {
+    try failIfInjected()
     let payload = try JSONEncoder().encode(queue)
     try run(
       """
@@ -129,6 +172,16 @@ package actor LibraryStore {
         try bind(int: accountID, at: 1, to: statement)
         try bind(blob: payload, at: 2, to: statement)
       }
+    )
+  }
+
+  /// Removes only this account's resume queue. Playlists and every other
+  /// account remain untouched.
+  package func clearQueue(accountID: Int64) throws {
+    try failIfInjected()
+    try run(
+      "DELETE FROM queue WHERE account_id = ?",
+      bind: { try bind(int: accountID, at: 1, to: $0) }
     )
   }
 
@@ -155,13 +208,6 @@ package actor LibraryStore {
     return try? JSONDecoder().decode(PersistedQueue.self, from: payload)
   }
 
-  package func clearQueue(accountID: Int64) throws {
-    try run(
-      "DELETE FROM queue WHERE account_id = ?",
-      bind: { try bind(int: accountID, at: 1, to: $0) }
-    )
-  }
-
   /// Test seam: writes bytes no current build would write, so the "an older
   /// schema must not stop the app launching" rule can be exercised.
   package func writeRawQueuePayloadForTesting(
@@ -178,21 +224,6 @@ package actor LibraryStore {
         try bind(blob: payload, at: 2, to: statement)
       }
     )
-  }
-
-  /// Everything this account had. Used when the user signs out or the stored
-  /// identity is replaced.
-  package func clear(accountID: Int64) throws {
-    try transaction {
-      try run(
-        "DELETE FROM playlist WHERE account_id = ?",
-        bind: { try bind(int: accountID, at: 1, to: $0) }
-      )
-      try run(
-        "DELETE FROM queue WHERE account_id = ?",
-        bind: { try bind(int: accountID, at: 1, to: $0) }
-      )
-    }
   }
 
   // MARK: - Schema
@@ -225,17 +256,20 @@ package actor LibraryStore {
 
   // MARK: - SQLite plumbing
 
+  /// `COMMIT` is inside the `do`, so a commit that fails rolls back and
+  /// reports its own error rather than leaving the connection in a
+  /// transaction nobody closed.
   private func transaction(_ body: () throws -> Void) throws {
     try Self.execute("BEGIN IMMEDIATE", on: handle)
     do {
       try body()
+      try Self.execute("COMMIT", on: handle)
     } catch {
       // Best effort: the failure being reported is the one that matters, and
       // a rollback that also fails leaves the connection to be discarded.
       try? Self.execute("ROLLBACK", on: handle)
       throw error
     }
-    try Self.execute("COMMIT", on: handle)
   }
 
   private func run(

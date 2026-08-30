@@ -137,7 +137,11 @@ private let accountCredential = testCredential(musicU: "music-u-test", csrf: "cs
   )!
   let page = try NeteaseSession.classifyUserPlaylists(
     data: Data((
-      #"{"code":200,"more":true,"playlist":[{"id":1,"name":"Created","trackCount":12,"creator":{"userId":987654321}},{"id":2,"name":"Saved","trackCount":4,"creator":{"userId":123}}]}"#
+      #"{"code":200,"more":true,"playlist":["#
+        + #"{"id":1,"name":"Private","trackCount":12,"privacy":10,"creator":{"userId":987654321}},"#
+        + #"{"id":2,"name":"Public","trackCount":4,"privacy":0,"creator":{"userId":987654321}},"#
+        + #"{"id":3,"name":"Missing","trackCount":2,"creator":{"userId":987654321}},"#
+        + #"{"id":4,"name":"Unknown","trackCount":1,"privacy":7,"creator":{"userId":123}}]}"#
       ).utf8),
     response: response,
     userID: 987_654_321
@@ -146,8 +150,34 @@ private let accountCredential = testCredential(musicU: "music-u-test", csrf: "cs
   #expect(page.more)
   #expect(
     page.playlists == [
-      UserPlaylist(id: 1, name: "Created", trackCount: 12, owned: true),
-      UserPlaylist(id: 2, name: "Saved", trackCount: 4, owned: false),
+      UserPlaylist(
+        id: 1,
+        name: "Private",
+        trackCount: 12,
+        owned: true,
+        isPrivate: true
+      ),
+      UserPlaylist(
+        id: 2,
+        name: "Public",
+        trackCount: 4,
+        owned: true,
+        isPrivate: false
+      ),
+      UserPlaylist(
+        id: 3,
+        name: "Missing",
+        trackCount: 2,
+        owned: true,
+        isPrivate: nil
+      ),
+      UserPlaylist(
+        id: 4,
+        name: "Unknown",
+        trackCount: 1,
+        owned: false,
+        isPrivate: nil
+      ),
     ]
   )
 }

@@ -45,6 +45,7 @@ extension NeteaseSession {
   private static let qrCheckEndpoint = "/api/login/qrcode/client/login"
   private static let logoutEndpoint = "/api/logout"
   private static let refreshEndpoint = "/api/login/token/refresh"
+  private static let playlistPrivacyEndpoint = "/api/playlist/update/privacy"
 
   private static let captchaURL = URL(
     string: "https://music.163.com/weapi/sms/captcha/sent"
@@ -75,9 +76,6 @@ extension NeteaseSession {
   )!
   private static let artistUnsubscribeURL = URL(
     string: "https://music.163.com/weapi/artist/unsub"
-  )!
-  private static let playlistPrivacyURL = URL(
-    string: "https://music.163.com/weapi/playlist/update/privacy"
   )!
 
   private static func eapiURL(_ path: String) -> URL? {
@@ -613,18 +611,24 @@ extension NeteaseSession {
 
   // MARK: - Playlist privacy
 
-  /// Makes a playlist private, or publishes it (1 request).
-  package func setPlaylistPrivate(
-    _ isPrivate: Bool,
+  /// Publishes a private playlist (1 request).
+  ///
+  /// This one direction is the whole of what is verified. The authority —
+  /// `api-enhanced@a7e8d48`, `module/playlist_privacy.js` — sends a fixed
+  /// `privacy: 0` to `/api/playlist/update/privacy`, over eapi because
+  /// `util/option.js` leaves the crypto empty and `util/config.json` sets
+  /// `APP_CONF.encrypt`. Nothing in that repository turns an existing public
+  /// playlist private, so MacEase does not offer it: the reverse would be a
+  /// contract this client invented. Making a playlist private is done at
+  /// creation, through `playlist/create` with `privacy: "10"`.
+  package func publishPrivatePlaylist(
     playlistID: Int64,
     credential: NeteaseCredential
   ) async throws {
     let timestamp = Date().timeIntervalSince1970
-    let request = try Self.playlistPrivacyRequest(
-      isPrivate,
+    let request = try Self.publishPrivatePlaylistRequest(
       playlistID: playlistID,
       credential: credential,
-      secretKey: nil,
       osVersion: Self.osVersion,
       buildVersion: String(Int(timestamp)),
       requestID: Self.requestID(timestamp: timestamp)
@@ -636,25 +640,20 @@ extension NeteaseSession {
     )
   }
 
-  /// `privacy` is 10 for a private playlist and 0 for a public one, matching
-  /// the value `playlist/create` takes.
-  package static func playlistPrivacyRequest(
-    _ isPrivate: Bool,
+  package static func publishPrivatePlaylistRequest(
     playlistID: Int64,
     credential: NeteaseCredential,
-    secretKey: String?,
     osVersion: String,
     buildVersion: String,
     requestID: String
   ) throws -> URLRequest {
-    let csrf = try csrfJSONValue(credential)
-    let json =
-      #"{"id":\#(playlistID),"privacy":\#(isPrivate ? 10 : 0),"csrf_token":\#(csrf)}"#
-    return weapiRequest(
-      url: playlistPrivacyURL,
-      parameters: try weapiParameters(json: json, secretKey: secretKey),
+    try credentialledEAPIRequest(
+      path: playlistPrivacyEndpoint,
+      body: #""id":\#(playlistID),"privacy":0"#,
       credential: credential,
-      platformContext: true
+      osVersion: osVersion,
+      buildVersion: buildVersion,
+      requestID: requestID
     )
   }
 

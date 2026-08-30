@@ -70,7 +70,11 @@ package protocol NeteaseTransporting: Sendable {
     credential: NeteaseCredential
   ) async throws
 
-  func createPlaylist(name: String, credential: NeteaseCredential) async throws
+  func createPlaylist(
+    name: String,
+    isPrivate: Bool,
+    credential: NeteaseCredential
+  ) async throws
 
   func deletePlaylist(playlistID: Int64, credential: NeteaseCredential) async throws
 
@@ -153,8 +157,9 @@ package protocol NeteaseTransporting: Sendable {
 
   func deleteCloudSong(songID: Int64, credential: NeteaseCredential) async throws
 
-  func setPlaylistPrivate(
-    _ isPrivate: Bool,
+  /// Publishes a private playlist. There is no verified reverse, so there is
+  /// no member for one.
+  func publishPrivatePlaylist(
     playlistID: Int64,
     credential: NeteaseCredential
   ) async throws

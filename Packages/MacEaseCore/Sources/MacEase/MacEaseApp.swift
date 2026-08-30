@@ -36,6 +36,10 @@ struct MacEaseApp: App {
   /// nil when the store could not be opened. Persistence is a convenience:
   /// losing it costs the resume point, not the app.
   @State private var queuePersistence: QueuePersistence?
+  /// Why the store could not be opened, when it could not. Kept so a store
+  /// that never opened is visible rather than looking like one that is quietly
+  /// keeping up.
+  @State private var storageDiagnostic: String?
   @State private var selectedTab: MainTab = .session
 
   init() {
@@ -91,12 +95,24 @@ struct MacEaseApp: App {
       performIntent: { router.perform($0) }
     )
     nowPlaying.startObserving()
+    // A store that will not open is not a reason to refuse to run: the queue
+    // simply does not survive a relaunch, and everything else is unaffected.
+    // Why it would not open is kept, so it cannot be mistaken for a store that
+    // is quietly keeping up.
+    let storage = Self.openStorage(playback: playback)
+    let queuePersistence = storage.persistence
+    playback.onExplicitStop = {
+      queuePersistence?.clearQueueAfterExplicitStop()
+    }
+    library.onPersistablePlaylistsChanged = { accountID, playlists in
+      await queuePersistence?.savePlaylists(playlists, accountID: accountID)
+    }
     // A divergence found by any coordinator invalidates the identity for all
     // of them, so the session owner clears everything, not just the reporter.
     login.onIdentityChanged = {
       [weak playback, weak library, weak discovery, weak collections, weak lyrics,
         weak nowPlaying] in
-      playback?.stop()
+      playback?.stopForSessionChange()
       library?.reset()
       discovery?.reset()
       collections?.reset()
@@ -104,6 +120,32 @@ struct MacEaseApp: App {
       // The system surface must not keep advertising a track that belonged to
       // a session that no longer exists.
       nowPlaying?.clear()
+    }
+    // Every path that establishes or drops an account arrives here, so QR,
+    // SMS, Import and Validate all bind the same per-account data and spend
+    // the same single launch-scoped Discover prefetch. None of them carries a
+    // copy of this decision, so none of them can be left out of it.
+    login.onValidatedAccountChanged = {
+      [weak login, weak library, weak discovery] account in
+      Task { @MainActor in
+        guard let account else {
+          await queuePersistence?.deactivate()
+          return
+        }
+        // Another transition may have superseded this one; binding the account
+        // it replaced would put the wrong queue back.
+        guard let login, login.account == account else { return }
+        discovery?.prefetch(session: login)
+        // Binding the new account is what restores its queue; the previous
+        // account's stored queue is left on disk untouched.
+        await queuePersistence?.activate(accountID: account.userID)
+        guard login.account == account else { return }
+        library?.restore(
+          playlists: await queuePersistence?.storedPlaylists(
+            accountID: account.userID
+          ) ?? []
+        )
+      }
     }
     _session = State(initialValue: login)
     _library = State(initialValue: library)
@@ -116,13 +158,23 @@ struct MacEaseApp: App {
     _artwork = State(initialValue: artwork)
     _nowPlaying = State(initialValue: nowPlaying)
     _systemEvents = State(initialValue: systemEvents)
-    // A store that will not open is not a reason to refuse to run: the queue
-    // simply does not survive a relaunch, and everything else is unaffected.
-    _queuePersistence = State(
-      initialValue: LibraryStore.defaultPath()
-        .flatMap { try? LibraryStore(path: $0) }
-        .map { QueuePersistence(store: $0, playback: playback) }
-    )
+    _queuePersistence = State(initialValue: queuePersistence)
+    _storageDiagnostic = State(initialValue: storage.diagnostic)
+  }
+
+  private static func openStorage(
+    playback: PlaybackController
+  ) -> (persistence: QueuePersistence?, diagnostic: String?) {
+    do {
+      let store = try LibraryStore(path: try LibraryStore.defaultPath())
+      return (QueuePersistence(store: store, playback: playback), nil)
+    } catch {
+      return (
+        nil,
+        "Local storage is unavailable, so the queue will not survive a "
+          + "relaunch: " + LibraryStore.diagnostic(for: error)
+      )
+    }
   }
 
   var body: some Scene {
@@ -131,12 +183,8 @@ struct MacEaseApp: App {
         TabView(selection: $selectedTab) {
           SessionView(
             session: session,
-            library: library,
-            discovery: discovery,
-            collections: collections,
-            playback: playback,
             arbiter: arbiter,
-            queuePersistence: queuePersistence
+            storageStatus: storageDiagnostic ?? queuePersistence?.lastFailure
           )
           .tabItem { Label("Session", systemImage: "person.crop.circle") }
           .tag(MainTab.session)
@@ -172,7 +220,8 @@ struct MacEaseApp: App {
                   id: playlist.id,
                   name: playlist.name,
                   trackCount: 0,
-                  owned: false
+                  owned: false,
+                  isPrivate: nil
                 ),
                 session: session
               )
@@ -236,9 +285,6 @@ struct MacEaseApp: App {
       .onChange(of: playback.phase) {
         Task { await queuePersistence?.save() }
       }
-      .onChange(of: library.playlists.count) {
-        Task { await queuePersistence?.savePlaylists(library.playlists) }
-      }
       .task {
         await session.start()
       }
@@ -249,12 +295,10 @@ struct MacEaseApp: App {
 
 private struct SessionView: View {
   @Bindable var session: LoginCoordinator
-  let library: PlaylistLibraryCoordinator
-  let discovery: DiscoveryCoordinator
-  let collections: CollectionsCoordinator
-  let playback: PlaybackController
   let arbiter: OperationArbiter
-  let queuePersistence: QueuePersistence?
+  /// Non-nil when local storage is not doing its job, so a queue that is not
+  /// being saved never looks like one that is.
+  let storageStatus: String?
   @State private var showsWebLogin = false
 
   var body: some View {
@@ -333,6 +377,15 @@ private struct SessionView: View {
       Text(session.status)
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(12)
+
+      if let storageStatus {
+        Label(storageStatus, systemImage: "externaldrive.badge.exclamationmark")
+          .font(.caption)
+          .foregroundStyle(.secondary)
+          .frame(maxWidth: .infinity, alignment: .leading)
+          .padding(.horizontal, 12)
+          .padding(.bottom, 12)
+      }
     }
   }
 
@@ -354,45 +407,13 @@ private struct SessionView: View {
 
   /// A session mutation only starts when the arbiter is free, so it can no
   /// longer cancel a write that has already reached the server. What happens
-  /// to session-scoped data is decided from the typed result, never from the
-  /// status text, and only after the operation has finished.
+  /// to per-account local data follows from the account the operation left in
+  /// effect, which `LoginCoordinator` reports once for every path — including
+  /// a QR authorisation, which arrives long after this call has returned.
   private func mutateSession(
     _ operation: @escaping @MainActor () async -> SessionMutationResult
   ) {
-    Task {
-      switch await operation() {
-      case .unchangedValidated(let account):
-        // Same account: playback and everything loaded still belong to it.
-        // Roadmap decision: one launch-scoped Discover prefetch after the
-        // first successful validation; refreshes stay user-triggered.
-        discovery.prefetch(session: session)
-        await activate(account)
-      case .credentialReplaced(let account):
-        if let account {
-          discovery.prefetch(session: session)
-          // Binding the new account is what restores its queue; the previous
-          // account's stored queue is left on disk untouched.
-          await activate(account)
-        } else {
-          await queuePersistence?.deactivate()
-        }
-      case .signedOut, .storedUnvalidated, .storedPresenceUnknown:
-        // LoginCoordinator committed the identity change and cleared all
-        // session-scoped modules before releasing its operation lease.
-        await queuePersistence?.deactivate()
-      case .rejected:
-        // Nothing was established, so nothing confirmed is thrown away.
-        break
-      }
-    }
-  }
-
-  /// Binds the confirmed account to its stored data: the queue it left off in
-  /// and the playlists it last saw. Neither issues a request.
-  private func activate(_ account: NeteaseAccount) async {
-    guard let queuePersistence else { return }
-    await queuePersistence.activate(accountID: account.userID)
-    library.restore(playlists: await queuePersistence.storedPlaylists())
+    Task { _ = await operation() }
   }
 }
 
@@ -404,9 +425,11 @@ private struct PlaylistLibraryView: View {
   let arbiter: OperationArbiter
   let artwork: ArtworkLoader
   @State private var newPlaylistName = ""
+  @State private var newPlaylistIsPrivate = false
   @State private var submittedPlaylistName: String?
   @State private var renameText = ""
   @State private var playlistPendingDeletion: UserPlaylist?
+  @State private var playlistPendingPublication: UserPlaylist?
 
   private var requestInFlight: Bool { library.isLoading || arbiter.isBusy }
 
@@ -473,6 +496,27 @@ private struct PlaylistLibraryView: View {
     } message: {
       Text("This permanently deletes the playlist from your NetEase account.")
     }
+    .confirmationDialog(
+      playlistPendingPublication.map { "Make \($0.name) public?" }
+        ?? "Make playlist public?",
+      isPresented: Binding(
+        get: { playlistPendingPublication != nil },
+        set: { if !$0 { playlistPendingPublication = nil } }
+      ),
+      titleVisibility: .visible
+    ) {
+      Button("Make Public · 1 request", role: .destructive) {
+        if let playlist = playlistPendingPublication {
+          library.publishPlaylist(playlist, session: session)
+        }
+        playlistPendingPublication = nil
+      }
+      Button("Cancel", role: .cancel) { playlistPendingPublication = nil }
+    } message: {
+      Text(
+        "This permanently makes the playlist public. MacEase cannot make it private again."
+      )
+    }
   }
 
   @ViewBuilder private var toolbar: some View {
@@ -510,9 +554,18 @@ private struct PlaylistLibraryView: View {
     HStack {
       TextField("New playlist name", text: $newPlaylistName)
         .frame(maxWidth: 240)
+      // Privacy is set when the playlist is created. That is the only
+      // direction NetEase is known to accept, so it is the only one offered.
+      Toggle("Private", isOn: $newPlaylistIsPrivate)
+        .toggleStyle(.checkbox)
+        .help("Creates the playlist private; only you can see it")
       Button("Create · 1 request", systemImage: "plus.rectangle.on.folder") {
         submittedPlaylistName = newPlaylistName
-        library.createPlaylist(named: newPlaylistName, session: session)
+        library.createPlaylist(
+          named: newPlaylistName,
+          isPrivate: newPlaylistIsPrivate,
+          session: session
+        )
       }
       .disabled(
         session.account == nil || requestInFlight
@@ -634,6 +687,13 @@ private struct PlaylistLibraryView: View {
             || renameText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         )
         .help("Changes only the name; description and tags are untouched")
+        if playlist.isPrivate == true {
+          Button("Make Public · 1 request") {
+            playlistPendingPublication = playlist
+          }
+          .disabled(requestInFlight)
+          .help("Permanently publishes this private playlist")
+        }
       }
       if library.canLoadMoreTracks {
         Button("Load More Tracks · 1 request", systemImage: "plus") {

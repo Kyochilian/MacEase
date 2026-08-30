@@ -60,12 +60,23 @@ public struct UserPlaylist: Equatable, Sendable {
   public let name: String
   public let trackCount: Int
   public let owned: Bool
+  /// `true` and `false` are service values 10 and 0 respectively. Missing or
+  /// unrecognised response values stay nil, so MacEase never offers a privacy
+  /// write from a guess.
+  public let isPrivate: Bool?
 
-  package init(id: Int64, name: String, trackCount: Int, owned: Bool) {
+  package init(
+    id: Int64,
+    name: String,
+    trackCount: Int,
+    owned: Bool,
+    isPrivate: Bool? = nil
+  ) {
     self.id = id
     self.name = name
     self.trackCount = trackCount
     self.owned = owned
+    self.isPrivate = isPrivate
   }
 }
 
@@ -493,14 +504,19 @@ public actor NeteaseSession {
     )
   }
 
-  /// Creates a playlist. The response carries the new id, but MacEase does not
-  /// decode it: the user reloads the list explicitly, so no follow-up request
-  /// is issued automatically.
+  /// Creates a playlist, ordinary or private (1 request). The response carries
+  /// the new id, but MacEase does not decode it: the user reloads the list
+  /// explicitly, so no follow-up request is issued automatically.
   package func createPlaylist(
     name: String,
+    isPrivate: Bool,
     credential: NeteaseCredential
   ) async throws {
-    let request = try Self.createPlaylistRequest(name: name, credential: credential)
+    let request = try Self.createPlaylistRequest(
+      name: name,
+      isPrivate: isPrivate,
+      credential: credential
+    )
     let (data, response) = try await urlSession.data(for: request)
     let httpResponse = try Self.requireHTTPResponse(response)
     try Self.classifyWriteAcknowledgement(
@@ -746,12 +762,19 @@ public actor NeteaseSession {
     }
     let payload = try JSONDecoder().decode(UserPlaylistsPayload.self, from: data)
     return UserPlaylistPage(
-      playlists: payload.playlist.map {
-        UserPlaylist(
-          id: $0.id,
-          name: $0.name,
-          trackCount: $0.trackCount,
-          owned: $0.creator.userId == userID
+      playlists: payload.playlist.map { item in
+        let isPrivate: Bool?
+        switch item.privacy {
+        case 10: isPrivate = true
+        case 0: isPrivate = false
+        default: isPrivate = nil
+        }
+        return UserPlaylist(
+          id: item.id,
+          name: item.name,
+          trackCount: item.trackCount,
+          owned: item.creator.userId == userID,
+          isPrivate: isPrivate
         )
       },
       more: payload.more
@@ -1084,15 +1107,21 @@ public actor NeteaseSession {
     try classifyWriteAcknowledgement(data: data, response: response)
   }
 
+  /// `privacy` is `"10"` for a private playlist and `"0"` for an ordinary one,
+  /// sent as strings. That is what `module/playlist_create.js` in
+  /// `api-enhanced@a7e8d48` sends, over weapi, and it is the only verified way
+  /// MacEase has of making a playlist private at all.
   package static func createPlaylistRequest(
     name: String,
+    isPrivate: Bool,
     credential: NeteaseCredential,
     secretKey: String? = nil
   ) throws -> URLRequest {
     let encodedName = String(decoding: try JSONEncoder().encode(name), as: UTF8.self)
     let csrf = try csrfJSONValue(credential)
     let json =
-      #"{"name":\#(encodedName),"privacy":"0","type":"NORMAL","csrf_token":\#(csrf)}"#
+      #"{"name":\#(encodedName),"privacy":"\#(isPrivate ? 10 : 0)","#
+      + #""type":"NORMAL","csrf_token":\#(csrf)}"#
     return weapiRequest(
       url: createPlaylistURL,
       parameters: try weapiParameters(json: json, secretKey: secretKey),
@@ -1767,6 +1796,7 @@ private struct UserPlaylistsPayload: Decodable {
     let id: Int64
     let name: String
     let trackCount: Int
+    let privacy: Int?
     let creator: Creator
   }
 

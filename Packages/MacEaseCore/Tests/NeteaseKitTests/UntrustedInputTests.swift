@@ -65,6 +65,7 @@ private let boundaryCredential = testCredential(musicU: "music-u-test", csrf: "c
   await #expect(throws: NeteaseTransportError.nonHTTPResponse) {
     try await session.createPlaylist(
       name: "boundary",
+      isPrivate: false,
       credential: boundaryCredential
     )
   }

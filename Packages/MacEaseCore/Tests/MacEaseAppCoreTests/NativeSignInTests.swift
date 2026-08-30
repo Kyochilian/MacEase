@@ -12,16 +12,22 @@ import Testing
 /// belongs to, and sign-out revokes on the server before it forgets locally.
 
 @MainActor
-private struct AuthRig {
+private final class AuthRig {
   let transport = FakeTransport()
   let vault: FakeVault
   let arbiter = OperationArbiter()
   let session: LoginCoordinator
-  private(set) var identityChanges = 0
+  /// Every account the coordinator reported, in order, including nil. This is
+  /// the one hook the app binds per-account local data from, so what lands
+  /// here is exactly what a sign-in path is worth.
+  private(set) var accountChanges: [NeteaseAccount?] = []
 
   init(stored: NeteaseCredential? = nil) {
     vault = FakeVault(stored: stored)
     session = LoginCoordinator(transport: transport, vault: vault, arbiter: arbiter)
+    session.onValidatedAccountChanged = { [weak self] account in
+      self?.accountChanges.append(account)
+    }
   }
 }
 
@@ -72,6 +78,96 @@ private struct AuthRig {
 
   #expect(rig.session.qrSession == nil)
   #expect(await rig.transport.recordedCalls() == [.beginQRLogin])
+}
+
+/// A confirmed code is a sign-in like any other: the credential is stored, the
+/// account is confirmed, and the account change is reported once — which is
+/// what binds the queue and the playlists this account left behind.
+@Test @MainActor func aConfirmedCodeSignsInAndReportsTheAccountOnce() async {
+  let rig = AuthRig()
+  let granted = makeCredential("qr-token")
+  await rig.transport.setQRPolls([.success(.authorised(granted))])
+  _ = await rig.session.startQRLogin()
+
+  #expect(await rig.session.pollQRLoginOnce() == .finished)
+
+  #expect(rig.session.account == testAccount)
+  #expect(await rig.vault.storedForTesting() == granted)
+  #expect(rig.accountChanges == [testAccount])
+  // The code comes down once it has been spent.
+  #expect(rig.session.qrSession == nil)
+  #expect(rig.session.status == "QR sign-in complete")
+  #expect(
+    await rig.transport.recordedCalls()
+      == [.beginQRLogin, .pollQRLogin("key"), .accountStatus]
+  )
+}
+
+/// The poll is a read, and it must not go out while a write owns the exclusive
+/// slot: the answer could be an authorisation, and adopting one would replace
+/// the credential and clear every module underneath a write that is already on
+/// its way to NetEase. Nothing is sent, and the code stays live for the next
+/// cycle.
+@Test @MainActor func aPollIsNotSentWhileAWriteOwnsTheArbiter() async {
+  let rig = AuthRig()
+  await rig.transport.setQRPolls([.success(.scanned)])
+  _ = await rig.session.startQRLogin()
+  let write = rig.arbiter.begin(name: "Like", effect: .write)!
+
+  #expect(await rig.session.pollQRLoginOnce() == .deferred)
+
+  #expect(await rig.transport.recordedCalls() == [.beginQRLogin])
+  #expect(rig.session.qrSession?.key == "key")
+  #expect(rig.session.qrStatus == .waiting)
+
+  rig.arbiter.end(write, outcome: .applied)
+
+  #expect(await rig.session.pollQRLoginOnce() == .continued)
+  #expect(rig.session.qrStatus == .scanned)
+  rig.session.cancelQRLogin()
+}
+
+/// A write cannot slip in between the poll going out and the credential being
+/// adopted. The poll holds the read side for the whole request, which is what
+/// stops a write from starting, and the same token becomes the session
+/// mutation rather than being released and re-taken.
+@Test @MainActor func adoptingAConfirmedCodeLeavesNoGapForAWrite() async {
+  let rig = AuthRig()
+  await rig.transport.setQRPolls([.success(.authorised(makeCredential("qr-token")))])
+  _ = await rig.session.startQRLogin()
+  await rig.transport.gate.close()
+
+  async let cycle = rig.session.pollQRLoginOnce()
+  while await rig.transport.gate.arrivalCount() < 2 { await Task.yield() }
+
+  #expect(rig.arbiter.activeReadCount == 1)
+  #expect(rig.arbiter.begin(name: "Like", effect: .write) == nil)
+
+  await rig.transport.gate.open()
+  #expect(await cycle == .finished)
+
+  #expect(rig.session.account == testAccount)
+  #expect(rig.arbiter.canStart())
+  #expect(rig.arbiter.activeReadCount == 0)
+  #expect(rig.arbiter.unresolvedOutcomes.isEmpty)
+}
+
+/// NetEase granted a session MacEase could not confirm. The code has been
+/// spent, so it must not sit on screen reading "Signed in" over an account
+/// nobody validated, and no account may be reported as bound.
+@Test @MainActor func aCodeWhoseAccountCannotBeConfirmedTakesTheCodeDown() async {
+  let rig = AuthRig()
+  await rig.transport.setQRPolls([.success(.authorised(makeCredential("qr-token")))])
+  await rig.transport.setAccountStatus(.failure(URLError(.timedOut)))
+  _ = await rig.session.startQRLogin()
+
+  #expect(await rig.session.pollQRLoginOnce() == .finished)
+
+  #expect(rig.session.account == nil)
+  #expect(rig.session.storedSessionPresence == .stored)
+  #expect(rig.session.qrSession == nil)
+  #expect(rig.session.qrStatus == nil)
+  #expect(rig.accountChanges.isEmpty)
 }
 
 // MARK: - SMS sign-in

@@ -51,6 +51,9 @@ package final class PlaybackController {
   /// ordinary pause so the status can say why it stopped, and so a wake or a
   /// reconnect does not claim credit for a pause the user asked for.
   @ObservationIgnored private var machinePausedReason: MachinePause?
+  /// Wired by the composition root. Only the user-facing `stop()` invokes it;
+  /// session cleanup uses `stopForSessionChange()` and preserves the row.
+  @ObservationIgnored package var onExplicitStop: (@MainActor () -> Void)?
 
   /// Why the machine, rather than the user, stopped playback.
   package enum MachinePause: Equatable, Sendable {
@@ -421,6 +424,17 @@ package final class PlaybackController {
   }
 
   package func stop() {
+    stopPlayback()
+    onExplicitStop?()
+  }
+
+  /// Removes session-scoped playback without interpreting the identity change
+  /// as the user discarding their saved queue.
+  package func stopForSessionChange() {
+    stopPlayback()
+  }
+
+  private func stopPlayback() {
     gate.cancel()
     playTask?.cancel()
     playTask = nil

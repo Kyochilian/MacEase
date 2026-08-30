@@ -30,4 +30,3 @@ secrets/
 
 # Project documentation is local-only.
 *.md
-!README.md

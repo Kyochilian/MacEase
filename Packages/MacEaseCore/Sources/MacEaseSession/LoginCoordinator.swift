@@ -18,6 +18,18 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
   /// thousands.
   package static let qrPollIntervalSeconds = 2.0
 
+  /// What one poll of a sign-in code did, so the timer loop and the tests
+  /// agree on the rules rather than each having its own idea of them.
+  package enum QRPollCycle: Equatable, Sendable {
+    /// Nothing was sent: an exclusive operation owns the arbiter, or the read
+    /// side is full. The code stays live and the next cycle asks again.
+    case deferred
+    /// Asked, and the answer was not the last one.
+    case continued
+    /// There is nothing left to ask.
+    case finished
+  }
+
   @ObservationIgnored private let dataStore: WKWebsiteDataStore
   @ObservationIgnored private let transport: any NeteaseTransporting
   @ObservationIgnored private let vault: any CredentialStoring
@@ -230,7 +242,7 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
       qrSession = session
       qrStatus = .waiting
       status = "Scan the code with the NetEase Cloud Music app"
-      beginPolling(key: session.key)
+      beginPolling()
       return commit(.inconclusive(.busy))
     } catch let error as NeteaseServiceError {
       status = "QR sign-in \(error.source.rawValue) error \(error.statusCode)"
@@ -242,9 +254,7 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
   }
 
   package func cancelQRLogin() {
-    cancelQRPolling()
-    qrSession = nil
-    qrStatus = nil
+    clearQRSession()
     status = "QR sign-in cancelled"
   }
 
@@ -253,46 +263,113 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
     qrPollTask = nil
   }
 
-  private func beginPolling(key: String) {
+  /// Takes the code off screen and stops asking about it.
+  private func clearQRSession() {
+    cancelQRPolling()
+    qrSession = nil
+    qrStatus = nil
+  }
+
+  /// Starts the timer loop. There is only ever one: every path that replaces
+  /// or takes down the code cancels the running task first, so no loop can
+  /// outlive the code it was started for.
+  private func beginPolling() {
     qrPollTask = Task { [weak self] in
       while !Task.isCancelled {
         try? await Task.sleep(for: .seconds(Self.qrPollIntervalSeconds))
         guard !Task.isCancelled else { return }
-        guard let self, self.qrSession?.key == key else { return }
-        guard await self.pollOnce(key: key) else { return }
+        guard let self else { return }
+        guard await self.pollQRLoginOnce() != .finished else { return }
       }
     }
   }
 
-  /// One poll. Returns whether polling should continue.
-  private func pollOnce(key: String) async -> Bool {
-    let status: QRLoginStatus
+  /// One poll of the code in progress: the arbitration, the request, and what
+  /// to do with the answer. The timer loop is the only production caller; it
+  /// is `package` so the rules can be exercised directly instead of through a
+  /// wall clock.
+  ///
+  /// A poll is a read and claims the arbiter as one. While a server write or
+  /// another session mutation owns the exclusive slot nothing is sent at all:
+  /// the answer could be an authorisation, and adopting one replaces the
+  /// credential and clears every module's session-scoped data — underneath a
+  /// write that may already be on its way to NetEase. Deferring costs one
+  /// interval; the code stays live and the polling state is untouched.
+  @discardableResult
+  package func pollQRLoginOnce() async -> QRPollCycle {
+    guard let key = qrSession?.key else { return .finished }
+    guard
+      let readToken = arbiter.begin(name: "QR sign-in poll", effect: .read)
+    else { return .deferred }
+
+    let polled: QRLoginStatus
     do {
-      status = try await transport.pollQRLogin(key: key)
+      polled = try await transport.pollQRLogin(key: key)
     } catch {
+      arbiter.end(readToken, outcome: .failed)
       // A failed poll stops the loop rather than retrying forever against an
       // endpoint that may be refusing this client.
-      guard qrSession?.key == key else { return false }
+      guard qrSession?.key == key else { return .finished }
       qrStatus = nil
-      self.status = OperationFailure.classify(error, cancelled: Task.isCancelled)
+      status = OperationFailure.classify(error, cancelled: Task.isCancelled)
         .statusText(operation: "QR sign-in")
-      return false
+      return .finished
     }
-    guard qrSession?.key == key else { return false }
+    guard qrSession?.key == key else {
+      arbiter.end(readToken, outcome: .cancelled)
+      return .finished
+    }
 
-    qrStatus = status
-    switch status {
+    qrStatus = polled
+    switch polled {
     case .waiting:
-      return true
+      arbiter.end(readToken, outcome: .applied)
+      return .continued
     case .scanned:
-      self.status = "Scanned; confirm the sign-in on your phone"
-      return true
+      arbiter.end(readToken, outcome: .applied)
+      status = "Scanned; confirm the sign-in on your phone"
+      return .continued
     case .expired:
-      self.status = "The code expired; ask for a new one"
-      return false
+      arbiter.end(readToken, outcome: .applied)
+      status = "The code expired; ask for a new one"
+      return .finished
     case .authorised(let credential):
-      await adopt(credential, source: "QR")
-      return false
+      return await adoptAuthorisedQRSession(credential, readToken: readToken)
+    }
+  }
+
+  /// Turns the read this poll already holds into the session mutation that
+  /// adopts the credential, so there is no moment between learning the code
+  /// was confirmed and owning the exclusive slot.
+  ///
+  /// Promotion is refused only while an exclusive operation is already
+  /// running, and a write cannot be one: `begin` will not start a write while
+  /// any read is held, and this poll has held one since before the response
+  /// arrived. What is left is another promotion — a session being invalidated
+  /// — and a code adopted into an identity that is being torn down would land
+  /// on the wrong account, so it is refused and the user asked again.
+  private func adoptAuthorisedQRSession(
+    _ credential: NeteaseCredential,
+    readToken: OperationToken
+  ) async -> QRPollCycle {
+    guard let mutationToken = arbiter.promote(readToken, name: "QR sign-in") else {
+      arbiter.end(readToken, outcome: .failed)
+      clearQRSession()
+      status = "The stored session changed while the code was confirmed; sign in again"
+      return .finished
+    }
+    defer { arbiter.end(mutationToken, outcome: .applied) }
+
+    switch await adopt(credential, source: "QR") {
+    case .unchangedValidated, .credentialReplaced:
+      // The account is confirmed; `adopt` has already taken the code down.
+      return .finished
+    case .signedOut, .storedUnvalidated, .storedPresenceUnknown, .rejected:
+      // NetEase granted a session MacEase could not establish. The code has
+      // been spent either way, so it comes down rather than sitting there
+      // reading "Signed in" over a session nobody confirmed.
+      clearQRSession()
+      return .finished
     }
   }
 
@@ -487,9 +564,7 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
   }
 
   private func resetSignInForms() {
-    cancelQRPolling()
-    qrSession = nil
-    qrStatus = nil
+    clearQRSession()
     verificationCode = ""
     codeWasSent = false
   }
@@ -616,6 +691,15 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
   /// identity in effect changes. It is set once at wiring time.
   @ObservationIgnored package var onIdentityChanged: (@MainActor () -> Void)?
 
+  /// Called by the app when the validated account itself changes, including to
+  /// none. It is the one place per-account local data is bound, so QR, SMS,
+  /// Import and Validate all reach it without any of them carrying its own
+  /// copy of the decision — and none of them can be wired up and another left
+  /// out. It runs after `onIdentityChanged`, so binding always follows
+  /// clearing.
+  @ObservationIgnored package var onValidatedAccountChanged:
+    (@MainActor (NeteaseAccount?) -> Void)?
+
   /// The single place a coordinator's observation of the stored item is
   /// committed to session state. Coordinators never write these fields.
   package func reportDivergence(_ divergence: SessionDivergence) {
@@ -690,6 +774,7 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
 
   @discardableResult
   private func commit(_ event: SessionEvent) -> SessionMutationResult {
+    let previousAccount = snapshot.account
     let (next, result) = SessionReducer.reduce(snapshot, event)
     snapshot = next
     switch result {
@@ -699,6 +784,12 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
       onIdentityChanged?()
     case .unchangedValidated, .rejected:
       break
+    }
+    // Binding per-account local data follows from the account having actually
+    // changed, not from which operation ran, so a path that establishes an
+    // account cannot forget to bind it.
+    if snapshot.account != previousAccount {
+      onValidatedAccountChanged?(snapshot.account)
     }
     return result
   }
