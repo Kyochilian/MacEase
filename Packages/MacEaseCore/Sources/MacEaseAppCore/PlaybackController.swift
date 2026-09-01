@@ -48,11 +48,15 @@ package final class PlaybackController {
   @ObservationIgnored private var queueTracks: [Track] = []
   /// Where the queue came from. A restored queue that says only "these forty
   /// tracks" cannot tell the user what they were listening to.
-  @ObservationIgnored private var queueContext: PlaybackContext?
+  @ObservationIgnored package private(set) var queueContext: PlaybackContext?
   @ObservationIgnored private weak var attachedSession: (any SessionProviding)?
   @ObservationIgnored private weak var offlineDownloads: DownloadCoordinator?
   @ObservationIgnored private var sleepTask: Task<Void, Never>?
   @ObservationIgnored private var sleepGeneration = 0
+  /// Monotonic identity of the latest accepted playback intent. Queue
+  /// progression does not bump it; explicit Play/Next/Previous/Play Again,
+  /// Stop and terminal teardown do.
+  @ObservationIgnored package private(set) var intentRevision: UInt64 = 0
   /// Playback the machine interrupted, not the user. Kept apart from an
   /// ordinary pause so the status can say why it stopped, and so a wake or a
   /// reconnect does not claim credit for a pause the user asked for.
@@ -60,6 +64,11 @@ package final class PlaybackController {
   /// Wired by the composition root. Only the user-facing `stop()` invokes it;
   /// session cleanup uses `stopForSessionChange()` and preserves the row.
   @ObservationIgnored package var onExplicitStop: (@MainActor () -> Void)?
+  /// One narrow notification for the owner of server-generated queues. The
+  /// revision tells it whether an in-flight response still belongs to the
+  /// accepted intent; unchanged revisions are ordinary queue progression.
+  @ObservationIgnored package var onPlaybackChanged:
+    (@MainActor (UInt64) -> Void)?
 
   /// Why the machine, rather than the user, stopped playback.
   package enum MachinePause: Equatable, Sendable {
@@ -265,9 +274,10 @@ package final class PlaybackController {
         startIndex: startIndex,
         mode: playbackMode,
         using: &rng
-      )
+    )
     else { return }
     guard tracks.indices.contains(startIndex) else { return }
+    acceptExplicitPlaybackIntent()
     let requestedQuality = quality
     guard let source = entrySource(
       songID: tracks[startIndex].id,
@@ -306,8 +316,9 @@ package final class PlaybackController {
         startIndex: 0,
         mode: playbackMode,
         using: &rng
-      )
+    )
     else { return }
+    acceptExplicitPlaybackIntent()
     guard let source = entrySource(
       songID: download.track.id,
       requestedQuality: download.requestedQuality,
@@ -408,6 +419,7 @@ package final class PlaybackController {
     guard queueTracks.indices.contains(retry.queueIndex),
       queueTracks[retry.queueIndex].id == retry.songID
     else { return }
+    acceptExplicitPlaybackIntent()
     guard let source = entrySource(
       songID: retry.songID,
       requestedQuality: retry.quality,
@@ -500,7 +512,16 @@ package final class PlaybackController {
     status = "Playback stopped because its downloaded file was deleted"
   }
 
+  /// A server-generated queue removed its last entry, so there is nothing left
+  /// to play. Also not the user's Stop button: the account's saved queue is
+  /// left where it is.
+  package func stopForEmptiedQueue(status newStatus: String) {
+    stopPlayback()
+    status = newStatus
+  }
+
   private func stopPlayback() {
+    advanceIntentRevision()
     gate.cancel()
     playTask?.cancel()
     playTask = nil
@@ -520,6 +541,7 @@ package final class PlaybackController {
     trackName = nil
     movePosition(to: 0)
     status = "Playback stopped"
+    notifyPlaybackChanged()
   }
 
   /// A local timer; it never issues requests. Zero minutes cancels it,
@@ -564,6 +586,7 @@ package final class PlaybackController {
       return false
     }
     guard let target, queueTracks.indices.contains(target) else { return false }
+    acceptExplicitPlaybackIntent()
     let requestedQuality = quality
     guard let source = entrySource(
       songID: queueTracks[target].id,
@@ -629,6 +652,127 @@ package final class PlaybackController {
         )
       }
     }
+    notifyPlaybackChanged()
+  }
+
+  /// Adds server-generated continuation tracks to the queue that is already
+  /// playing, without disturbing the entry playing now.
+  ///
+  /// Only the owner of this exact context may extend it, so a late batch from
+  /// a radio the user has already left cannot be appended to whatever replaced
+  /// it. Duplicate ids are dropped here rather than at each caller: the queue
+  /// is the thing that must not contain the same song twice.
+  /// Returns how many entries were actually added.
+  @discardableResult
+  package func extendQueue(
+    with tracks: [Track],
+    context: PlaybackContext
+  ) -> Int {
+    guard queueContext == context, queue != nil, !tracks.isEmpty else { return 0 }
+    var seen = Set(queueTracks.map(\.id))
+    let fresh = tracks.filter { seen.insert($0.id).inserted }
+    guard !fresh.isEmpty else { return 0 }
+    queueTracks += fresh
+    queue?.append(fresh.count, using: &rng)
+    return fresh.count
+  }
+
+  /// The queue as it stands, for the coordinator that feeds a
+  /// server-generated one. It is the single copy: nobody keeps a parallel list
+  /// that could drift from what is actually playing.
+  package func queuedTracks(context: PlaybackContext) -> [Track] {
+    guard queueContext == context else { return [] }
+    return queueTracks
+  }
+
+  /// Removes one exact song from the queue owned by `context`. Removing a
+  /// non-current entry only remaps indices; the AVPlayer item, clock, phase and
+  /// position stay untouched. Removing the current entry starts the successor
+  /// selected by `PlaybackQueue` through the normal local-first entry path.
+  ///
+  /// Returns false when the user has left that context or the target is no
+  /// longer in it, so a late server acknowledgement cannot edit a replacement
+  /// queue.
+  @discardableResult
+  package func removeTrack(
+    songID: Int64,
+    from context: PlaybackContext,
+    session: any SessionProviding,
+    emptyStatus: String
+  ) -> Bool {
+    guard queueContext == context, let heldQueue = queue,
+      let removedIndex = queueTracks.firstIndex(where: { $0.id == songID })
+    else { return false }
+
+    if heldQueue.count == 1 {
+      stopForEmptiedQueue(status: emptyStatus)
+      return true
+    }
+
+    var updatedQueue = heldQueue
+    guard updatedQueue.remove(at: removedIndex) else { return false }
+    var remaining = queueTracks
+    remaining.remove(at: removedIndex)
+    let removedCurrent = heldQueue.currentIndex == removedIndex
+
+    if !removedCurrent {
+      queueTracks = remaining
+      queue = updatedQueue
+      if var retry = attempt {
+        if retry.queueIndex > removedIndex {
+          retry.queueIndex -= 1
+          attempt = retry
+        } else if retry.queueIndex == removedIndex {
+          // Internal state should name the current row. If it does not, retire
+          // the stale retry instead of letting it point at a different song.
+          attempt = nil
+        }
+      }
+      return true
+    }
+
+    guard let account = session.account else { return false }
+    let successorIndex = updatedQueue.currentIndex
+    let requestedQuality = quality
+    acceptExplicitPlaybackIntent()
+    let source = entrySource(
+      songID: remaining[successorIndex].id,
+      requestedQuality: requestedQuality,
+      account: account
+    )
+
+    queueTracks = remaining
+    queue = updatedQueue
+    if let source {
+      startEntry(
+        at: successorIndex,
+        account: account,
+        session: session,
+        auto: false,
+        requestedQuality: requestedQuality,
+        source: source
+      )
+    } else {
+      // A write began only while the read side was empty, so this is an
+      // exceptional race with a new exclusive operation. The confirmed trash
+      // still removes the song; the successor remains explicitly retryable.
+      gate.cancel()
+      playTask?.cancel()
+      playTask = nil
+      releasePlayback()
+      let successor = remaining[successorIndex]
+      attempt = PlaybackAttempt(
+        songID: successor.id,
+        quality: requestedQuality,
+        queueIndex: successorIndex
+      )
+      trackName = successor.name
+      movePosition(to: 0)
+      phase = .failed
+      status = "Song removed; Play Again starts the next queue entry"
+      playbackBecameInactive()
+    }
+    return true
   }
 
   /// Selects a valid account-bound local resource before consulting the read
@@ -752,6 +896,7 @@ package final class PlaybackController {
         status =
           "Track unavailable: itemCode=\(itemCode), "
           + "fee=\(fee.map(String.init) ?? "none"); the queue is not skipped"
+        playbackBecameInactive()
       case .resolved(let resolved):
         try await startPlayback(
           asset: resolved,
@@ -827,6 +972,7 @@ package final class PlaybackController {
       releasePlayback()
       phase = .failed
       status = "Downloaded audio could not be opened"
+      playbackBecameInactive()
       if let downloadID {
         offlineDownloads?.invalidatePlaybackResource(downloadID)
       }
@@ -858,6 +1004,7 @@ package final class PlaybackController {
       releasePlayback()
       phase = .failed
       status = unplayableStatus
+      playbackBecameInactive()
       return false
     }
 
@@ -920,6 +1067,7 @@ package final class PlaybackController {
     status = failedOfflineDownload == nil
       ? "Playback failed (\(failure.diagnostic)); Play Again re-resolves the URL"
       : "Downloaded audio failed; Play Again uses online playback"
+    playbackBecameInactive()
   }
 
   private func handlePlayedToEnd(token: PlaybackIntentGate.Token) {
@@ -975,6 +1123,7 @@ package final class PlaybackController {
     releasePlayback()
     phase = .finished
     self.status = status
+    playbackBecameInactive()
   }
 
   private func replayCurrentItem(token: PlaybackIntentGate.Token) {
@@ -1093,9 +1242,11 @@ package final class PlaybackController {
       phase = .failed
       status = "Song URL network or response error"
     }
+    if phase == .failed { playbackBecameInactive() }
   }
 
   private func abandonPlayback(status: String) {
+    advanceIntentRevision()
     attempt = nil
     queue = nil
     queueTracks = []
@@ -1106,6 +1257,7 @@ package final class PlaybackController {
     trackName = nil
     movePosition(to: 0)
     self.status = status
+    notifyPlaybackChanged()
   }
 
   private func clearPendingSleepStop() {
@@ -1134,6 +1286,28 @@ package final class PlaybackController {
     releasePlayback()
     movePosition(to: 0)
     return token
+  }
+
+  private func playbackBecameInactive() {
+    advanceIntentRevision()
+    notifyPlaybackChanged()
+  }
+
+  /// Commits a user-visible playback choice before it tries to claim a read
+  /// slot. That ordering lets the owner of an obsolete radio read cancel it
+  /// synchronously, so the newer Play/Next/Previous/Play Again can use the
+  /// slot even when the read ceiling is one.
+  private func acceptExplicitPlaybackIntent() {
+    advanceIntentRevision()
+    notifyPlaybackChanged()
+  }
+
+  private func advanceIntentRevision() {
+    intentRevision &+= 1
+  }
+
+  private func notifyPlaybackChanged() {
+    onPlaybackChanged?(intentRevision)
   }
 
   /// Moves the clock for a reason other than playback advancing, so a system

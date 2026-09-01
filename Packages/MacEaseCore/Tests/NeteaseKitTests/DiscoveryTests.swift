@@ -273,8 +273,11 @@ private func expectWeAPIBody(
 }
 
 @Test func searchSongsUsesTheCloudsearchContract() throws {
-  let request = try NeteaseSession.searchSongsRequest(
+  let request = try NeteaseSession.searchRequest(
     keywords: "周杰伦",
+    scope: .songs,
+    limit: 30,
+    offset: 0,
     credential: discoveryCredential,
     osVersion: "15.5",
     buildVersion: "1722945678",
@@ -299,42 +302,47 @@ private func expectWeAPIBody(
 }
 
 @Test func searchSongsDecodeTheModernArShape() throws {
-  let tracks = try NeteaseSession.classifySearchSongs(
+  let page = try NeteaseSession.classifySearch(
     data: Data((
       #"{"code":200,"result":{"songCount":1,"songs":[{"id":509781655,"name":"想你就写信 (Live)","dt":238698,"ar":[{"id":6452,"name":"周杰伦"},{"id":12010120,"name":"李硕"}],"al":{"id":36412633,"name":"专辑","picUrl":"https://p1.music.126.net/a.jpg"}}]}}"#
       ).utf8),
-    response: okResponse
+    response: okResponse,
+    scope: .songs
   )
 
+  #expect(page.totalCount == 1)
   #expect(
-    tracks == [
-      Track(
-        id: 509_781_655,
-        name: "想你就写信 (Live)",
-        artists: [
-          ArtistRef(id: 6452, name: "周杰伦"),
-          ArtistRef(id: 12_010_120, name: "李硕"),
-        ],
-        album: AlbumRef(
-          id: 36_412_633,
-          name: "专辑",
-          artworkURL: URL(string: "https://p1.music.126.net/a.jpg")
-        ),
-        durationMilliseconds: 238_698
-      )
-    ]
+    page.items
+      == .songs([
+        Track(
+          id: 509_781_655,
+          name: "想你就写信 (Live)",
+          artists: [
+            ArtistRef(id: 6452, name: "周杰伦"),
+            ArtistRef(id: 12_010_120, name: "李硕"),
+          ],
+          album: AlbumRef(
+            id: 36_412_633,
+            name: "专辑",
+            artworkURL: URL(string: "https://p1.music.126.net/a.jpg")
+          ),
+          durationMilliseconds: 238_698
+        )
+      ])
   )
 }
 
 /// A song row with neither artist spelling is still a usable row: the track
 /// plays. It must decode with no artists rather than throwing away the page.
 @Test func searchSongsDecodeARowWithNoArtistField() throws {
-  let tracks = try NeteaseSession.classifySearchSongs(
+  let page = try NeteaseSession.classifySearch(
     data: Data(#"{"code":200,"result":{"songs":[{"id":1,"name":"X"}]}}"#.utf8),
-    response: okResponse
+    response: okResponse,
+    scope: .songs
   )
 
-  #expect(tracks == [Track(id: 1, name: "X")])
+  #expect(page.items == .songs([Track(id: 1, name: "X")]))
+  #expect(page.totalCount == nil)
 }
 
 @Test func discoveryClassifiersDistinguishServiceAndHTTPErrors() throws {

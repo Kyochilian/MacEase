@@ -2,9 +2,9 @@ import Foundation
 
 /// The transport surface the app layer is allowed to use. `NeteaseSession` is
 /// the only production conformance; tests substitute a fake so coordinator
-/// behaviour can be exercised without a request. Every member mirrors an
-/// entry in the endpoint registry — adding one here means adding an endpoint,
-/// which is a separately approved change.
+/// behaviour can be exercised without a request. Every member is one explicit
+/// capability; exact paths, encryption and fields live beside the endpoint
+/// implementation and its contract tests.
 package protocol NeteaseTransporting: Sendable {
   func accountStatus(
     credential: NeteaseCredential
@@ -54,11 +54,6 @@ package protocol NeteaseTransporting: Sendable {
 
   func similarSongs(
     songID: Int64,
-    credential: NeteaseCredential
-  ) async throws -> [Track]
-
-  func searchSongs(
-    keywords: String,
     credential: NeteaseCredential
   ) async throws -> [Track]
 
@@ -163,6 +158,101 @@ package protocol NeteaseTransporting: Sendable {
     playlistID: Int64,
     credential: NeteaseCredential
   ) async throws
+
+  // MARK: - Browsing, radio and search
+
+  func categoryPlaylists(
+    category: String,
+    order: PlaylistOrder,
+    limit: Int,
+    offset: Int,
+    credential: NeteaseCredential
+  ) async throws -> CatalogPage<DiscoveredPlaylist>
+
+  func highQualityPlaylists(
+    category: String,
+    limit: Int,
+    before: Int64,
+    credential: NeteaseCredential
+  ) async throws -> HighQualityPlaylistPage
+
+  func playlistBrief(
+    playlistID: Int64,
+    credential: NeteaseCredential
+  ) async throws -> DiscoveredPlaylist
+
+  func recommendedNewSongs(
+    limit: Int,
+    credential: NeteaseCredential
+  ) async throws -> [Track]
+
+  func personalFM(credential: NeteaseCredential) async throws -> [Track]
+
+  func trashFMSong(songID: Int64, credential: NeteaseCredential) async throws
+
+  func heartbeatQueue(
+    songID: Int64,
+    playlistID: Int64,
+    startMusicID: Int64,
+    credential: NeteaseCredential
+  ) async throws -> [Track]
+
+  func similarArtists(
+    artistID: Int64,
+    credential: NeteaseCredential
+  ) async throws -> [Artist]
+
+  func search(
+    keywords: String,
+    scope: SearchScope,
+    limit: Int,
+    offset: Int,
+    credential: NeteaseCredential
+  ) async throws -> SearchPage
+
+  func searchSuggestions(
+    keywords: String,
+    credential: NeteaseCredential
+  ) async throws -> [SearchSuggestion]
+
+  func defaultSearchKeyword(credential: NeteaseCredential) async throws -> String?
+
+  // MARK: - Albums and artists
+
+  func albumDetail(
+    albumID: Int64,
+    credential: NeteaseCredential
+  ) async throws -> AlbumDetail
+
+  func albumDynamic(
+    albumID: Int64,
+    credential: NeteaseCredential
+  ) async throws -> AlbumDynamic
+
+  func newAlbums(
+    area: AlbumArea,
+    limit: Int,
+    offset: Int,
+    credential: NeteaseCredential
+  ) async throws -> CatalogPage<Album>
+
+  func artistDetail(
+    artistID: Int64,
+    credential: NeteaseCredential
+  ) async throws -> ArtistDetail
+
+  func artistAlbums(
+    artistID: Int64,
+    limit: Int,
+    offset: Int,
+    credential: NeteaseCredential
+  ) async throws -> CatalogPage<Album>
+
+  func topArtists(
+    limit: Int,
+    offset: Int,
+    credential: NeteaseCredential
+  ) async throws -> CatalogPage<Artist>
 }
 
 extension NeteaseSession: NeteaseTransporting {}

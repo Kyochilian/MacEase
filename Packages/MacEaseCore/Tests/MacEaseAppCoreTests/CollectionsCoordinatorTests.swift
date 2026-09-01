@@ -32,7 +32,7 @@ private struct CollectionsRig {
   func settle() async { await collections.settleForTesting() }
 }
 
-private func makeAlbums(_ ids: [Int64]) -> [Album] {
+func makeAlbums(_ ids: [Int64]) -> [Album] {
   ids.map {
     Album(
       id: $0,
@@ -44,7 +44,7 @@ private func makeAlbums(_ ids: [Int64]) -> [Album] {
   }
 }
 
-private func makeArtists(_ ids: [Int64]) -> [Artist] {
+func makeArtists(_ ids: [Int64]) -> [Artist] {
   ids.map {
     Artist(id: $0, name: "artist-\($0)", artworkURL: nil, albumCount: 2, songCount: 20)
   }
@@ -201,17 +201,35 @@ private func makeCloudSongs(_ ids: [Int64], fileSize: Int64 = 1000) -> [CloudSon
   ])
   rig.collections.loadAlbums(reset: true, session: rig.session)
   await rig.settle()
+  #expect(rig.collections.albumCollectionState(for: 2) == .confirmed(false))
 
   let added = makeAlbums([2])[0]
   rig.collections.setAlbumCollected(true, album: added, session: rig.session)
   await rig.settle()
 
   #expect(rig.collections.albums.map(\.id) == [2, 1])
+  #expect(rig.collections.albumCollectionState(for: 2) == .confirmed(true))
   #expect(
     await rig.transport.recordedCalls() == [
       .collectedAlbums(offset: 0), .setAlbumCollected(2, true),
     ]
   )
+}
+
+@Test @MainActor func removingACollectedAlbumConfirmsTheButtonState() async {
+  let rig = CollectionsRig()
+  let album = makeAlbums([2])[0]
+  await rig.transport.setAlbumPages([
+    CatalogPage(items: [album], more: false)
+  ])
+  rig.collections.loadAlbums(reset: true, session: rig.session)
+  await rig.settle()
+  #expect(rig.collections.albumCollectionState(for: 2) == .confirmed(true))
+
+  rig.collections.setAlbumCollected(false, album: album, session: rig.session)
+  await rig.settle()
+
+  #expect(rig.collections.albumCollectionState(for: 2) == .confirmed(false))
 }
 
 @Test @MainActor func unfollowingAnArtistRemovesTheRowWithoutReloading() async {
@@ -220,12 +238,25 @@ private func makeCloudSongs(_ ids: [Int64], fileSize: Int64 = 1000) -> [CloudSon
   await rig.transport.setArtistPages([CatalogPage(items: artists, more: false)])
   rig.collections.loadArtists(reset: true, session: rig.session)
   await rig.settle()
+  #expect(rig.collections.artistFollowState(for: 1) == .confirmed(true))
 
   rig.collections.setArtistFollowed(false, artist: artists[0], session: rig.session)
   await rig.settle()
 
   #expect(rig.collections.artists.map(\.id) == [2])
+  #expect(rig.collections.artistFollowState(for: 1) == .confirmed(false))
   #expect(await rig.transport.callCount() == 2)
+}
+
+@Test @MainActor func followingAnArtistConfirmsTheButtonState() async {
+  let rig = CollectionsRig()
+  let artist = makeArtists([8])[0]
+
+  #expect(rig.collections.artistFollowState(for: 8) == .unknown)
+  rig.collections.setArtistFollowed(true, artist: artist, session: rig.session)
+  await rig.settle()
+
+  #expect(rig.collections.artistFollowState(for: 8) == .confirmed(true))
 }
 
 /// A collect that lands twice must not put the album in the list twice.
@@ -259,6 +290,7 @@ private func makeCloudSongs(_ ids: [Int64], fileSize: Int64 = 1000) -> [CloudSon
 
   #expect(rig.arbiter.unresolvedOutcomes.map(\.kind) == [.unknown])
   #expect(rig.collections.artists.isEmpty)
+  #expect(rig.collections.artistFollowState(for: 5) == .unknown)
 }
 
 /// An application-layer refusal *is* an answer: the endpoint decided and said
@@ -278,6 +310,29 @@ private func makeCloudSongs(_ ids: [Int64], fileSize: Int64 = 1000) -> [CloudSon
 
   #expect(rig.arbiter.unresolvedOutcomes.isEmpty)
   #expect(rig.collections.artists.isEmpty)
+  #expect(rig.collections.artistFollowState(for: 5) == .unknown)
+}
+
+@Test @MainActor func aRemotelyAppliedAlbumWriteDoesNotConfirmTheNewAccount() async {
+  let rig = CollectionsRig()
+  let album = makeAlbums([5])[0]
+  await rig.transport.gate.close()
+
+  rig.collections.setAlbumCollected(true, album: album, session: rig.session)
+  while await rig.transport.gate.arrivalCount() < 1 { await Task.yield() }
+
+  let credentialB = makeCredential("b")
+  await rig.vault.setStored(credentialB)
+  rig.session.account = otherAccount
+  rig.session.validatedCredential = credentialB
+  await rig.transport.gate.open()
+  await rig.settle()
+
+  #expect(rig.collections.albumCollectionState(for: 5) == .unknown)
+  #expect(rig.collections.albums.isEmpty)
+  #expect(
+    rig.arbiter.unresolvedOutcomes.map(\.kind) == [.appliedRemotelyOnly]
+  )
 }
 
 // MARK: - Session
@@ -295,6 +350,7 @@ private func makeCloudSongs(_ ids: [Int64], fileSize: Int64 = 1000) -> [CloudSon
   #expect(rig.collections.albums.isEmpty)
   #expect(rig.collections.albumsHaveMore == false)
   #expect(rig.collections.cloudCapacity == nil)
+  #expect(rig.collections.albumCollectionState(for: 1) == .unknown)
 }
 
 @Test @MainActor func loadingWithoutAValidatedAccountReleasesTheArbiter() async {

@@ -21,7 +21,7 @@ package enum QueueAdvance: Equatable, Sendable {
 /// requests itself. Wrap-around applies only to repeatAll and shuffle, and
 /// shuffle keeps one fixed permutation that starts at the current entry.
 package struct PlaybackQueue: Equatable, Sendable {
-  package let count: Int
+  package private(set) var count: Int
   package private(set) var currentIndex: Int
   package private(set) var mode: PlaybackMode
   package private(set) var shuffleOrder: [Int]
@@ -59,6 +59,54 @@ package struct PlaybackQueue: Equatable, Sendable {
   package mutating func moveTo(_ index: Int) -> Bool {
     guard (0..<count).contains(index) else { return false }
     currentIndex = index
+    return true
+  }
+
+  /// Grows a queue whose entries the server keeps producing — personal FM and
+  /// heartbeat mode, which have no end for the client to reach.
+  ///
+  /// A shuffled queue keeps the order it already has and shuffles only what
+  /// arrived, so a continuation plays after the batch it continues rather than
+  /// being interleaved into songs that have already been decided.
+  package mutating func append(
+    _ additional: Int,
+    using generator: inout some RandomNumberGenerator
+  ) {
+    guard additional > 0 else { return }
+    let start = count
+    count += additional
+    if mode == .shuffle {
+      shuffleOrder.append(contentsOf: (start..<count).shuffled(using: &generator))
+    }
+  }
+
+  /// Removes one entry while keeping every remaining index valid. When the
+  /// current entry is removed, its next entry in the active order becomes
+  /// current; a sequential last entry falls back to the new last entry.
+  /// Single-entry queues are stopped by the controller instead of storing an
+  /// invalid zero-count queue here.
+  @discardableResult
+  package mutating func remove(at index: Int) -> Bool {
+    guard count > 1, (0..<count).contains(index) else { return false }
+
+    let replacement: Int? = if index == currentIndex {
+      nextIndex().flatMap { $0 == index ? nil : $0 }
+    } else {
+      nil
+    }
+
+    count -= 1
+    if mode == .shuffle {
+      shuffleOrder.removeAll { $0 == index }
+      shuffleOrder = shuffleOrder.map { $0 > index ? $0 - 1 : $0 }
+    }
+
+    if index < currentIndex {
+      currentIndex -= 1
+    } else if index == currentIndex {
+      let oldReplacement = replacement ?? min(index, count - 1)
+      currentIndex = oldReplacement > index ? oldReplacement - 1 : oldReplacement
+    }
     return true
   }
 

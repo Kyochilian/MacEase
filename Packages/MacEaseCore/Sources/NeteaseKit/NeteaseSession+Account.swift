@@ -78,7 +78,7 @@ extension NeteaseSession {
     string: "https://music.163.com/weapi/artist/unsub"
   )!
 
-  private static func eapiURL(_ path: String) -> URL? {
+  static func eapiURL(_ path: String) -> URL? {
     URL(
       string: "https://interfacepc.music.163.com/eapi/"
         + path.dropFirst("/api/".count)
@@ -659,7 +659,9 @@ extension NeteaseSession {
 
   // MARK: - Shared plumbing
 
-  private static func requireSuccess(
+  /// The `code == 200` gate every list endpoint shares. An HTTP failure has no
+  /// service code to read, so it is classified first.
+  static func requireSuccess(
     data: Data,
     response: HTTPURLResponse
   ) throws {
@@ -718,7 +720,7 @@ extension NeteaseSession {
     )
   }
 
-  private static func eapiFormRequest(
+  static func eapiFormRequest(
     path: String,
     json: String,
     headerFields: [(String, String)]

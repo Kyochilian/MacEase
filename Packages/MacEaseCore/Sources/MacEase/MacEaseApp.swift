@@ -13,6 +13,7 @@ struct MacEaseApp: App {
     case collections
     case discover
     case search
+    case catalog
     case records
     case lyrics
     case downloads
@@ -23,6 +24,8 @@ struct MacEaseApp: App {
   @State private var library: PlaylistLibraryCoordinator
   @State private var discovery: DiscoveryCoordinator
   @State private var collections: CollectionsCoordinator
+  @State private var catalog: CatalogCoordinator
+  @State private var radio: RadioCoordinator
   @State private var lyrics: LyricsCoordinator
   @State private var playback: PlaybackController
   @State private var arbiter: OperationArbiter
@@ -47,6 +50,7 @@ struct MacEaseApp: App {
   /// keeping up.
   @State private var storageDiagnostic: String?
   @State private var selectedTab: MainTab = .session
+  @State private var catalogPane: CatalogView.Pane = .newReleases
 
   init() {
     // One transport and one credential store for the whole app: every
@@ -78,6 +82,19 @@ struct MacEaseApp: App {
       vault: vault,
       arbiter: arbiter
     )
+    let catalog = CatalogCoordinator(
+      transport: transport,
+      vault: vault,
+      arbiter: arbiter
+    )
+    catalog.onAlbumCollectionStateConfirmed = { [weak collections] albumID, collected in
+      collections?.confirmAlbumCollected(collected, albumID: albumID)
+    }
+    let radio = RadioCoordinator(
+      transport: transport,
+      vault: vault,
+      arbiter: arbiter
+    )
     let lyrics = LyricsCoordinator(
       transport: transport,
       vault: vault,
@@ -90,6 +107,14 @@ struct MacEaseApp: App {
       output: AVPlayerAudioOutput(rangePipeline: audioCache.pipeline)
     )
     playback.attach(session: login)
+    radio.attach(playback: playback)
+    // One playback callback both invalidates old radio responses and reports
+    // ordinary queue movement that may need a continuation. It is neither a
+    // timer nor a poll.
+    playback.onPlaybackChanged = { [weak radio, weak login] revision in
+      guard let login else { return }
+      radio?.playbackChanged(revision: revision, session: login)
+    }
     // Sleep, wake, the output device going away and the network coming and
     // going. The decisions live in PlaybackController, which is tested; this
     // only delivers the events.
@@ -132,16 +157,18 @@ struct MacEaseApp: App {
     // of them, so the session owner clears everything, not just the reporter.
     login.onIdentityChanged = {
       [weak playback, weak library, weak discovery, weak collections, weak lyrics,
-        weak downloads, weak nowPlaying] in
-      playback?.stopForSessionChange()
-      downloads?.bind(accountID: nil)
-      library?.reset()
-      discovery?.reset()
-      collections?.reset()
-      lyrics?.reset()
-      // The system surface must not keep advertising a track that belonged to
-      // a session that no longer exists.
-      nowPlaying?.clear()
+        weak catalog, weak radio, weak downloads, weak nowPlaying] in
+      Self.clearSessionScopedState(
+        playback: playback,
+        downloads: downloads,
+        library: library,
+        discovery: discovery,
+        collections: collections,
+        catalog: catalog,
+        radio: radio,
+        lyrics: lyrics,
+        nowPlaying: nowPlaying
+      )
     }
     // Every path that establishes or drops an account arrives here, so QR,
     // SMS, Import and Validate all bind the same per-account data and spend
@@ -176,6 +203,8 @@ struct MacEaseApp: App {
     _library = State(initialValue: library)
     _discovery = State(initialValue: discovery)
     _collections = State(initialValue: collections)
+    _catalog = State(initialValue: catalog)
+    _radio = State(initialValue: radio)
     _lyrics = State(initialValue: lyrics)
     _playback = State(initialValue: playback)
     _arbiter = State(initialValue: arbiter)
@@ -192,6 +221,38 @@ struct MacEaseApp: App {
     _storageDiagnostic = State(
       initialValue: combinedDiagnostic.isEmpty ? nil : combinedDiagnostic
     )
+  }
+
+  /// Everything an identity change has to discard, in one place.
+  ///
+  /// It used to be a list of calls inside the closure the session owner holds,
+  /// which meant a coordinator added later was cleared only if whoever added
+  /// it remembered this closure existed. Naming every module here makes
+  /// leaving one out a compile error rather than a session's data surviving
+  /// into the next account.
+  @MainActor
+  static func clearSessionScopedState(
+    playback: PlaybackController?,
+    downloads: DownloadCoordinator?,
+    library: PlaylistLibraryCoordinator?,
+    discovery: DiscoveryCoordinator?,
+    collections: CollectionsCoordinator?,
+    catalog: CatalogCoordinator?,
+    radio: RadioCoordinator?,
+    lyrics: LyricsCoordinator?,
+    nowPlaying: NowPlayingCoordinator?
+  ) {
+    playback?.stopForSessionChange()
+    downloads?.bind(accountID: nil)
+    library?.reset()
+    discovery?.reset()
+    collections?.reset()
+    catalog?.reset()
+    radio?.reset()
+    lyrics?.reset()
+    // The system surface must not keep advertising a track that belonged to a
+    // session that no longer exists.
+    nowPlaying?.clear()
   }
 
   static func openStorage(
@@ -303,21 +364,15 @@ struct MacEaseApp: App {
             session: session,
             library: library,
             discovery: discovery,
+            radio: radio,
             playback: playback,
             arbiter: arbiter,
             artwork: artwork,
-            openPlaylist: { playlist in
-              library.loadTracks(
-                for: UserPlaylist(
-                  id: playlist.id,
-                  name: playlist.name,
-                  trackCount: 0,
-                  owned: false,
-                  isPrivate: nil
-                ),
-                session: session
-              )
-              selectedTab = .library
+            openPlaylist: openDiscoveredPlaylist,
+            openArtist: { artist in
+              catalog.openArtist(id: artist.id, session: session)
+              catalogPane = .artist
+              selectedTab = .catalog
             }
           )
           .tabItem { Label("Discover", systemImage: "sparkles") }
@@ -325,13 +380,40 @@ struct MacEaseApp: App {
           SearchView(
             session: session,
             library: library,
-            discovery: discovery,
+            catalog: catalog,
             playback: playback,
             arbiter: arbiter,
-            artwork: artwork
+            artwork: artwork,
+            openPlaylist: openDiscoveredPlaylist,
+            openAlbum: { albumID in
+              catalog.openAlbum(id: albumID, session: session)
+              catalogPane = .album
+              selectedTab = .catalog
+            },
+            openArtist: { artistID in
+              catalog.openArtist(id: artistID, session: session)
+              catalogPane = .artist
+              selectedTab = .catalog
+            }
           )
           .tabItem { Label("Search", systemImage: "magnifyingglass") }
           .tag(MainTab.search)
+          CatalogView(
+            session: session,
+            library: library,
+            catalog: catalog,
+            collections: collections,
+            playback: playback,
+            arbiter: arbiter,
+            artwork: artwork,
+            showSimilarArtists: { artist in
+              discovery.loadSimilarArtists(seed: artist, session: session)
+              selectedTab = .discover
+            },
+            pane: $catalogPane
+          )
+          .tabItem { Label("Catalog", systemImage: "square.grid.2x2") }
+          .tag(MainTab.catalog)
           PlayRecordsView(
             session: session,
             library: library,
@@ -398,6 +480,28 @@ struct MacEaseApp: App {
       }
     }
     .defaultSize(width: 980, height: 760)
+  }
+
+  /// Opens a playlist that came from discovery, browsing or search through the
+  /// same read path the library uses.
+  ///
+  /// It is passed as a row the account does not own and whose length is not
+  /// known, because that is the truth: nothing here has been told either. The
+  /// library only ever replaces a row it already holds, so a playlist read
+  /// this way never enters the account's own collection and is never written
+  /// to its stored snapshot.
+  private func openDiscoveredPlaylist(_ playlist: DiscoveredPlaylist) {
+    library.loadTracks(
+      for: UserPlaylist(
+        id: playlist.id,
+        name: playlist.name,
+        trackCount: 0,
+        owned: false,
+        isPrivate: nil
+      ),
+      session: session
+    )
+    selectedTab = .library
   }
 }
 
@@ -877,294 +981,6 @@ private struct PlaylistLibraryView: View {
   }
 }
 
-/// The heart is tri-state. "Not loaded yet" is shown as a distinct neutral
-/// state and offers an explicit Like, rather than an empty heart whose toggle
-/// would be guessing the starting value.
-private struct LikeButton: View {
-  let track: Track
-  let library: PlaylistLibraryCoordinator
-  let session: LoginCoordinator
-  let disabled: Bool
-
-  var body: some View {
-    let state = library.liked.state(of: track.id)
-    Button {
-      library.setLiked(state != .liked, for: track, session: session)
-    } label: {
-      Image(systemName: state == .liked ? "heart.fill" : "heart")
-        .foregroundStyle(state == .liked ? AnyShapeStyle(.red) : AnyShapeStyle(colour(for: state)))
-    }
-    .buttonStyle(.borderless)
-    .disabled(session.account == nil || disabled)
-    .help(help(for: state))
-    .accessibilityLabel(accessibilityLabel(for: state))
-  }
-
-  private func colour(for state: LikedState) -> HierarchicalShapeStyle {
-    state == .notLiked ? .secondary : .tertiary
-  }
-
-  private func help(for state: LikedState) -> String {
-    switch state {
-    case .liked: "Unlike · 1 request"
-    case .notLiked: "Like · 1 request"
-    case .unknown: "Liked state unknown; this likes the track · 1 request"
-    }
-  }
-
-  private func accessibilityLabel(for state: LikedState) -> String {
-    switch state {
-    case .liked: "Liked, unlike \(track.name)"
-    case .notLiked: "Not liked, like \(track.name)"
-    case .unknown: "Liked state not loaded, like \(track.name)"
-    }
-  }
-}
-
-/// Shared by the library and search rows so both add through the same path.
-private struct AddToPlaylistMenu: View {
-  let track: Track
-  let library: PlaylistLibraryCoordinator
-  let session: LoginCoordinator
-  let disabled: Bool
-
-  var body: some View {
-    Menu {
-      ForEach(library.playlists.filter(\.owned), id: \.id) { target in
-        Button(target.name) {
-          library.addTrack(track, to: target, session: session)
-        }
-      }
-    } label: {
-      Image(systemName: "text.badge.plus")
-    }
-    .menuStyle(.borderlessButton)
-    .fixedSize()
-    .disabled(disabled || !library.playlists.contains(where: \.owned))
-    .help("Add to one of your playlists · 1 request")
-    .accessibilityLabel("Add \(track.name) to a playlist")
-  }
-}
-
-private struct DiscoverView: View {
-  let session: LoginCoordinator
-  let library: PlaylistLibraryCoordinator
-  let discovery: DiscoveryCoordinator
-  let playback: PlaybackController
-  let arbiter: OperationArbiter
-  let artwork: ArtworkLoader
-  let openPlaylist: (DiscoveredPlaylist) -> Void
-
-  private var requestInFlight: Bool { discovery.isLoading || arbiter.isBusy }
-
-  private var loadDisabled: Bool {
-    session.account == nil || requestInFlight
-  }
-
-  var body: some View {
-    VStack(spacing: 0) {
-      List {
-        Section {
-          ForEach(discovery.dailySongs, id: \.id) { track in
-            HStack {
-              TrackRowLabel(track: track, loader: artwork)
-              Spacer()
-              PlayTrackButton(
-                track: track,
-                tracks: discovery.dailySongs,
-                context: .dailyRecommendations,
-                playback: playback,
-                session: session
-              )
-            }
-          }
-        } header: {
-          sectionHeader("Daily Songs") {
-            discovery.loadDailySongs(session: session)
-          }
-        }
-
-        Section {
-          playlistRows(discovery.dailyPlaylists)
-        } header: {
-          sectionHeader("Daily Playlists") {
-            discovery.loadDailyPlaylists(session: session)
-          }
-        }
-
-        Section {
-          playlistRows(discovery.personalized)
-        } header: {
-          sectionHeader("Recommended Playlists") {
-            discovery.loadPersonalized(session: session)
-          }
-        }
-
-        Section {
-          playlistRows(discovery.toplists)
-        } header: {
-          sectionHeader("Toplists") {
-            discovery.loadToplists(session: session)
-          }
-        }
-
-        Section {
-          ForEach(discovery.similarSongs, id: \.id) { track in
-            HStack {
-              TrackRowLabel(track: track, loader: artwork)
-              Spacer()
-              PlayTrackButton(
-                track: track,
-                tracks: discovery.similarSongs,
-                context: .similarSongs(seedName: discovery.similarSeedName ?? "the current track"),
-                playback: playback,
-                session: session
-              )
-            }
-          }
-        } header: {
-          HStack {
-            Text(
-              discovery.similarSeedName
-                .map { "Similar to \($0)" } ?? "Similar Songs"
-            )
-            Spacer()
-            Button("Load · 1 request", systemImage: "arrow.clockwise") {
-              if let seed = playback.currentTrack {
-                discovery.loadSimilarSongs(seed: seed, session: session)
-              }
-            }
-            .buttonStyle(.borderless)
-            .disabled(loadDisabled || playback.currentTrack == nil)
-            .help("Uses the current queue track as the seed")
-          }
-        }
-      }
-
-      Divider()
-
-      HStack {
-        if discovery.isLoading {
-          ProgressView()
-            .controlSize(.small)
-        }
-        Text(discovery.status)
-          .foregroundStyle(.secondary)
-        Spacer()
-      }
-      .padding(12)
-    }
-  }
-
-  private func sectionHeader(
-    _ title: String,
-    load: @escaping () -> Void
-  ) -> some View {
-    HStack {
-      Text(title)
-      Spacer()
-      Button("Load · 1 request", systemImage: "arrow.clockwise", action: load)
-        .buttonStyle(.borderless)
-        .disabled(loadDisabled)
-    }
-  }
-
-  private func playlistRows(_ playlists: [DiscoveredPlaylist]) -> some View {
-    ForEach(playlists, id: \.id) { playlist in
-      HStack {
-        Text(playlist.name)
-        Spacer()
-        Button("Open · up to 2 requests", systemImage: "music.note.list") {
-          openPlaylist(playlist)
-        }
-        .buttonStyle(.borderless)
-        .disabled(loadDisabled)
-        Button {
-          library.setSubscribed(
-            true,
-            playlistID: playlist.id,
-            playlistName: playlist.name,
-            session: session
-          )
-        } label: {
-          Image(systemName: "plus.circle")
-        }
-        .buttonStyle(.borderless)
-        .disabled(loadDisabled)
-        .help("Subscribe to this playlist · 1 request")
-      }
-    }
-  }
-}
-
-private struct SearchView: View {
-  let session: LoginCoordinator
-  let library: PlaylistLibraryCoordinator
-  @Bindable var discovery: DiscoveryCoordinator
-  let playback: PlaybackController
-  let arbiter: OperationArbiter
-  let artwork: ArtworkLoader
-
-  private var requestInFlight: Bool { discovery.isLoading || arbiter.isBusy }
-
-  private var searchDisabled: Bool {
-    session.account == nil || requestInFlight
-      || discovery.searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
-        .isEmpty
-  }
-
-  var body: some View {
-    VStack(spacing: 0) {
-      HStack {
-        TextField("Search songs", text: $discovery.searchQuery)
-          .onSubmit {
-            if !searchDisabled { discovery.search(session: session) }
-          }
-        Button("Search · 1 request", systemImage: "magnifyingglass") {
-          discovery.search(session: session)
-        }
-        .disabled(searchDisabled)
-      }
-      .padding(12)
-
-      Divider()
-
-      if discovery.searchResults.isEmpty {
-        Text(discovery.status)
-          .foregroundStyle(.secondary)
-          .frame(maxWidth: .infinity, maxHeight: .infinity)
-      } else {
-        List(discovery.searchResults, id: \.id) { track in
-          HStack {
-            TrackRowLabel(track: track, loader: artwork)
-            Spacer()
-            LikeButton(
-              track: track,
-              library: library,
-              session: session,
-              disabled: requestInFlight
-            )
-            AddToPlaylistMenu(
-              track: track,
-              library: library,
-              session: session,
-              disabled: requestInFlight
-            )
-            PlayTrackButton(
-              track: track,
-              tracks: discovery.searchResults,
-              context: .searchResults(keywords: discovery.searchQuery),
-              playback: playback,
-              session: session
-            )
-          }
-          .padding(.vertical, 3)
-        }
-      }
-    }
-  }
-}
-
 private struct PlayRecordsView: View {
   let session: LoginCoordinator
   let library: PlaylistLibraryCoordinator
@@ -1180,7 +996,7 @@ private struct PlayRecordsView: View {
       HStack {
         Text("Listening Rankings")
           .font(.headline)
-        Text("Server-side data only; MacEase playback is never scrobbled")
+        Text("Server-side data only; MacEase scrobbling is not implemented yet")
           .font(.caption)
           .foregroundStyle(.secondary)
         Spacer()

@@ -125,3 +125,38 @@ struct ArtistRowPayload: Decodable {
     )
   }
 }
+
+/// One playlist row, as any list response returns it.
+///
+/// The cover is `coverImgUrl` on the playlist-shaped endpoints (toplist,
+/// playlist detail, browse) and `picUrl` on the recommendation-shaped ones.
+/// They are the same field, so one row decoder reads both rather than each
+/// caller learning which spelling its endpoint happens to use.
+struct PlaylistRowPayload: Decodable {
+  let id: Int64
+  let name: String
+  let artworkURL: URL?
+
+  private enum CodingKeys: String, CodingKey {
+    case id
+    case name
+    case coverImgUrl
+    case picUrl
+  }
+
+  init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    id = try container.decode(Int64.self, forKey: .id)
+    name = try container.decode(String.self, forKey: .name)
+    artworkURL = try NeteaseArtworkURL.approved(
+      container.decodeIfPresent(String.self, forKey: .coverImgUrl)
+    )
+      ?? NeteaseArtworkURL.approved(
+        container.decodeIfPresent(String.self, forKey: .picUrl)
+      )
+  }
+
+  var playlist: DiscoveredPlaylist {
+    DiscoveredPlaylist(id: id, name: name, artworkURL: artworkURL)
+  }
+}

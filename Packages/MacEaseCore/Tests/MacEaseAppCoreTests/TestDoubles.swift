@@ -50,6 +50,10 @@ func makePlaylists(
   }
 }
 
+func makeDiscovered(_ ids: [Int64]) -> [DiscoveredPlaylist] {
+  ids.map { DiscoveredPlaylist(id: $0, name: "discovered-\($0)") }
+}
+
 // MARK: - Gate
 
 /// Lets a test hold a fake request open so it can act while the request is
@@ -95,7 +99,6 @@ actor FakeTransport: NeteaseTransporting {
     case personalizedPlaylists
     case toplists
     case similarSongs(Int64)
-    case searchSongs(String)
     case lyrics(Int64)
     case setSongLiked(Int64, Bool)
     case createPlaylist(String, isPrivate: Bool)
@@ -117,6 +120,23 @@ actor FakeTransport: NeteaseTransporting {
     case cloudSongs(offset: Int)
     case deleteCloudSong(Int64)
     case publishPrivatePlaylist(Int64)
+    case categoryPlaylists(String, PlaylistOrder, offset: Int)
+    case highQualityPlaylists(String, before: Int64)
+    case playlistBrief(Int64)
+    case recommendedNewSongs
+    case personalFM
+    case trashFMSong(Int64)
+    case heartbeatQueue(songID: Int64, playlistID: Int64, startMusicID: Int64)
+    case similarArtists(Int64)
+    case search(String, SearchScope, offset: Int)
+    case searchSuggestions(String)
+    case defaultSearchKeyword
+    case albumDetail(Int64)
+    case albumDynamic(Int64)
+    case newAlbums(AlbumArea, offset: Int)
+    case artistDetail(Int64)
+    case artistAlbums(Int64, offset: Int)
+    case topArtists(offset: Int)
   }
 
   struct Unprogrammed: Error, Equatable {
@@ -390,12 +410,234 @@ actor FakeTransport: NeteaseTransporting {
     return try discoveryTracksResult.get()
   }
 
-  func searchSongs(
-    keywords: String,
+  // MARK: - Browsing, radio, search and detail
+
+  var browsePages: [CatalogPage<DiscoveredPlaylist>] = []
+  var highQualityPages: [HighQualityPlaylistPage] = []
+  var playlistBriefResult: Result<DiscoveredPlaylist, any Error> = .success(
+    DiscoveredPlaylist(id: 1, name: "radar")
+  )
+  var fmBatches: [[Track]] = []
+  var heartbeatResult: Result<[Track], any Error> = .success([])
+  var similarArtistsResult: Result<[Artist], any Error> = .success([])
+  var searchPages: [SearchPage] = []
+  var searchError: (any Error)?
+  var suggestionsResult: Result<[SearchSuggestion], any Error> = .success([])
+  var defaultKeywordResult: Result<String?, any Error> = .success(nil)
+  var albumDetailResult: Result<AlbumDetail, any Error>?
+  var albumDynamicResult: Result<AlbumDynamic, any Error> = .success(
+    AlbumDynamic(isCollected: false, collectCount: 0)
+  )
+  var artistDetailResult: Result<ArtistDetail, any Error>?
+  var artistAlbumPages: [CatalogPage<Album>] = []
+  var newAlbumPages: [CatalogPage<Album>] = []
+  var topArtistPages: [CatalogPage<Artist>] = []
+  var catalogError: (any Error)?
+
+  func setBrowsePages(_ value: [CatalogPage<DiscoveredPlaylist>]) {
+    browsePages = value
+  }
+  func setHighQualityPages(_ value: [HighQualityPlaylistPage]) {
+    highQualityPages = value
+  }
+  func setPlaylistBrief(_ value: Result<DiscoveredPlaylist, any Error>) {
+    playlistBriefResult = value
+  }
+  func setFMBatches(_ value: [[Track]]) { fmBatches = value }
+  func setHeartbeat(_ value: Result<[Track], any Error>) { heartbeatResult = value }
+  func setSimilarArtists(_ value: Result<[Artist], any Error>) {
+    similarArtistsResult = value
+  }
+  func setSearchPages(_ value: [SearchPage]) { searchPages = value }
+  func setSearchError(_ value: (any Error)?) { searchError = value }
+  func setSuggestions(_ value: Result<[SearchSuggestion], any Error>) {
+    suggestionsResult = value
+  }
+  func setDefaultKeyword(_ value: Result<String?, any Error>) {
+    defaultKeywordResult = value
+  }
+  func setAlbumDetail(_ value: Result<AlbumDetail, any Error>?) {
+    albumDetailResult = value
+  }
+  func setAlbumDynamic(_ value: Result<AlbumDynamic, any Error>) {
+    albumDynamicResult = value
+  }
+  func setArtistDetail(_ value: Result<ArtistDetail, any Error>?) {
+    artistDetailResult = value
+  }
+  func setArtistAlbumPages(_ value: [CatalogPage<Album>]) { artistAlbumPages = value }
+  func setNewAlbumPages(_ value: [CatalogPage<Album>]) { newAlbumPages = value }
+  func setTopArtistPages(_ value: [CatalogPage<Artist>]) { topArtistPages = value }
+  func setCatalogError(_ value: (any Error)?) { catalogError = value }
+
+  func categoryPlaylists(
+    category: String,
+    order: PlaylistOrder,
+    limit: Int,
+    offset: Int,
+    credential: NeteaseCredential
+  ) async throws -> CatalogPage<DiscoveredPlaylist> {
+    await record(.categoryPlaylists(category, order, offset: offset))
+    if let catalogError { throw catalogError }
+    guard !browsePages.isEmpty else { throw Unprogrammed(call: "categoryPlaylists") }
+    return browsePages.removeFirst()
+  }
+
+  func highQualityPlaylists(
+    category: String,
+    limit: Int,
+    before: Int64,
+    credential: NeteaseCredential
+  ) async throws -> HighQualityPlaylistPage {
+    await record(.highQualityPlaylists(category, before: before))
+    if let catalogError { throw catalogError }
+    guard !highQualityPages.isEmpty else {
+      throw Unprogrammed(call: "highQualityPlaylists")
+    }
+    return highQualityPages.removeFirst()
+  }
+
+  func playlistBrief(
+    playlistID: Int64,
+    credential: NeteaseCredential
+  ) async throws -> DiscoveredPlaylist {
+    await record(.playlistBrief(playlistID))
+    if let catalogError { throw catalogError }
+    return try playlistBriefResult.get()
+  }
+
+  func recommendedNewSongs(
+    limit: Int,
     credential: NeteaseCredential
   ) async throws -> [Track] {
-    await record(.searchSongs(keywords))
+    await record(.recommendedNewSongs)
     return try discoveryTracksResult.get()
+  }
+
+  func personalFM(credential: NeteaseCredential) async throws -> [Track] {
+    await record(.personalFM)
+    if let catalogError { throw catalogError }
+    guard !fmBatches.isEmpty else { throw Unprogrammed(call: "personalFM") }
+    return fmBatches.removeFirst()
+  }
+
+  func trashFMSong(songID: Int64, credential: NeteaseCredential) async throws {
+    await record(.trashFMSong(songID))
+    try writeResult.get()
+  }
+
+  func heartbeatQueue(
+    songID: Int64,
+    playlistID: Int64,
+    startMusicID: Int64,
+    credential: NeteaseCredential
+  ) async throws -> [Track] {
+    await record(
+      .heartbeatQueue(
+        songID: songID,
+        playlistID: playlistID,
+        startMusicID: startMusicID
+      )
+    )
+    return try heartbeatResult.get()
+  }
+
+  func similarArtists(
+    artistID: Int64,
+    credential: NeteaseCredential
+  ) async throws -> [Artist] {
+    await record(.similarArtists(artistID))
+    return try similarArtistsResult.get()
+  }
+
+  func search(
+    keywords: String,
+    scope: SearchScope,
+    limit: Int,
+    offset: Int,
+    credential: NeteaseCredential
+  ) async throws -> SearchPage {
+    await record(.search(keywords, scope, offset: offset))
+    if let searchError { throw searchError }
+    guard !searchPages.isEmpty else { throw Unprogrammed(call: "search") }
+    return searchPages.removeFirst()
+  }
+
+  func searchSuggestions(
+    keywords: String,
+    credential: NeteaseCredential
+  ) async throws -> [SearchSuggestion] {
+    await record(.searchSuggestions(keywords))
+    return try suggestionsResult.get()
+  }
+
+  func defaultSearchKeyword(credential: NeteaseCredential) async throws -> String? {
+    await record(.defaultSearchKeyword)
+    return try defaultKeywordResult.get()
+  }
+
+  func albumDetail(
+    albumID: Int64,
+    credential: NeteaseCredential
+  ) async throws -> AlbumDetail {
+    await record(.albumDetail(albumID))
+    if let catalogError { throw catalogError }
+    guard let albumDetailResult else { throw Unprogrammed(call: "albumDetail") }
+    return try albumDetailResult.get()
+  }
+
+  func albumDynamic(
+    albumID: Int64,
+    credential: NeteaseCredential
+  ) async throws -> AlbumDynamic {
+    await record(.albumDynamic(albumID))
+    if let catalogError { throw catalogError }
+    return try albumDynamicResult.get()
+  }
+
+  func newAlbums(
+    area: AlbumArea,
+    limit: Int,
+    offset: Int,
+    credential: NeteaseCredential
+  ) async throws -> CatalogPage<Album> {
+    await record(.newAlbums(area, offset: offset))
+    if let catalogError { throw catalogError }
+    guard !newAlbumPages.isEmpty else { throw Unprogrammed(call: "newAlbums") }
+    return newAlbumPages.removeFirst()
+  }
+
+  func artistDetail(
+    artistID: Int64,
+    credential: NeteaseCredential
+  ) async throws -> ArtistDetail {
+    await record(.artistDetail(artistID))
+    if let catalogError { throw catalogError }
+    guard let artistDetailResult else { throw Unprogrammed(call: "artistDetail") }
+    return try artistDetailResult.get()
+  }
+
+  func artistAlbums(
+    artistID: Int64,
+    limit: Int,
+    offset: Int,
+    credential: NeteaseCredential
+  ) async throws -> CatalogPage<Album> {
+    await record(.artistAlbums(artistID, offset: offset))
+    if let catalogError { throw catalogError }
+    guard !artistAlbumPages.isEmpty else { throw Unprogrammed(call: "artistAlbums") }
+    return artistAlbumPages.removeFirst()
+  }
+
+  func topArtists(
+    limit: Int,
+    offset: Int,
+    credential: NeteaseCredential
+  ) async throws -> CatalogPage<Artist> {
+    await record(.topArtists(offset: offset))
+    if let catalogError { throw catalogError }
+    guard !topArtistPages.isEmpty else { throw Unprogrammed(call: "topArtists") }
+    return topArtistPages.removeFirst()
   }
 
   func setSongLiked(

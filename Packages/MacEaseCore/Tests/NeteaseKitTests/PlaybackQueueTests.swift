@@ -170,3 +170,120 @@ private func makeQueue(
   #expect(!movedAbove)
   #expect(queue.currentIndex == 0)
 }
+
+// MARK: - Continuation
+
+/// Personal FM and heartbeat mode have no end, so their queue grows while it
+/// plays. Growing must not move the entry that is playing.
+@Test func appendingKeepsThePositionAndExtendsTheEnd() {
+  var generator = SeededGenerator(state: 5)
+  var queue = makeQueue(count: 3, startIndex: 1, mode: .sequential)!
+
+  queue.append(2, using: &generator)
+
+  #expect(queue.count == 5)
+  #expect(queue.currentIndex == 1)
+  #expect(queue.nextIndex() == 2)
+  let movedToEnd = queue.moveTo(4)
+  #expect(movedToEnd)
+  #expect(queue.nextIndex() == nil)
+}
+
+@Test func appendingNothingChangesNothing() {
+  var generator = SeededGenerator(state: 5)
+  var queue = makeQueue(count: 3, startIndex: 0, mode: .sequential)!
+  let before = queue
+
+  queue.append(0, using: &generator)
+  queue.append(-1, using: &generator)
+
+  #expect(queue == before)
+}
+
+/// A shuffled radio keeps the order it has already decided and shuffles only
+/// what arrived, so a continuation plays after the batch it continues.
+@Test func appendingAShuffledQueueOrdersOnlyTheNewEntries() {
+  var generator = SeededGenerator(state: 11)
+  var queue = makeQueue(count: 3, startIndex: 0, mode: .shuffle, seed: 11)!
+  let existing = queue.shuffleOrder
+
+  queue.append(2, using: &generator)
+
+  #expect(queue.count == 5)
+  #expect(Array(queue.shuffleOrder.prefix(3)) == existing)
+  #expect(Set(queue.shuffleOrder) == Set(0..<5))
+  #expect(queue.shuffleOrder.count == 5)
+  #expect(Set(queue.shuffleOrder.suffix(2)) == Set([3, 4]))
+}
+
+/// Appending to a repeatAll queue leaves wrap-around correct over the new
+/// length rather than the one it started with.
+@Test func appendingKeepsWrapAroundOverTheNewLength() {
+  var generator = SeededGenerator(state: 2)
+  var queue = makeQueue(count: 2, startIndex: 1, mode: .repeatAll)!
+
+  queue.append(1, using: &generator)
+
+  #expect(queue.nextIndex() == 2)
+  let movedToLast = queue.moveTo(2)
+  #expect(movedToLast)
+  #expect(queue.nextIndex() == 0)
+}
+
+// MARK: - Removal
+
+@Test func removingTheCurrentSequentialEntrySelectsItsSuccessor() {
+  var queue = makeQueue(count: 4, startIndex: 1, mode: .sequential)!
+
+  let removed = queue.remove(at: 1)
+
+  #expect(removed)
+  #expect(queue.count == 3)
+  #expect(queue.currentIndex == 1)
+  #expect(queue.previousIndex() == 0)
+  #expect(queue.nextIndex() == 2)
+  #expect(queue.shuffleOrder.isEmpty)
+}
+
+@Test func removingTheLastRepeatAllEntryWrapsToTheFirst() {
+  var queue = makeQueue(count: 4, startIndex: 3, mode: .repeatAll)!
+
+  let removed = queue.remove(at: 3)
+
+  #expect(removed)
+  #expect(queue.count == 3)
+  #expect(queue.currentIndex == 0)
+  #expect(queue.previousIndex() == 2)
+  #expect(queue.nextIndex() == 1)
+}
+
+@Test func removingFromShuffleRemapsThePermutationAndCurrentEntry() {
+  var queue = makeQueue(count: 7, startIndex: 3, mode: .shuffle, seed: 19)!
+  let removedIndex = queue.currentIndex
+  let successor = queue.nextIndex()!
+  let expectedCurrent = successor > removedIndex ? successor - 1 : successor
+
+  let removed = queue.remove(at: removedIndex)
+
+  #expect(removed)
+  #expect(queue.count == 6)
+  #expect(queue.currentIndex == expectedCurrent)
+  #expect(queue.shuffleOrder.first == expectedCurrent)
+  #expect(queue.shuffleOrder.sorted() == Array(0..<6))
+  #expect(queue.nextIndex() != nil)
+  #expect(queue.previousIndex() != nil)
+}
+
+@Test func removingANonCurrentEntryOnlyRemapsIndices() {
+  var queue = makeQueue(count: 5, startIndex: 3, mode: .sequential)!
+
+  let removed = queue.remove(at: 1)
+
+  #expect(removed)
+  #expect(queue.count == 4)
+  #expect(queue.currentIndex == 2)
+  #expect(queue.previousIndex() == 1)
+  #expect(queue.nextIndex() == 3)
+  let removedOutOfRange = queue.remove(at: 4)
+  #expect(!removedOutOfRange)
+}

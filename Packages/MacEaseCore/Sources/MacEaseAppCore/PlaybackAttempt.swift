@@ -22,7 +22,7 @@ package enum DesiredPlaybackState: Equatable, Sendable {
 package struct PlaybackAttempt: Equatable, Sendable {
   package let songID: Int64
   package let quality: PlaybackQuality
-  package let queueIndex: Int
+  package var queueIndex: Int
   package var resumePosition: Double
   package var desiredState: DesiredPlaybackState
 

@@ -88,6 +88,142 @@ struct TrackRowLabel: View {
   }
 }
 
+/// An album row with its cover, shared by search, new releases and the artist
+/// page.
+struct AlbumRowLabel: View {
+  let album: Album
+  let loader: ArtworkLoader
+
+  var body: some View {
+    HStack(spacing: 8) {
+      Artwork(url: album.artworkURL, size: 40, symbol: "opticaldisc", loader: loader)
+      VStack(alignment: .leading, spacing: 3) {
+        Text(album.name)
+        Text(
+          (album.artistDisplayName.map { $0 + " · " } ?? "")
+            + "\(album.trackCount) tracks"
+        )
+        .font(.caption)
+        .foregroundStyle(.secondary)
+      }
+    }
+  }
+}
+
+/// An artist row with its photo, shared by search, similar artists and the
+/// artist chart.
+struct ArtistRowLabel: View {
+  let artist: Artist
+  let loader: ArtworkLoader
+
+  var body: some View {
+    HStack(spacing: 8) {
+      Artwork(
+        url: artist.artworkURL,
+        size: 40,
+        symbol: "music.microphone",
+        loader: loader
+      )
+      VStack(alignment: .leading, spacing: 3) {
+        Text(artist.name)
+        Text("\(artist.albumCount) albums · \(artist.songCount) songs")
+          .font(.caption)
+          .foregroundStyle(.secondary)
+      }
+    }
+  }
+}
+
+/// A playlist row with its cover, shared by discovery, browsing, the radar
+/// family and search.
+struct PlaylistRowLabel: View {
+  let playlist: DiscoveredPlaylist
+  let loader: ArtworkLoader
+
+  var body: some View {
+    HStack(spacing: 8) {
+      Artwork(
+        url: playlist.artworkURL,
+        size: 40,
+        symbol: "music.note.list",
+        loader: loader
+      )
+      Text(playlist.name)
+    }
+  }
+}
+
+/// The heart is tri-state. "Not loaded yet" is shown as a distinct neutral
+/// state and offers an explicit Like, rather than an empty heart whose toggle
+/// would be guessing the starting value.
+struct LikeButton: View {
+  let track: Track
+  let library: PlaylistLibraryCoordinator
+  let session: LoginCoordinator
+  let disabled: Bool
+
+  var body: some View {
+    let state = library.liked.state(of: track.id)
+    Button {
+      library.setLiked(state != .liked, for: track, session: session)
+    } label: {
+      Image(systemName: state == .liked ? "heart.fill" : "heart")
+        .foregroundStyle(
+          state == .liked ? AnyShapeStyle(.red) : AnyShapeStyle(colour(for: state))
+        )
+    }
+    .buttonStyle(.borderless)
+    .disabled(session.account == nil || disabled)
+    .help(help(for: state))
+    .accessibilityLabel(accessibilityLabel(for: state))
+  }
+
+  private func colour(for state: LikedState) -> HierarchicalShapeStyle {
+    state == .notLiked ? .secondary : .tertiary
+  }
+
+  private func help(for state: LikedState) -> String {
+    switch state {
+    case .liked: "Unlike · 1 request"
+    case .notLiked: "Like · 1 request"
+    case .unknown: "Liked state unknown; this likes the track · 1 request"
+    }
+  }
+
+  private func accessibilityLabel(for state: LikedState) -> String {
+    switch state {
+    case .liked: "Liked, unlike \(track.name)"
+    case .notLiked: "Not liked, like \(track.name)"
+    case .unknown: "Liked state not loaded, like \(track.name)"
+    }
+  }
+}
+
+/// Shared by every track list so all of them add through the same write path.
+struct AddToPlaylistMenu: View {
+  let track: Track
+  let library: PlaylistLibraryCoordinator
+  let session: LoginCoordinator
+  let disabled: Bool
+
+  var body: some View {
+    Menu {
+      ForEach(library.playlists.filter(\.owned), id: \.id) { target in
+        Button(target.name) {
+          library.addTrack(track, to: target, session: session)
+        }
+      }
+    } label: {
+      Image(systemName: "text.badge.plus")
+    }
+    .menuStyle(.borderlessButton)
+    .fixedSize()
+    .disabled(disabled || !library.playlists.contains(where: \.owned))
+    .help("Add to one of your playlists · 1 request")
+    .accessibilityLabel("Add \(track.name) to a playlist")
+  }
+}
+
 /// Resolves the row's position at action time from the track id, so a list
 /// that changed between render and click cannot start the wrong track.
 struct PlayTrackButton: View {

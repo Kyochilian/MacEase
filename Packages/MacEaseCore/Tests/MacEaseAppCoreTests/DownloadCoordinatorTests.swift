@@ -1098,3 +1098,109 @@ private func seedDownload(
     return
   }
 }
+
+// MARK: - FM trash while local playback bypasses a write
+
+@Test @MainActor func confirmedTrashRemovesTheOldSongAfterLocalNextAlreadyPlayed() async throws {
+  let rig = try DownloadRig()
+  defer { rig.cleanup() }
+  let tracks = makeTracks([1, 2, 3, 4, 5])
+  _ = try await seedDownload(
+    store: rig.store,
+    files: rig.files,
+    accountID: testAccount.userID,
+    track: tracks[1]
+  )
+  await rig.activate()
+
+  let radio = RadioCoordinator(
+    transport: rig.transport,
+    vault: rig.vault,
+    arbiter: rig.arbiter
+  )
+  radio.attach(playback: rig.playback)
+  rig.playback.onPlaybackChanged = { [weak radio] revision in
+    radio?.playbackChanged(revision: revision, session: rig.session)
+  }
+  await rig.transport.setFMBatches([tracks])
+  await rig.program(songID: 1)
+  radio.startPersonalFM(session: rig.session)
+  await radio.settleForTesting()
+  await rig.playback.settleForTesting()
+
+  let beforeTrash = await rig.transport.gate.arrivalCount()
+  await rig.transport.gate.close()
+  radio.trashCurrentFMSong(session: rig.session)
+  while await rig.transport.gate.arrivalCount() < beforeTrash + 1 {
+    await Task.yield()
+  }
+
+  #expect(rig.playback.playNext(session: rig.session))
+  await rig.playback.settleForTesting()
+  rig.output.reportPosition(37)
+  let teardownAfterNext = rig.output.teardownCount
+  #expect(rig.playback.currentTrack?.id == 2)
+  #expect(rig.playback.phase == .playing)
+
+  await rig.transport.gate.open()
+  await radio.settleForTesting()
+
+  #expect(
+    rig.playback.queuedTracks(context: .personalFM).map(\.id) == [2, 3, 4, 5]
+  )
+  #expect(rig.playback.currentTrack?.id == 2)
+  #expect(rig.playback.queue?.currentIndex == 0)
+  #expect(rig.playback.phase == .playing)
+  #expect(rig.playback.positionSeconds == 37)
+  #expect(rig.output.teardownCount == teardownAfterNext)
+  #expect(rig.playback.playPrevious(session: rig.session) == false)
+}
+
+@Test @MainActor func lateTrashSuccessDoesNotEditADownloadQueueThatReplacedFM() async throws {
+  let rig = try DownloadRig()
+  defer { rig.cleanup() }
+  let download = try await seedDownload(
+    store: rig.store,
+    files: rig.files,
+    accountID: testAccount.userID,
+    track: makeTracks([50])[0]
+  )
+  await rig.activate()
+
+  let radio = RadioCoordinator(
+    transport: rig.transport,
+    vault: rig.vault,
+    arbiter: rig.arbiter
+  )
+  radio.attach(playback: rig.playback)
+  rig.playback.onPlaybackChanged = { [weak radio] revision in
+    radio?.playbackChanged(revision: revision, session: rig.session)
+  }
+  await rig.transport.setFMBatches([makeTracks([1, 2, 3, 4, 5])])
+  await rig.program(songID: 1)
+  radio.startPersonalFM(session: rig.session)
+  await radio.settleForTesting()
+  await rig.playback.settleForTesting()
+
+  let beforeTrash = await rig.transport.gate.arrivalCount()
+  await rig.transport.gate.close()
+  radio.trashCurrentFMSong(session: rig.session)
+  while await rig.transport.gate.arrivalCount() < beforeTrash + 1 {
+    await Task.yield()
+  }
+
+  rig.playback.playDownloaded(download, session: rig.session)
+  await rig.playback.settleForTesting()
+  let teardownBeforeSuccess = rig.output.teardownCount
+  #expect(rig.playback.queueContext == .downloads)
+
+  await rig.transport.gate.open()
+  await radio.settleForTesting()
+
+  #expect(rig.playback.queueContext == .downloads)
+  #expect(rig.playback.currentTrack?.id == 50)
+  #expect(rig.output.teardownCount == teardownBeforeSuccess)
+  #expect(
+    rig.arbiter.unresolvedOutcomes.map(\.kind) == [.appliedRemotelyOnly]
+  )
+}

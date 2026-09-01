@@ -284,22 +284,28 @@ private func makeLibrary(
   let transport = FakeTransport()
   let vault = FakeVault(stored: credential)
   let session = FakeSession(credential: credential)
-  let discovery = DiscoveryCoordinator(
+  let catalog = CatalogCoordinator(
     transport: transport,
     vault: vault,
-    arbiter: OperationArbiter()
+    arbiter: OperationArbiter(),
+    suggestionDelay: .zero
   )
-  await transport.setDiscoveryTracks(.success(makeTracks([9])))
+  await transport.setSearchPages([
+    SearchPage(items: .songs(makeTracks([9])), totalCount: 1)
+  ])
 
-  discovery.searchQuery = "   "
-  discovery.search(session: session)
-  await discovery.settleForTesting()
+  catalog.query = "   "
+  catalog.runSearch(session: session)
+  await catalog.settleForTesting()
   #expect(await transport.callCount() == 0)
 
-  discovery.searchQuery = "  canary  "
-  discovery.search(session: session)
-  await discovery.settleForTesting()
+  catalog.query = "  canary  "
+  catalog.runSearch(session: session)
+  await catalog.settleForTesting()
 
-  #expect(await transport.recordedCalls() == [.searchSongs("canary")])
-  #expect(discovery.searchResults.map(\.id) == [9])
+  #expect(
+    await transport.recordedCalls() == [.search("canary", .songs, offset: 0)]
+  )
+  #expect(catalog.results == .songs(makeTracks([9])))
+  #expect(catalog.resultsKeywords == "canary")
 }

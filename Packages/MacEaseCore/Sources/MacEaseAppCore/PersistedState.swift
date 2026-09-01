@@ -9,22 +9,32 @@ import NeteaseKit
 /// reserved for later.
 package enum PlaybackContext: Equatable, Sendable, Codable {
   case playlist(id: Int64, name: String)
+  case album(id: Int64, name: String)
+  case artist(id: Int64, name: String)
   case dailyRecommendations
+  case recommendedNewSongs
   case searchResults(keywords: String)
   case similarSongs(seedName: String)
   case listeningRankings
   case cloudDrive
   case downloads
+  case personalFM
+  case heartbeatMode(seedName: String)
 
   package var label: String {
     switch self {
     case .playlist(_, let name): name
+    case .album(_, let name): "Album: \(name)"
+    case .artist(_, let name): "Artist: \(name)"
     case .dailyRecommendations: "Daily recommendations"
+    case .recommendedNewSongs: "Recommended new songs"
     case .searchResults(let keywords): "Search: \(keywords)"
     case .similarSongs(let seedName): "Similar to \(seedName)"
     case .listeningRankings: "Listening rankings"
     case .cloudDrive: "Cloud drive"
     case .downloads: "Downloads"
+    case .personalFM: "Personal FM"
+    case .heartbeatMode(let seedName): "Heartbeat from \(seedName)"
     }
   }
 }

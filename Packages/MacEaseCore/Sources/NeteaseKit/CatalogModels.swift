@@ -228,3 +228,216 @@ package struct CloudPage: Equatable, Sendable {
     self.capacity = capacity
   }
 }
+
+// MARK: - Browsing the catalogue
+
+/// The playlist tags `/playlist/list` and `/playlist/highquality/list` accept.
+///
+/// These are inputs, not data: `api-enhanced@a7e8d48` documents the accepted
+/// `cat` values inline in `module/top_playlist.js` and
+/// `module/top_playlist_highquality.js`. There is a `/playlist/catalogue`
+/// endpoint that returns them, but neither authority records its response
+/// container, so MacEase does not send a request whose answer it would have to
+/// guess at — it sends the tags the authority already documents.
+package enum PlaylistCategory {
+  package static let `default` = "全部"
+
+  /// The subset MacEase offers for browsing. The full list the endpoint
+  /// accepts is longer; these are the language, genre and mood tags a listener
+  /// picks from, which is what the browse picker is for.
+  package static let browsable = [
+    "全部", "华语", "欧美", "日语", "韩语", "粤语",
+    "流行", "摇滚", "民谣", "电子", "说唱", "轻音乐", "爵士", "古典", "古风",
+    "影视原声", "ACG", "怀旧", "治愈", "放松", "伤感", "快乐",
+    "学习", "工作", "运动", "驾车", "夜晚",
+  ]
+
+  /// `/playlist/highquality/list` accepts a smaller set than `/playlist/list`.
+  package static let highQuality = [
+    "全部", "华语", "欧美", "韩语", "日语", "粤语", "运动", "ACG", "影视原声",
+    "流行", "摇滚", "古风", "民谣", "轻音乐", "电子", "说唱", "古典", "爵士",
+  ]
+}
+
+/// The order `/playlist/list` sorts a category by.
+package enum PlaylistOrder: String, CaseIterable, Sendable {
+  case hot
+  case new
+}
+
+/// One page of the highest-rated playlists.
+///
+/// Unlike every other paged list here, this one is not paged by offset: the
+/// service returns the `updateTime` of the last row and expects it back as
+/// `lasttime`, so the cursor travels with the page rather than being counted
+/// by the client.
+package struct HighQualityPlaylistPage: Equatable, Sendable {
+  package let playlists: [DiscoveredPlaylist]
+  package let more: Bool
+  /// Pass as `before` to fetch the next page.
+  package let before: Int64
+
+  package init(playlists: [DiscoveredPlaylist], more: Bool, before: Int64) {
+    self.playlists = playlists
+    self.more = more
+    self.before = before
+  }
+}
+
+/// The regions `/album/new` filters by.
+package enum AlbumArea: String, CaseIterable, Sendable {
+  case all = "ALL"
+  case chinese = "ZH"
+  case western = "EA"
+  case korean = "KR"
+  case japanese = "JP"
+}
+
+/// An album page: what the album is, and what is on it.
+package struct AlbumDetail: Equatable, Sendable {
+  package let album: Album
+  package let tracks: [Track]
+
+  package init(album: Album, tracks: [Track]) {
+    self.album = album
+    self.tracks = tracks
+  }
+}
+
+/// The parts of an album that change without the album changing.
+///
+/// Both fields are optional because the endpoint omits them for an album the
+/// account has no relationship with, and "unknown" must not be shown as "not
+/// collected" — that would offer a toggle whose starting value was a guess.
+package struct AlbumDynamic: Equatable, Sendable {
+  package let isCollected: Bool?
+  package let collectCount: Int?
+
+  package init(isCollected: Bool?, collectCount: Int?) {
+    self.isCollected = isCollected
+    self.collectCount = collectCount
+  }
+}
+
+/// An artist page: who they are, and the songs the service ranks highest.
+package struct ArtistDetail: Equatable, Sendable {
+  package let artist: Artist
+  package let hotSongs: [Track]
+
+  package init(artist: Artist, hotSongs: [Track]) {
+    self.artist = artist
+    self.hotSongs = hotSongs
+  }
+}
+
+// MARK: - Search
+
+/// What a search is looking for. The raw values are the `type` cloudsearch
+/// takes; MacEase offers the four kinds it can actually open.
+package enum SearchScope: Int, CaseIterable, Sendable, Hashable {
+  case songs = 1
+  case albums = 10
+  case artists = 100
+  case playlists = 1000
+}
+
+/// A search result set, in the shape the requested scope returns.
+///
+/// One case per scope rather than four optional arrays: a song search cannot
+/// produce artists, so a type that allows it would push the impossible case
+/// out to every caller.
+package enum SearchItems: Equatable, Sendable {
+  case songs([Track])
+  case albums([Album])
+  case artists([Artist])
+  case playlists([DiscoveredPlaylist])
+
+  package static func empty(_ scope: SearchScope) -> SearchItems {
+    switch scope {
+    case .songs: .songs([])
+    case .albums: .albums([])
+    case .artists: .artists([])
+    case .playlists: .playlists([])
+    }
+  }
+
+  package var scope: SearchScope {
+    switch self {
+    case .songs: .songs
+    case .albums: .albums
+    case .artists: .artists
+    case .playlists: .playlists
+    }
+  }
+
+  package var count: Int {
+    switch self {
+    case .songs(let items): items.count
+    case .albums(let items): items.count
+    case .artists(let items): items.count
+    case .playlists(let items): items.count
+    }
+  }
+
+  package var isEmpty: Bool { count == 0 }
+
+  /// Appends the next page, dropping rows already held.
+  ///
+  /// The service repeats rows across pages when the result set shifts between
+  /// requests, so identity is the row's id rather than its position. A scope
+  /// change resets the list before the request is sent, so the mismatched case
+  /// cannot arise from paging; if it ever did, the newer page wins rather than
+  /// two unlike kinds being concatenated.
+  package func appending(_ page: SearchItems) -> SearchItems {
+    switch (self, page) {
+    case (.songs(let held), .songs(let next)):
+      .songs(held + Self.fresh(next, notIn: held.map(\.id)))
+    case (.albums(let held), .albums(let next)):
+      .albums(held + Self.fresh(next, notIn: held.map(\.id)))
+    case (.artists(let held), .artists(let next)):
+      .artists(held + Self.fresh(next, notIn: held.map(\.id)))
+    case (.playlists(let held), .playlists(let next)):
+      .playlists(held + Self.fresh(next, notIn: held.map(\.id)))
+    default:
+      page
+    }
+  }
+
+  private static func fresh<Item>(
+    _ next: [Item],
+    notIn heldIDs: [Int64]
+  ) -> [Item] where Item: Identifiable, Item.ID == Int64 {
+    var seen = Set(heldIDs)
+    return next.filter { seen.insert($0.id).inserted }
+  }
+}
+
+/// One page of search results, with what the service says the whole set holds.
+package struct SearchPage: Equatable, Sendable {
+  package let items: SearchItems
+  /// nil when the response did not report a count for this scope; paging then
+  /// falls back to "a full page means there may be more".
+  package let totalCount: Int?
+
+  package init(items: SearchItems, totalCount: Int?) {
+    self.items = items
+    self.totalCount = totalCount
+  }
+}
+
+/// One row of the as-you-type suggestion list.
+///
+/// A suggestion only ever fills the search field: choosing one never runs a
+/// search by itself, so it carries the text to insert and the context that
+/// tells the user which of several same-named rows they picked.
+package struct SearchSuggestion: Equatable, Sendable, Identifiable {
+  package let id: String
+  package let keyword: String
+  package let detail: String?
+
+  package init(id: String, keyword: String, detail: String?) {
+    self.id = id
+    self.keyword = keyword
+    self.detail = detail
+  }
+}

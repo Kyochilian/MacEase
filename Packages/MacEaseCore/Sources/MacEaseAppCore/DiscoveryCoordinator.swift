@@ -2,12 +2,17 @@ import Foundation
 import NeteaseKit
 import Observation
 
-/// Discovery and listening-ranking reads. Sections load from an explicit
-/// one-request user action, plus one launch-scoped prefetch of the four
-/// Discover sections after the first successful validation (roadmap
-/// decision); refreshes stay user-triggered. None of these endpoints has
-/// verified credential-invalidation semantics, so service 301 classifies
-/// and stops.
+/// Discovery reads: the recommendation sections, the browsable playlist
+/// catalogue, the radar family, recommended new songs, similar songs and
+/// similar artists, plus listening rankings.
+///
+/// Every section loads from an explicit one-request user action, apart from
+/// one launch-scoped prefetch of the four recommendation sections after the
+/// first successful validation. Browsing, radar, new songs and the similar
+/// lists are never prefetched: they follow a choice the user made, so there is
+/// nothing to guess at before they make it. Nothing here polls. None of these
+/// endpoints has verified credential-invalidation semantics, so service 301
+/// classifies and stops.
 @MainActor
 @Observable
 package final class DiscoveryCoordinator: SessionGuardedCoordinator {
@@ -32,11 +37,55 @@ package final class DiscoveryCoordinator: SessionGuardedCoordinator {
   package var records: [PlayRecordEntry] = []
   package var similarSongs: [Track] = []
   package var similarSeedName: String?
-  package var searchResults: [Track] = []
-  package var searchQuery = ""
   package var recordScope: PlayRecordScope = .allTime
   package var isLoading = false
   package var status = "Validate the session, then load each section explicitly"
+
+  // MARK: - Browsing
+
+  /// The four global playlist ids whose title, cover and contents NetEase
+  /// generates per signed-in account. There is no radar endpoint: the feature
+  /// is these fixed ids read through the ordinary playlist paths, which is
+  /// what `missuo/kumone@db1a5e6` does in `Features/Home/HomeView.swift`.
+  package static let radarPlaylistIDs: [Int64] = [
+    3_136_952_023,  // 私人雷达
+    2_829_883_282,  // 华语私人雷达
+    2_829_816_518,  // 欧美私人雷达
+    2_829_896_389,  // 日系私人雷达
+  ]
+
+  package var selectedCategory = PlaylistCategory.default {
+    didSet {
+      guard selectedCategory != oldValue else { return }
+      clearCategoryPaging()
+    }
+  }
+  package var categoryOrder: PlaylistOrder = .hot {
+    didSet {
+      guard categoryOrder != oldValue else { return }
+      clearCategoryPaging()
+    }
+  }
+  package private(set) var categoryPlaylists: [DiscoveredPlaylist] = []
+  package private(set) var categoryHasMore = false
+  package var selectedHighQualityCategory = PlaylistCategory.default {
+    didSet {
+      guard selectedHighQualityCategory != oldValue else { return }
+      clearHighQualityPaging()
+    }
+  }
+  package private(set) var highQualityPlaylists: [DiscoveredPlaylist] = []
+  package private(set) var highQualityHasMore = false
+  package private(set) var radarPlaylists: [DiscoveredPlaylist] = []
+  package private(set) var newSongs: [Track] = []
+  package private(set) var similarArtists: [Artist] = []
+  package private(set) var similarArtistSeedName: String?
+  /// The service's own cursor for the highest-rated list, which pages by the
+  /// last row's update time rather than by an offset the client counts.
+  @ObservationIgnored private var highQualityBefore: Int64 = 0
+  /// Category pages use an offset supplied by the client. It advances by the
+  /// raw server page size, not the number left after ID deduplication.
+  @ObservationIgnored private var categoryOffset = 0
 
   package init(
     transport: any NeteaseTransporting,
@@ -173,28 +222,191 @@ package final class DiscoveryCoordinator: SessionGuardedCoordinator {
 
   /// Song search (1 request). Runs only from an explicit Search action; there
   /// is no as-you-type querying.
-  package func search(session: any SessionProviding) {
-    let keywords = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !keywords.isEmpty else { return }
+  package func loadCategoryPlaylists(reset: Bool, session: any SessionProviding) {
+    guard reset || categoryHasMore else { return }
+    let category = selectedCategory
+    let order = categoryOrder
+    let offset = reset ? 0 : categoryOffset
     load(
-      loadingStatus: "Searching (1 request)",
-      operation: "Search",
+      loadingStatus: "Loading \(category) playlists (1 request)",
+      operation: "Category playlists",
       session: session,
       run: { account, generation, session in
         await self.run(
-          operation: "Search",
+          operation: "Category playlists",
           account: account,
           generation: generation,
           session: session,
           fetch: { credential, _ in
-            try await self.transport.searchSongs(
-              keywords: keywords,
+            try await self.transport.categoryPlaylists(
+              category: category,
+              order: order,
+              limit: NeteaseSession.browsePageSize,
+              offset: offset,
+              credential: credential
+            )
+          },
+          apply: { page in
+            // The picker may have moved while the request was out. A page for
+            // the tag the user left must not be shown under the one they
+            // chose, and the cursor it carries names the wrong list.
+            guard self.selectedCategory == category, self.categoryOrder == order
+            else {
+              return "Discarded a \(category) page; the category changed"
+            }
+            let pageItems = Self.deduplicated(page.items)
+            if reset {
+              self.categoryPlaylists = pageItems
+            } else {
+              var seen = Set(self.categoryPlaylists.map(\.id))
+              self.categoryPlaylists += pageItems.filter {
+                seen.insert($0.id).inserted
+              }
+            }
+            self.categoryOffset = offset + page.items.count
+            // An empty raw page cannot advance an offset. Trusting `more`
+            // alone would resend the same request forever; deduplicated count
+            // is deliberately irrelevant here.
+            self.categoryHasMore = page.more && !page.items.isEmpty
+            return "Loaded \(self.categoryPlaylists.count) \(category) playlists"
+          }
+        )
+      }
+    )
+  }
+
+  package func loadHighQualityPlaylists(reset: Bool, session: any SessionProviding) {
+    guard reset || highQualityHasMore else { return }
+    let category = selectedHighQualityCategory
+    let before: Int64 = reset ? 0 : highQualityBefore
+    load(
+      loadingStatus: "Loading the highest-rated \(category) playlists (1 request)",
+      operation: "Highest-rated playlists",
+      session: session,
+      run: { account, generation, session in
+        await self.run(
+          operation: "Highest-rated playlists",
+          account: account,
+          generation: generation,
+          session: session,
+          fetch: { credential, _ in
+            try await self.transport.highQualityPlaylists(
+              category: category,
+              limit: NeteaseSession.browsePageSize,
+              before: before,
+              credential: credential
+            )
+          },
+          apply: { page in
+            guard self.selectedHighQualityCategory == category else {
+              return "Discarded a \(category) page; the category changed"
+            }
+            let pageItems = Self.deduplicated(page.playlists)
+            if reset {
+              self.highQualityPlaylists = pageItems
+            } else {
+              var seen = Set(self.highQualityPlaylists.map(\.id))
+              self.highQualityPlaylists += pageItems.filter {
+                seen.insert($0.id).inserted
+              }
+            }
+            self.highQualityBefore = page.before
+            // This endpoint owns its cursor. If it claims more while returning
+            // the cursor we just sent, there is no distinct next request.
+            self.highQualityHasMore = page.more && page.before != before
+            return
+              "Loaded \(self.highQualityPlaylists.count) highest-rated "
+              + "\(category) playlists"
+          }
+        )
+      }
+    )
+  }
+
+  /// The radar family, one request per playlist (up to 4). They are separate
+  /// playlists, so there is no single response that holds all four; the run
+  /// stops at the first failure and keeps what it already read.
+  package func loadRadarPlaylists(session: any SessionProviding) {
+    load(
+      loadingStatus:
+        "Loading radar playlists (up to \(Self.radarPlaylistIDs.count) requests)",
+      operation: "Radar playlists",
+      session: session,
+      run: { account, generation, session in
+        var loaded: [DiscoveredPlaylist] = []
+        for playlistID in Self.radarPlaylistIDs {
+          let ok = await self.run(
+            operation: "Radar playlists",
+            account: account,
+            generation: generation,
+            session: session,
+            fetch: { credential, _ in
+              try await self.transport.playlistBrief(
+                playlistID: playlistID,
+                credential: credential
+              )
+            },
+            apply: { playlist in
+              loaded.append(playlist)
+              self.radarPlaylists = loaded
+              return "Loaded \(loaded.count) radar playlists"
+            }
+          )
+          guard ok else { return false }
+        }
+        return true
+      }
+    )
+  }
+
+  package func loadNewSongs(session: any SessionProviding) {
+    load(
+      loadingStatus: "Loading recommended new songs (1 request)",
+      operation: "Recommended new songs",
+      session: session,
+      run: { account, generation, session in
+        await self.run(
+          operation: "Recommended new songs",
+          account: account,
+          generation: generation,
+          session: session,
+          fetch: { credential, _ in
+            try await self.transport.recommendedNewSongs(
+              limit: 20,
               credential: credential
             )
           },
           apply: { songs in
-            self.searchResults = songs
-            return "Found \(songs.count) songs for \(keywords)"
+            self.newSongs = songs
+            return "Loaded \(songs.count) recommended new songs"
+          }
+        )
+      }
+    )
+  }
+
+  /// Artists similar to one explicitly chosen seed (1 request).
+  package func loadSimilarArtists(seed: Artist, session: any SessionProviding) {
+    load(
+      loadingStatus: "Loading similar artists (1 request)",
+      operation: "Similar artists",
+      session: session,
+      run: { account, generation, session in
+        await self.run(
+          operation: "Similar artists",
+          account: account,
+          generation: generation,
+          session: session,
+          fetch: { credential, _ in
+            try await self.transport.similarArtists(
+              artistID: seed.id,
+              credential: credential
+            )
+          },
+          apply: { artists in
+            self.similarArtists = artists
+            self.similarArtistSeedName = seed.name
+            return "Loaded \(artists.count) artists similar to \(seed.name)"
           }
         )
       }
@@ -408,6 +620,30 @@ package final class DiscoveryCoordinator: SessionGuardedCoordinator {
     records = []
     similarSongs = []
     similarSeedName = nil
-    searchResults = []
+    clearCategoryPaging()
+    clearHighQualityPaging()
+    radarPlaylists = []
+    newSongs = []
+    similarArtists = []
+    similarArtistSeedName = nil
+  }
+
+  private func clearCategoryPaging() {
+    categoryPlaylists = []
+    categoryHasMore = false
+    categoryOffset = 0
+  }
+
+  private func clearHighQualityPaging() {
+    highQualityPlaylists = []
+    highQualityHasMore = false
+    highQualityBefore = 0
+  }
+
+  private static func deduplicated(
+    _ playlists: [DiscoveredPlaylist]
+  ) -> [DiscoveredPlaylist] {
+    var seen: Set<Int64> = []
+    return playlists.filter { seen.insert($0.id).inserted }
   }
 }

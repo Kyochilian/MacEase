@@ -2,6 +2,53 @@ import Foundation
 import NeteaseKit
 import Observation
 
+/// A membership value the server has actually proved. Unknown is deliberately
+/// distinct from confirmed absence, so a button never toggles a guess.
+package enum ConfirmedMembershipState: Equatable, Sendable {
+  case unknown
+  case confirmed(Bool)
+}
+
+private struct ConfirmedMembership {
+  private var completeIDs: Set<Int64>?
+  private var individuallyKnown: [Int64: Bool] = [:]
+
+  func state(of id: Int64) -> ConfirmedMembershipState {
+    if let completeIDs {
+      return .confirmed(completeIDs.contains(id))
+    }
+    return individuallyKnown[id].map(ConfirmedMembershipState.confirmed)
+      ?? .unknown
+  }
+
+  mutating func confirm(_ included: Bool, id: Int64) {
+    if completeIDs != nil {
+      if included {
+        completeIDs?.insert(id)
+      } else {
+        completeIDs?.remove(id)
+      }
+    } else {
+      individuallyKnown[id] = included
+    }
+  }
+
+  /// A successful reset page with more rows invalidates only the old implicit
+  /// negatives. Rows the old complete list actually contained remain known.
+  mutating func beginPartialReplacement() {
+    guard let completeIDs else { return }
+    individuallyKnown = Dictionary(
+      uniqueKeysWithValues: completeIDs.map { ($0, true) }
+    )
+    self.completeIDs = nil
+  }
+
+  mutating func loadComplete(_ ids: [Int64]) {
+    completeIDs = Set(ids)
+    individuallyKnown = [:]
+  }
+}
+
 /// The account's own collections: albums it has saved, artists it follows and
 /// the cloud drive.
 ///
@@ -21,6 +68,8 @@ package final class CollectionsCoordinator: SessionGuardedCoordinator {
   @ObservationIgnored package private(set) var generation = 0
   @ObservationIgnored private var loadTask: Task<Void, Never>?
   @ObservationIgnored private var operationToken: OperationToken?
+  private var albumMembership = ConfirmedMembership()
+  private var artistMembership = ConfirmedMembership()
 
   package var noStoredSessionStatus: String { "No stored session to load collections" }
 
@@ -33,6 +82,20 @@ package final class CollectionsCoordinator: SessionGuardedCoordinator {
   package private(set) var cloudHasMore = false
   package var isLoading = false
   package var status = "Validate the session, then load each collection"
+
+  package func albumCollectionState(for albumID: Int64) -> ConfirmedMembershipState {
+    albumMembership.state(of: albumID)
+  }
+
+  package func artistFollowState(for artistID: Int64) -> ConfirmedMembershipState {
+    artistMembership.state(of: artistID)
+  }
+
+  /// Album detail is another authoritative source for this one id. It feeds
+  /// the same state the collection list and writes use; Catalog keeps no copy.
+  package func confirmAlbumCollected(_ collected: Bool, albumID: Int64) {
+    albumMembership.confirm(collected, id: albumID)
+  }
 
   package init(
     transport: any NeteaseTransporting,
@@ -66,6 +129,14 @@ package final class CollectionsCoordinator: SessionGuardedCoordinator {
       return {
         self.albums = reset ? page.items : self.albums + page.items
         self.albumsHaveMore = page.more
+        if reset && page.more { self.albumMembership.beginPartialReplacement() }
+        if page.more {
+          for album in page.items {
+            self.albumMembership.confirm(true, id: album.id)
+          }
+        } else {
+          self.albumMembership.loadComplete(self.albums.map(\.id))
+        }
         return "Loaded \(self.albums.count) collected albums"
       }
     }
@@ -87,6 +158,14 @@ package final class CollectionsCoordinator: SessionGuardedCoordinator {
       return {
         self.artists = reset ? page.items : self.artists + page.items
         self.artistsHaveMore = page.more
+        if reset && page.more { self.artistMembership.beginPartialReplacement() }
+        if page.more {
+          for artist in page.items {
+            self.artistMembership.confirm(true, id: artist.id)
+          }
+        } else {
+          self.artistMembership.loadComplete(self.artists.map(\.id))
+        }
         return "Loaded \(self.artists.count) followed artists"
       }
     }
@@ -143,6 +222,7 @@ package final class CollectionsCoordinator: SessionGuardedCoordinator {
         } else {
           self.albums.removeAll { $0.id == album.id }
         }
+        self.albumMembership.confirm(collected, id: album.id)
         return
           (collected ? "Collected " : "Removed ") + album.name
           + "; reload to see the server's order"
@@ -175,6 +255,7 @@ package final class CollectionsCoordinator: SessionGuardedCoordinator {
         } else {
           self.artists.removeAll { $0.id == artist.id }
         }
+        self.artistMembership.confirm(followed, id: artist.id)
         return
           (followed ? "Followed " : "Unfollowed ") + artist.name
           + "; reload to see the server's order"
@@ -404,5 +485,7 @@ package final class CollectionsCoordinator: SessionGuardedCoordinator {
     albumsHaveMore = false
     artistsHaveMore = false
     cloudHasMore = false
+    albumMembership = ConfirmedMembership()
+    artistMembership = ConfirmedMembership()
   }
 }
