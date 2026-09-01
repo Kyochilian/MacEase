@@ -14,6 +14,7 @@ package enum PlaybackContext: Equatable, Sendable, Codable {
   case similarSongs(seedName: String)
   case listeningRankings
   case cloudDrive
+  case downloads
 
   package var label: String {
     switch self {
@@ -23,6 +24,7 @@ package enum PlaybackContext: Equatable, Sendable, Codable {
     case .similarSongs(let seedName): "Similar to \(seedName)"
     case .listeningRankings: "Listening rankings"
     case .cloudDrive: "Cloud drive"
+    case .downloads: "Downloads"
     }
   }
 }

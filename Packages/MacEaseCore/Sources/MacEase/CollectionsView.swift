@@ -166,8 +166,7 @@ struct CollectionsView: View {
             tracks: collections.cloudSongs.map(\.track),
             context: .cloudDrive,
             playback: playback,
-            session: session,
-            disabled: loadDisabled
+            session: session
           )
         }
       }

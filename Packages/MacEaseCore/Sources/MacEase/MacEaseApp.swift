@@ -15,6 +15,7 @@ struct MacEaseApp: App {
     case search
     case records
     case lyrics
+    case downloads
     case settings
   }
 
@@ -27,6 +28,11 @@ struct MacEaseApp: App {
   @State private var arbiter: OperationArbiter
   @State private var settings: AppSettings
   @State private var artwork: ArtworkLoader
+  /// Temporary, evictable HTTP ranges. The player owns the active pin; the
+  /// settings page only observes and maintains the same store.
+  @State private var audioRanges: AudioRangePipeline?
+  /// Persistent files and records for only the validated account.
+  @State private var downloads: DownloadCoordinator?
   /// Held so the Now Playing bridge lives as long as the app does; the views
   /// never read it.
   @State private var nowPlaying: NowPlayingCoordinator
@@ -53,6 +59,9 @@ struct MacEaseApp: App {
     let artwork = ArtworkLoader(
       diskCapacityBytes: Int(settings.imageCacheLimitBytes)
     )
+    let audioCache = Self.openAudioRangeCache(
+      limitBytes: settings.audioCacheLimitBytes
+    )
     let login = LoginCoordinator(transport: transport, vault: vault, arbiter: arbiter)
     let library = PlaylistLibraryCoordinator(
       transport: transport,
@@ -77,7 +86,8 @@ struct MacEaseApp: App {
     let playback = PlaybackController(
       transport: transport,
       vault: vault,
-      arbiter: arbiter
+      arbiter: arbiter,
+      output: AVPlayerAudioOutput(rangePipeline: audioCache.pipeline)
     )
     playback.attach(session: login)
     // Sleep, wake, the output device going away and the network coming and
@@ -95,12 +105,23 @@ struct MacEaseApp: App {
       performIntent: { router.perform($0) }
     )
     nowPlaying.startObserving()
-    // A store that will not open is not a reason to refuse to run: the queue
-    // simply does not survive a relaunch, and everything else is unaffected.
+    // A store that will not open is not a reason to refuse to run: queue
+    // restore and persistent downloads are unavailable, but online use remains.
     // Why it would not open is kept, so it cannot be mistaken for a store that
     // is quietly keeping up.
-    let storage = Self.openStorage(playback: playback)
+    let storage = Self.openStorage(
+      playback: playback,
+      transport: transport,
+      vault: vault,
+      arbiter: arbiter,
+      ranges: audioCache.pipeline
+    )
     let queuePersistence = storage.persistence
+    let downloads = storage.downloads
+    if let downloads {
+      playback.attach(downloads: downloads)
+      downloads.attach(playback: playback)
+    }
     playback.onExplicitStop = {
       queuePersistence?.clearQueueAfterExplicitStop()
     }
@@ -111,8 +132,9 @@ struct MacEaseApp: App {
     // of them, so the session owner clears everything, not just the reporter.
     login.onIdentityChanged = {
       [weak playback, weak library, weak discovery, weak collections, weak lyrics,
-        weak nowPlaying] in
+        weak downloads, weak nowPlaying] in
       playback?.stopForSessionChange()
+      downloads?.bind(accountID: nil)
       library?.reset()
       discovery?.reset()
       collections?.reset()
@@ -126,7 +148,10 @@ struct MacEaseApp: App {
     // the same single launch-scoped Discover prefetch. None of them carries a
     // copy of this decision, so none of them can be left out of it.
     login.onValidatedAccountChanged = {
-      [weak login, weak library, weak discovery] account in
+      [weak login, weak library, weak discovery, weak downloads] account in
+      // Binding and cancellation are synchronous with the identity commit;
+      // an old CDN task cannot wait for a later SwiftUI scheduling turn.
+      downloads?.bind(accountID: account?.userID)
       Task { @MainActor in
         guard let account else {
           await queuePersistence?.deactivate()
@@ -156,23 +181,88 @@ struct MacEaseApp: App {
     _arbiter = State(initialValue: arbiter)
     _settings = State(initialValue: settings)
     _artwork = State(initialValue: artwork)
+    _audioRanges = State(initialValue: audioCache.pipeline)
+    _downloads = State(initialValue: downloads)
     _nowPlaying = State(initialValue: nowPlaying)
     _systemEvents = State(initialValue: systemEvents)
     _queuePersistence = State(initialValue: queuePersistence)
-    _storageDiagnostic = State(initialValue: storage.diagnostic)
+    let combinedDiagnostic = [storage.diagnostic, audioCache.diagnostic]
+      .compactMap { $0 }
+      .joined(separator: " ")
+    _storageDiagnostic = State(
+      initialValue: combinedDiagnostic.isEmpty ? nil : combinedDiagnostic
+    )
   }
 
-  private static func openStorage(
-    playback: PlaybackController
-  ) -> (persistence: QueuePersistence?, diagnostic: String?) {
+  static func openStorage(
+    playback: PlaybackController,
+    transport: any NeteaseTransporting,
+    vault: any CredentialStoring,
+    arbiter: OperationArbiter,
+    ranges: AudioRangePipeline?,
+    storePath: String? = nil,
+    downloadsDirectory: URL? = nil
+  ) -> (
+    persistence: QueuePersistence?,
+    downloads: DownloadCoordinator?,
+    diagnostic: String?
+  ) {
     do {
-      let store = try LibraryStore(path: try LibraryStore.defaultPath())
-      return (QueuePersistence(store: store, playback: playback), nil)
+      let store = try LibraryStore(
+        path: try storePath ?? LibraryStore.defaultPath()
+      )
+      let persistence = QueuePersistence(store: store, playback: playback)
+      do {
+        let files = try OfflineAudioFiles(
+          directory: try downloadsDirectory ?? OfflineAudioFiles.defaultDirectory()
+        )
+        return (
+          persistence,
+          DownloadCoordinator(
+            transport: transport,
+            vault: vault,
+            arbiter: arbiter,
+            ranges: ranges,
+            store: store,
+            files: files
+          ),
+          nil
+        )
+      } catch {
+        return (
+          persistence,
+          nil,
+          "Offline download storage is unavailable: "
+            + LibraryStore.diagnostic(for: error)
+        )
+      }
     } catch {
       return (
         nil,
-        "Local storage is unavailable, so the queue will not survive a "
-          + "relaunch: " + LibraryStore.diagnostic(for: error)
+        nil,
+        "Local storage is unavailable, so the queue and downloads will not "
+          + "survive a relaunch: " + LibraryStore.diagnostic(for: error)
+      )
+    }
+  }
+
+  private static func openAudioRangeCache(
+    limitBytes: Int64
+  ) -> (pipeline: AudioRangePipeline?, diagnostic: String?) {
+    do {
+      let store = try AudioRangeStore(
+        directory: AudioRangeStore.defaultDirectory(),
+        limitBytes: limitBytes
+      )
+      return (
+        AudioRangePipeline(store: store, fetcher: URLSessionAudioByteFetcher()),
+        nil
+      )
+    } catch {
+      return (
+        nil,
+        "Temporary audio caching is unavailable: "
+          + (error as NSError).localizedDescription
       )
     }
   }
@@ -185,6 +275,7 @@ struct MacEaseApp: App {
             session: session,
             arbiter: arbiter,
             storageStatus: storageDiagnostic ?? queuePersistence?.lastFailure
+              ?? downloads?.lastFailure
           )
           .tabItem { Label("Session", systemImage: "person.crop.circle") }
           .tag(MainTab.session)
@@ -194,7 +285,8 @@ struct MacEaseApp: App {
             discovery: discovery,
             playback: playback,
             arbiter: arbiter,
-            artwork: artwork
+            artwork: artwork,
+            downloads: downloads
           )
           .tabItem { Label("Library", systemImage: "music.note.list") }
           .tag(MainTab.library)
@@ -259,7 +351,22 @@ struct MacEaseApp: App {
           )
           .tabItem { Label("Lyrics", systemImage: "text.quote") }
           .tag(MainTab.lyrics)
-          SettingsView(settings: settings, artwork: artwork)
+          if let downloads {
+            DownloadsView(
+              session: session,
+              downloads: downloads,
+              playback: playback,
+              artwork: artwork
+            )
+            .tabItem { Label("Downloads", systemImage: "arrow.down.circle") }
+            .tag(MainTab.downloads)
+          }
+          SettingsView(
+            settings: settings,
+            artwork: artwork,
+            audioRanges: audioRanges,
+            downloads: downloads
+          )
             .tabItem { Label("Settings", systemImage: "gearshape") }
             .tag(MainTab.settings)
         }
@@ -270,7 +377,8 @@ struct MacEaseApp: App {
           library: library,
           discovery: discovery,
           playback: playback,
-          arbiter: arbiter
+          arbiter: arbiter,
+          downloads: downloads
         )
       }
       .frame(minWidth: 760, minHeight: 600)
@@ -424,6 +532,7 @@ private struct PlaylistLibraryView: View {
   let playback: PlaybackController
   let arbiter: OperationArbiter
   let artwork: ArtworkLoader
+  let downloads: DownloadCoordinator?
   @State private var newPlaylistName = ""
   @State private var newPlaylistIsPrivate = false
   @State private var submittedPlaylistName: String?
@@ -726,6 +835,13 @@ private struct PlaylistLibraryView: View {
         session: session,
         disabled: requestInFlight
       )
+      DownloadTrackButton(
+        track: track,
+        quality: playback.quality,
+        downloads: downloads,
+        session: session,
+        disabled: requestInFlight
+      )
       if library.selectedPlaylist?.owned == true {
         Button {
           // Named by id: a list that changed cannot make this land on a
@@ -744,8 +860,7 @@ private struct PlaylistLibraryView: View {
         tracks: library.tracks,
         context: playbackContext,
         playback: playback,
-        session: session,
-        disabled: session.account == nil || requestInFlight
+        session: session
       )
       .help("Starts the queue from this track over the loaded list")
     }
@@ -859,8 +974,7 @@ private struct DiscoverView: View {
                 tracks: discovery.dailySongs,
                 context: .dailyRecommendations,
                 playback: playback,
-                session: session,
-                disabled: loadDisabled
+                session: session
               )
             }
           }
@@ -904,8 +1018,7 @@ private struct DiscoverView: View {
                 tracks: discovery.similarSongs,
                 context: .similarSongs(seedName: discovery.similarSeedName ?? "the current track"),
                 playback: playback,
-                session: session,
-                disabled: loadDisabled
+                session: session
               )
             }
           }
@@ -1042,8 +1155,7 @@ private struct SearchView: View {
               tracks: discovery.searchResults,
               context: .searchResults(keywords: discovery.searchQuery),
               playback: playback,
-              session: session,
-              disabled: session.account == nil || requestInFlight
+              session: session
             )
           }
           .padding(.vertical, 3)
@@ -1109,8 +1221,7 @@ private struct PlayRecordsView: View {
               tracks: discovery.records.map(\.track),
               context: .listeningRankings,
               playback: playback,
-              session: session,
-              disabled: session.account == nil || requestInFlight
+              session: session
             )
           }
           .padding(.vertical, 3)
@@ -1126,13 +1237,10 @@ private struct PlaybackBarView: View {
   let discovery: DiscoveryCoordinator
   @Bindable var playback: PlaybackController
   let arbiter: OperationArbiter
+  let downloads: DownloadCoordinator?
   @State private var scrubPosition: Double?
 
   private var requestInFlight: Bool { arbiter.isBusy }
-
-  private var stepDisabled: Bool {
-    session.account == nil || requestInFlight
-  }
 
   var body: some View {
     VStack(spacing: 0) {
@@ -1180,6 +1288,15 @@ private struct PlaybackBarView: View {
               .foregroundStyle(.secondary)
           }
         }
+        if let track = playback.currentTrack {
+          DownloadTrackButton(
+            track: track,
+            quality: playback.quality,
+            downloads: downloads,
+            session: session,
+            disabled: requestInFlight
+          )
+        }
         Picker("Quality", selection: $playback.quality) {
           ForEach(PlaybackQuality.allCases, id: \.self) { quality in
             Text(quality.rawValue).tag(quality)
@@ -1191,13 +1308,13 @@ private struct PlaybackBarView: View {
         if playback.canPlayAgain {
           Button(
             playback.retryResumesPlayback
-              ? "Play Again · 1 request" : "Restore Paused · 1 request",
+              ? "Play Again" : "Restore Paused",
             systemImage: "arrow.counterclockwise"
           ) {
             playback.playAgain(session: session)
           }
-          .disabled(session.account == nil || requestInFlight)
-          .help("Re-resolves the song URL; the expired one is never reused")
+          .disabled(session.account == nil)
+          .help("Uses a matching download or resolves a fresh song URL")
         }
         if playback.isActive {
           Button("Stop", systemImage: "stop.fill") {
@@ -1210,10 +1327,10 @@ private struct PlaybackBarView: View {
       Divider()
 
       HStack(spacing: 10) {
-        Button("Previous · 1 request", systemImage: "backward.end.fill") {
+        Button("Previous", systemImage: "backward.end.fill") {
           playback.playPrevious(session: session)
         }
-        .disabled(!playback.canStepPrevious || stepDisabled)
+        .disabled(!playback.canStepPrevious || session.account == nil)
         if playback.phase == .paused {
           Button("Resume", systemImage: "play.fill") {
             playback.resume()
@@ -1224,10 +1341,10 @@ private struct PlaybackBarView: View {
           }
           .disabled(playback.phase != .playing)
         }
-        Button("Next · 1 request", systemImage: "forward.end.fill") {
+        Button("Next", systemImage: "forward.end.fill") {
           playback.playNext(session: session)
         }
-        .disabled(!playback.canStepNext || stepDisabled)
+        .disabled(!playback.canStepNext || session.account == nil)
 
         Picker("Mode", selection: $playback.playbackMode) {
           ForEach(PlaybackMode.allCases, id: \.self) { mode in
@@ -1236,8 +1353,8 @@ private struct PlaybackBarView: View {
         }
         .fixedSize()
         .help(
-          "Order after a track ends naturally; each new track is 1 request, "
-            + "repeat one is 0"
+          "Order after a track ends naturally; matching downloads play locally, "
+            + "otherwise each new track resolves once"
         )
 
         Spacer()

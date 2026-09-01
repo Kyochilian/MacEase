@@ -41,9 +41,10 @@ package protocol AudioOutput: AnyObject {
   /// is a short, credential-free diagnostic.
   var onFailure: (@MainActor (AudioOutputFailure) -> Void)? { get set }
 
-  /// Loads the resolved URL. AVFoundation load failures are returned as the
-  /// typed transient error above; cancellation remains cancellation.
-  func prepare(url: URL, userAgent: String) async throws -> AudioAssetInfo
+  /// Loads the resolved resource. AVFoundation load failures are returned as
+  /// the typed transient error above; cancellation remains cancellation.
+  func prepare(resource: PlaybackResource, userAgent: String) async throws
+    -> AudioAssetInfo
   func play()
   func pause()
   func seek(to seconds: Double) async throws
@@ -55,10 +56,14 @@ package protocol AudioOutput: AnyObject {
 @MainActor
 package final class AVPlayerAudioOutput: AudioOutput {
   private var player: AVPlayer?
+  private var loadedAsset: AVURLAsset?
   private var periodicObserver: Any?
   private var itemStatusObservation: NSKeyValueObservation?
   private var playedToEndObserver: NSObjectProtocol?
+  private var rangeLoader: AudioAssetResourceLoader?
+  private var pinnedCacheKey: AudioCacheKey?
   private var generation: UInt64 = 0
+  private let rangePipeline: AudioRangePipeline?
 
   package var onPositionUpdate: (@MainActor (Double) -> Void)?
   package var onPlayedToEnd: (@MainActor () -> Void)?
@@ -72,7 +77,9 @@ package final class AVPlayerAudioOutput: AudioOutput {
     didSet { player?.isMuted = isMuted }
   }
 
-  package init() {}
+  package init(rangePipeline: AudioRangePipeline? = nil) {
+    self.rangePipeline = rangePipeline
+  }
 
   package var currentPositionSeconds: Double? {
     guard let seconds = player?.currentTime().seconds, seconds.isFinite, seconds >= 0
@@ -80,20 +87,52 @@ package final class AVPlayerAudioOutput: AudioOutput {
     return seconds
   }
 
-  package func prepare(url: URL, userAgent: String) async throws -> AudioAssetInfo {
+  package func prepare(
+    resource: PlaybackResource,
+    userAgent: String
+  ) async throws -> AudioAssetInfo {
     teardown()
     let generation = self.generation
-    let asset = AVURLAsset(
-      url: url,
-      options: [AVURLAssetHTTPUserAgentKey: userAgent]
-    )
+    let asset: AVURLAsset
+    switch resource.location {
+    case .local(let url):
+      asset = AVURLAsset(url: url)
+    case .remote(let url):
+      if
+        let rangePipeline,
+        let key = resource.cacheKey
+      {
+        await rangePipeline.pin(key)
+        guard !Task.isCancelled, self.generation == generation else {
+          await rangePipeline.unpin(key)
+          throw CancellationError()
+        }
+        pinnedCacheKey = key
+        let loader = AudioAssetResourceLoader(
+          resource: resource,
+          key: key,
+          pipeline: rangePipeline,
+          userAgent: userAgent
+        )
+        rangeLoader = loader
+        asset = AVURLAsset(url: loader.assetURL)
+        asset.resourceLoader.setDelegate(loader, queue: loader.callbackQueue)
+      } else {
+        asset = AVURLAsset(
+          url: url,
+          options: [AVURLAssetHTTPUserAgentKey: userAgent]
+        )
+      }
+    }
     let isPlayable: Bool
     let duration: CMTime
+    loadedAsset = asset
     do {
       (isPlayable, duration) = try await asset.load(.isPlayable, .duration)
     } catch {
       try Task.checkCancellation()
       guard self.generation == generation else { throw CancellationError() }
+      teardown()
       throw AudioOutputFailure.assetLoad(Self.failureDetail(error))
     }
     try Task.checkCancellation()
@@ -133,6 +172,10 @@ package final class AVPlayerAudioOutput: AudioOutput {
 
   package func teardown() {
     generation &+= 1
+    loadedAsset?.cancelLoading()
+    loadedAsset = nil
+    rangeLoader?.cancelAll()
+    rangeLoader = nil
     itemStatusObservation?.invalidate()
     itemStatusObservation = nil
     if let playedToEndObserver {
@@ -146,6 +189,12 @@ package final class AVPlayerAudioOutput: AudioOutput {
     player?.currentItem?.cancelPendingSeeks()
     player?.pause()
     player = nil
+    if let pinnedCacheKey, let rangePipeline {
+      self.pinnedCacheKey = nil
+      Task { await rangePipeline.unpin(pinnedCacheKey) }
+    } else {
+      pinnedCacheKey = nil
+    }
   }
 
   private func observe(

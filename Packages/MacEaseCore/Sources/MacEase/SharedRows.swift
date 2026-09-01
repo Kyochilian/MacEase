@@ -96,10 +96,9 @@ struct PlayTrackButton: View {
   let context: PlaybackContext
   let playback: PlaybackController
   let session: LoginCoordinator
-  let disabled: Bool
 
   var body: some View {
-    Button("Play · 1 request", systemImage: "play.fill") {
+    Button("Play", systemImage: "play.fill") {
       guard let index = tracks.firstIndex(where: { $0.id == track.id }) else {
         return
       }
@@ -111,8 +110,88 @@ struct PlayTrackButton: View {
       )
     }
     .buttonStyle(.borderless)
-    .disabled(disabled)
+    .disabled(session.account == nil)
     .accessibilityLabel("Play \(track.name)")
+  }
+}
+
+/// The single foreground-download control shared by track rows and Now
+/// Playing. It never starts automatically, and a running transfer exposes its
+/// progress and cancel action wherever the same track is shown.
+struct DownloadTrackButton: View {
+  let track: Track
+  let quality: PlaybackQuality
+  let downloads: DownloadCoordinator?
+  let session: LoginCoordinator
+  let disabled: Bool
+
+  private var isThisTrackActive: Bool {
+    guard let downloads else { return false }
+    switch downloads.activity {
+    case .resolving(let songID), .transferring(let songID):
+      return songID == track.id
+    case .idle:
+      return false
+    }
+  }
+
+  private var isDownloaded: Bool {
+    guard let accountID = session.account?.userID else { return false }
+    return downloads?.downloads.contains {
+      $0.accountID == accountID && $0.track.id == track.id
+        && $0.requestedQuality == quality
+    } == true
+  }
+
+  var body: some View {
+    if let downloads {
+      if isThisTrackActive {
+        if let progress = downloads.progress {
+          ProgressView(value: progress)
+            .frame(width: 44)
+            .accessibilityLabel("Downloading \(track.name)")
+            .accessibilityValue(progress.formatted(.percent.precision(.fractionLength(0))))
+        } else {
+          ProgressView()
+            .controlSize(.small)
+            .accessibilityLabel("Resolving download for \(track.name)")
+        }
+        Button {
+          downloads.cancelDownload()
+        } label: {
+          Image(systemName: "xmark.circle")
+        }
+        .buttonStyle(.borderless)
+        .help("Cancel this download")
+        .accessibilityLabel("Cancel download of \(track.name)")
+      } else if isDownloaded {
+        Image(systemName: "checkmark.circle.fill")
+          .foregroundStyle(.secondary)
+          .help("Downloaded at \(quality.rawValue) quality")
+          .accessibilityLabel("\(track.name) is downloaded")
+      } else {
+        Button {
+          downloads.startDownload(
+            track: track,
+            quality: quality,
+            session: session
+          )
+        } label: {
+          Image(systemName: "arrow.down.circle")
+        }
+        .buttonStyle(.borderless)
+        .disabled(
+          disabled || session.account == nil || downloads.isDownloading
+            || downloads.isMaintaining || downloads.isLoading
+            || !downloads.canCreateDownloads
+        )
+        .help(
+          downloads.downloadCreationUnavailableReason
+            ?? "Download this song for offline playback"
+        )
+        .accessibilityLabel("Download \(track.name)")
+      }
+    }
   }
 }
 

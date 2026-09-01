@@ -564,6 +564,7 @@ final class FakeAudioOutput: AudioOutput {
     AudioAssetInfo(isPlayable: true, durationSeconds: 200)
   )
   private(set) var preparedURLs: [URL] = []
+  private(set) var preparedResources: [PlaybackResource] = []
   private(set) var isPlaying = false
   private(set) var seeks: [Double] = []
   private(set) var teardownCount = 0
@@ -573,9 +574,17 @@ final class FakeAudioOutput: AudioOutput {
   private var shouldBlockNextPrepare = false
   private var blockedPrepare: CheckedContinuation<Void, Never>?
 
-  func prepare(url: URL, userAgent: String) async throws -> AudioAssetInfo {
+  func prepare(
+    resource: PlaybackResource,
+    userAgent: String
+  ) async throws -> AudioAssetInfo {
     teardown()
     let generation = self.generation
+    preparedResources.append(resource)
+    let url: URL
+    switch resource.location {
+    case .remote(let value), .local(let value): url = value
+    }
     preparedURLs.append(url)
     if shouldBlockNextPrepare {
       shouldBlockNextPrepare = false

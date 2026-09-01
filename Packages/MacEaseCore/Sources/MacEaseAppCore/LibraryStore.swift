@@ -226,6 +226,124 @@ package actor LibraryStore {
     )
   }
 
+  // MARK: - Offline downloads
+
+  package func saveDownload(_ download: OfflineDownload) throws {
+    try failIfInjected()
+    let track = try JSONEncoder().encode(download.track)
+    try run(
+      """
+      INSERT INTO download (
+        account_id, song_id, requested_quality, actual_quality, format,
+        byte_count, relative_path, track, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(account_id, song_id, requested_quality) DO UPDATE SET
+        actual_quality = excluded.actual_quality,
+        format = excluded.format,
+        byte_count = excluded.byte_count,
+        relative_path = excluded.relative_path,
+        track = excluded.track,
+        created_at = excluded.created_at
+      """,
+      bind: { statement in
+        try bind(int: download.accountID, at: 1, to: statement)
+        try bind(int: download.track.id, at: 2, to: statement)
+        try bind(text: download.requestedQuality.rawValue, at: 3, to: statement)
+        try bind(text: download.actualQuality, at: 4, to: statement)
+        try bind(text: download.format, at: 5, to: statement)
+        try bind(int: download.byteCount, at: 6, to: statement)
+        try bind(text: download.relativePath, at: 7, to: statement)
+        try bind(blob: track, at: 8, to: statement)
+        try bind(
+          int: Int64(download.createdAt.timeIntervalSince1970),
+          at: 9,
+          to: statement
+        )
+      }
+    )
+  }
+
+  package func downloads(accountID: Int64) throws -> StoredDownloads {
+    var result: [OfflineDownload] = []
+    var corruptRowIDs: [Int64] = []
+    try query(
+      """
+      SELECT rowid, song_id, requested_quality, actual_quality, format,
+             byte_count, relative_path, track, created_at
+      FROM download WHERE account_id = ? ORDER BY created_at DESC
+      """,
+      bind: { try bind(int: accountID, at: 1, to: $0) },
+      row: { statement in
+        let rowID = sqlite3_column_int64(statement, 0)
+        guard
+          let requestedValue = Self.text(statement, column: 2),
+          let requested = PlaybackQuality(rawValue: requestedValue),
+          let actual = Self.text(statement, column: 3), !actual.isEmpty,
+          let format = Self.text(statement, column: 4), !format.isEmpty,
+          case let byteCount = sqlite3_column_int64(statement, 5),
+          byteCount > 0,
+          let relativePath = Self.text(statement, column: 6),
+          !relativePath.isEmpty,
+          let trackData = Self.data(statement, column: 7),
+          let track = try? JSONDecoder().decode(Track.self, from: trackData),
+          track.id == sqlite3_column_int64(statement, 1)
+        else {
+          corruptRowIDs.append(rowID)
+          return
+        }
+        result.append(
+          OfflineDownload(
+            accountID: accountID,
+            track: track,
+            requestedQuality: requested,
+            actualQuality: actual,
+            format: format,
+            byteCount: byteCount,
+            relativePath: relativePath,
+            createdAt: Date(
+              timeIntervalSince1970: TimeInterval(
+                sqlite3_column_int64(statement, 8)
+              )
+            )
+          )
+        )
+      }
+    )
+    for rowID in corruptRowIDs {
+      try run(
+        "DELETE FROM download WHERE rowid = ?",
+        bind: { try bind(int: rowID, at: 1, to: $0) }
+      )
+    }
+    return StoredDownloads(
+      downloads: result,
+      discardedCorruptRows: corruptRowIDs.count
+    )
+  }
+
+  package func deleteDownload(_ id: OfflineDownloadID) throws {
+    try failIfInjected()
+    try run(
+      """
+      DELETE FROM download
+      WHERE account_id = ? AND song_id = ? AND requested_quality = ?
+      """,
+      bind: { statement in
+        try bind(int: id.accountID, at: 1, to: statement)
+        try bind(int: id.songID, at: 2, to: statement)
+        try bind(text: id.requestedQuality.rawValue, at: 3, to: statement)
+      }
+    )
+  }
+
+  package func clearDownloads(accountID: Int64) throws {
+    try failIfInjected()
+    try run(
+      "DELETE FROM download WHERE account_id = ?",
+      bind: { try bind(int: accountID, at: 1, to: $0) }
+    )
+  }
+
   // MARK: - Schema
 
   private static func migrate(_ handle: OpaquePointer) throws {
@@ -248,6 +366,23 @@ package actor LibraryStore {
       CREATE TABLE IF NOT EXISTS queue (
         account_id INTEGER PRIMARY KEY,
         payload    BLOB NOT NULL
+      )
+      """,
+      on: handle
+    )
+    try execute(
+      """
+      CREATE TABLE IF NOT EXISTS download (
+        account_id         INTEGER NOT NULL,
+        song_id            INTEGER NOT NULL,
+        requested_quality  TEXT    NOT NULL,
+        actual_quality     TEXT    NOT NULL,
+        format             TEXT    NOT NULL,
+        byte_count         INTEGER NOT NULL,
+        relative_path      TEXT    NOT NULL,
+        track              BLOB    NOT NULL,
+        created_at         INTEGER NOT NULL,
+        PRIMARY KEY (account_id, song_id, requested_quality)
       )
       """,
       on: handle
@@ -342,6 +477,15 @@ package actor LibraryStore {
   private static func text(_ statement: OpaquePointer, column: Int32) -> String? {
     guard let bytes = sqlite3_column_text(statement, column) else { return nil }
     return String(cString: bytes)
+  }
+
+  private static func data(_ statement: OpaquePointer, column: Int32) -> Data? {
+    guard
+      let bytes = sqlite3_column_blob(statement, column),
+      case let count = sqlite3_column_bytes(statement, column),
+      count > 0
+    else { return nil }
+    return Data(bytes: bytes, count: Int(count))
   }
 
   private static func execute(_ sql: String, on handle: OpaquePointer) throws {

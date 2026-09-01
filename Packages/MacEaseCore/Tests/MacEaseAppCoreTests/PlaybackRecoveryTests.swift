@@ -12,13 +12,14 @@ import Testing
 private struct PlaybackRig {
   let transport = FakeTransport()
   let vault: FakeVault
-  let arbiter = OperationArbiter()
+  let arbiter: OperationArbiter
   let output = FakeAudioOutput()
   let session: FakeSession
   let playback: PlaybackController
 
-  init() {
+  init(arbiter: OperationArbiter = OperationArbiter()) {
     let credential = makeCredential()
+    self.arbiter = arbiter
     vault = FakeVault(stored: credential)
     session = FakeSession(credential: credential)
     playback = PlaybackController(
@@ -39,6 +40,73 @@ private struct PlaybackRig {
     playback.playAgain(session: session)
     await playback.settleForTesting()
   }
+}
+
+@Test @MainActor func aFullReadCeilingDoesNotReplaceCurrentRemotePlayback() async throws {
+  let arbiter = OperationArbiter(maximumConcurrentReads: 1)
+  let rig = PlaybackRig(arbiter: arbiter)
+  await rig.transport.setSongURL(.success(makeResolvedAsset(songID: 101)))
+  await rig.play([101, 102])
+  let loadedURL = rig.output.loadedURL
+  let teardownCount = rig.output.teardownCount
+  let blocker = try #require(
+    arbiter.begin(name: "Playlist", effect: .read)
+  )
+
+  await rig.play([202, 203])
+
+  #expect(rig.playback.phase == .playing)
+  #expect(rig.playback.currentTrack?.id == 101)
+  #expect(rig.playback.queuePosition == "1 of 2")
+  #expect(rig.output.loadedURL == loadedURL)
+  #expect(rig.output.teardownCount == teardownCount)
+  #expect(await rig.transport.recordedCalls() == [.resolveSongURL(101, .standard)])
+  #expect(rig.playback.status == "Playback is busy; try again")
+  #expect(arbiter.end(blocker, outcome: .applied) == .applied)
+}
+
+@Test @MainActor func playAgainAtTheReadCeilingStaysRetryable() async throws {
+  let arbiter = OperationArbiter(maximumConcurrentReads: 1)
+  let rig = PlaybackRig(arbiter: arbiter)
+  await rig.transport.setSongURL(.failure(URLError(.timedOut)))
+  await rig.play()
+  #expect(rig.playback.phase == .failed)
+  let blocker = try #require(
+    arbiter.begin(name: "Playlist", effect: .read)
+  )
+
+  await rig.playAgain()
+
+  #expect(rig.playback.phase == .failed)
+  #expect(rig.playback.canPlayAgain)
+  #expect(await rig.transport.callCount() == 1)
+  #expect(rig.playback.status == "Playback is busy; try again")
+
+  #expect(arbiter.end(blocker, outcome: .applied) == .applied)
+  await rig.transport.setSongURL(.success(makeResolvedAsset(songID: 101)))
+  await rig.playAgain()
+  #expect(rig.playback.phase == .playing)
+  #expect(await rig.transport.callCount() == 2)
+}
+
+@Test @MainActor func nextAtTheReadCeilingKeepsTheCurrentQueueEntryPlaying() async throws {
+  let arbiter = OperationArbiter(maximumConcurrentReads: 1)
+  let rig = PlaybackRig(arbiter: arbiter)
+  await rig.transport.setSongURL(.success(makeResolvedAsset(songID: 101)))
+  await rig.play([101, 102])
+  let loadedURL = rig.output.loadedURL
+  let blocker = try #require(
+    arbiter.begin(name: "Library", effect: .read)
+  )
+
+  #expect(!rig.playback.playNext(session: rig.session))
+
+  #expect(rig.playback.phase == .playing)
+  #expect(rig.playback.currentTrack?.id == 101)
+  #expect(rig.playback.queuePosition == "1 of 2")
+  #expect(rig.output.loadedURL == loadedURL)
+  #expect(await rig.transport.recordedCalls() == [.resolveSongURL(101, .standard)])
+  #expect(arbiter.end(blocker, outcome: .applied) == .applied)
 }
 
 // MARK: - Recoverable failures keep the entry point
@@ -76,6 +144,22 @@ private struct PlaybackRig {
 
   #expect(rig.playback.phase == .failed)
   #expect(rig.playback.canPlayAgain)
+}
+
+@Test @MainActor func playbackPassesAccountAndResolvedMetadataToAudioOutput() async {
+  let rig = PlaybackRig()
+  await rig.transport.setSongURL(.success(makeResolvedAsset(songID: 101)))
+
+  await rig.play()
+
+  let resource = rig.output.preparedResources.last
+  #expect(resource?.accountID == testAccount.userID)
+  #expect(resource?.songID == 101)
+  #expect(resource?.requestedQuality == .standard)
+  #expect(resource?.actualQuality == "standard")
+  #expect(resource?.format == "mp3")
+  #expect(resource?.byteCount == 3_000_000)
+  #expect(resource?.expiresAt != nil)
 }
 
 @Test @MainActor func anAssetReportedUnplayableKeepsPlayAgain() async {
