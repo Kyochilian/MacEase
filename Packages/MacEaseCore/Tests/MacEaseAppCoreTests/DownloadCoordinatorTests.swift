@@ -1011,7 +1011,7 @@ private func seedDownload(
   #expect(try await rig.store.downloads(accountID: testAccount.userID).downloads.isEmpty)
 }
 
-@Test @MainActor func localAssetFailureIsRemovedAndPlayAgainUsesOnlineResolution() async throws {
+@Test @MainActor func localAssetFailureIsRemovedAndRecoversOnlineAutomatically() async throws {
   let rig = try DownloadRig()
   defer { rig.cleanup() }
   let track = makeTracks([47])[0]
@@ -1022,9 +1022,11 @@ private func seedDownload(
     track: track
   )
   await rig.activate()
-  rig.output.prepareResult = .success(
-    AudioAssetInfo(isPlayable: false, durationSeconds: nil)
-  )
+  await rig.program(songID: track.id)
+  rig.output.prepareResults = [
+    .success(AudioAssetInfo(isPlayable: false, durationSeconds: nil)),
+    .success(AudioAssetInfo(isPlayable: true, durationSeconds: 200)),
+  ]
 
   rig.playback.play(
     tracks: [track],
@@ -1035,17 +1037,10 @@ private func seedDownload(
   await rig.playback.settleForTesting()
   await rig.coordinator.settleMaintenanceForTesting()
 
-  #expect(rig.playback.phase == .failed)
-  #expect(rig.playback.canPlayAgain)
+  #expect(rig.playback.phase == .playing)
+  #expect(!rig.playback.canPlayAgain)
   #expect(rig.coordinator.downloads.isEmpty)
   #expect(try await rig.store.downloads(accountID: testAccount.userID).downloads.isEmpty)
-
-  await rig.program(songID: track.id)
-  rig.output.prepareResult = .success(
-    AudioAssetInfo(isPlayable: true, durationSeconds: 200)
-  )
-  rig.playback.playAgain(session: rig.session)
-  await rig.playback.settleForTesting()
 
   #expect(
     await rig.transport.recordedCalls() == [.resolveSongURL(track.id, .standard)]
@@ -1055,12 +1050,12 @@ private func seedDownload(
     return
   }
   guard case .remote = resource.location else {
-    Issue.record("Play Again must not reopen the rejected local resource")
+    Issue.record("Automatic recovery must not reopen the rejected local resource")
     return
   }
 }
 
-@Test @MainActor func localItemFailureIsRemovedBeforePlayAgain() async throws {
+@Test @MainActor func localItemFailureIsRemovedBeforeAutomaticOnlineRecovery() async throws {
   let rig = try DownloadRig()
   defer { rig.cleanup() }
   let track = makeTracks([48])[0]
@@ -1079,22 +1074,20 @@ private func seedDownload(
     session: rig.session
   )
   await rig.playback.settleForTesting()
+  await rig.program(songID: track.id)
   rig.output.reportFailure("local read failed")
+  await rig.playback.settleForTesting()
   await rig.coordinator.settleMaintenanceForTesting()
 
-  #expect(rig.playback.phase == .failed)
+  #expect(rig.playback.phase == .playing)
   #expect(rig.coordinator.downloads.isEmpty)
   #expect(try await rig.store.downloads(accountID: testAccount.userID).downloads.isEmpty)
-
-  await rig.program(songID: track.id)
-  rig.playback.playAgain(session: rig.session)
-  await rig.playback.settleForTesting()
 
   #expect(
     await rig.transport.recordedCalls() == [.resolveSongURL(track.id, .standard)]
   )
   guard case .remote = rig.output.preparedResources.last?.location else {
-    Issue.record("Play Again must resolve online after a local item failure")
+    Issue.record("Local item failure must resolve online automatically")
     return
   }
 }

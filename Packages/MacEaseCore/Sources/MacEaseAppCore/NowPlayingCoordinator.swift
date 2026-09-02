@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Observation
 
@@ -21,20 +22,27 @@ package final class NowPlayingCoordinator {
   /// Returns whether the intent was accepted. It must not perform a NetEase
   /// request of its own beyond what the equivalent in-app action performs.
   package typealias IntentHandler = @MainActor (SystemMediaCommand) -> Bool
+  package typealias ArtworkProvider = @MainActor (URL) async -> NSImage?
 
   @ObservationIgnored private let surface: any SystemMediaControlling
   private let snapshotProvider: SnapshotProvider
   private let performIntent: IntentHandler
+  private let artworkProvider: ArtworkProvider
   private var lastPublished: PlaybackSnapshot?
+  private var artworkTask: Task<Void, Never>?
+  private var artworkIdentity: String?
+  private var artworkImage: NSImage?
 
   package init(
     surface: any SystemMediaControlling,
     snapshotProvider: @escaping SnapshotProvider,
-    performIntent: @escaping IntentHandler
+    performIntent: @escaping IntentHandler,
+    artworkProvider: @escaping ArtworkProvider = { _ in nil }
   ) {
     self.surface = surface
     self.snapshotProvider = snapshotProvider
     self.performIntent = performIntent
+    self.artworkProvider = artworkProvider
     surface.onCommand = { [weak self] command in
       guard let self else { return .noActionableItem }
       return self.handle(command)
@@ -49,7 +57,12 @@ package final class NowPlayingCoordinator {
     guard snapshot.requiresPublishing(comparedTo: lastPublished) else { return }
     lastPublished = snapshot
     if snapshot.hasActionableItem {
-      surface.publish(snapshot)
+      if snapshot.artworkIdentity == artworkIdentity, let artworkImage {
+        surface.publishArtwork(artworkImage, for: snapshot)
+      } else {
+        surface.publish(snapshot)
+        loadArtwork(for: snapshot)
+      }
     } else {
       // Nothing is loaded. Leaving the last track on the surface would let a
       // signed-out or stopped app keep advertising what it was playing.
@@ -61,8 +74,35 @@ package final class NowPlayingCoordinator {
   /// so the next `refresh` republishes from scratch. Used on stop and on any
   /// session identity change.
   package func clear() {
+    artworkTask?.cancel()
+    artworkTask = nil
+    artworkIdentity = nil
+    artworkImage = nil
     lastPublished = nil
     surface.clear()
+  }
+
+  private func loadArtwork(for snapshot: PlaybackSnapshot) {
+    artworkTask?.cancel()
+    artworkTask = nil
+    artworkIdentity = nil
+    artworkImage = nil
+    guard let url = snapshot.artworkURL, let identity = snapshot.artworkIdentity else {
+      return
+    }
+    artworkTask = Task { [weak self] in
+      guard let self, let image = await self.artworkProvider(url), !Task.isCancelled
+      else { return }
+      let current = self.snapshotProvider()
+      guard current.hasActionableItem, current.artworkIdentity == identity else {
+        return
+      }
+      self.artworkIdentity = identity
+      self.artworkImage = image
+      self.lastPublished = current
+      self.surface.publishArtwork(image, for: current)
+      self.artworkTask = nil
+    }
   }
 
   /// Republishes whenever anything `snapshotProvider` reads changes, and
@@ -124,6 +164,12 @@ package final class NowPlayingCoordinator {
       // An unknown liked state means the toggle's starting position is a
       // guess. The command centre must not offer to flip a guess.
       guard snapshot.liked != .unknown else { return .notPermitted }
+      let requestedState = liked ? LikedState.liked : .notLiked
+      // MPFeedbackCommand derives its direction from the last published
+      // snapshot. If the app changed the heart before that publication reached
+      // the command centre, refuse the now-redundant write rather than sending
+      // the same state to the server a second time.
+      guard snapshot.liked != requestedState else { return .notPermitted }
       resolved = .setLiked(liked)
     }
 

@@ -66,7 +66,9 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
 
   /// Session actions share the exclusive slot with server writes, so this is
   /// derived rather than a fourth independent busy flag.
-  package var isBusy: Bool { arbiter.isBusy }
+  package var isBusy: Bool {
+    arbiter.isBusy || identityMutationPreparationIsActive
+  }
 
   package init(
     transport: any NeteaseTransporting,
@@ -116,7 +118,9 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
   }
 
   package func saveSession() async -> SessionMutationResult {
-    guard beginOperation("Save session") else { return .rejected(.busy) }
+    guard await beginIdentityOperation("Save session") else {
+      return .rejected(.busy)
+    }
     defer { endOperation() }
 
     let cookies = await dataStore.httpCookieStore.allCookies()
@@ -156,7 +160,9 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
   }
 
   package func clearSession() async -> SessionMutationResult {
-    guard beginOperation("Clear session") else { return .rejected(.busy) }
+    guard await beginIdentityOperation("Clear session") else {
+      return .rejected(.busy)
+    }
     defer { endOperation() }
 
     webView.stopLoading()
@@ -187,7 +193,9 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
   }
 
   package func importSession() async -> SessionMutationResult {
-    guard beginOperation("Import session") else { return .rejected(.busy) }
+    guard await beginIdentityOperation("Import session") else {
+      return .rejected(.busy)
+    }
     defer { endOperation() }
 
     guard let credential = NeteaseCredential(cookieHeader: manualCookieHeader) else {
@@ -233,9 +241,14 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
   /// desktop has to ask. It stops on its own at the first terminal answer —
   /// authorised or expired — and on any transport failure. Nothing re-arms it.
   package func startQRLogin() async -> SessionMutationResult {
-    cancelQRPolling()
-    guard beginOperation("QR sign-in") else { return .rejected(.busy) }
-    defer { endOperation() }
+    clearQRSession()
+    guard await beginIdentityOperation("QR sign-in") else {
+      return .rejected(.busy)
+    }
+    var keepsPreparationForPolling = false
+    defer {
+      endOperation(finishesIdentityPreparation: !keepsPreparationForPolling)
+    }
 
     do {
       let session = try await transport.beginQRLogin()
@@ -243,6 +256,11 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
       qrStatus = .waiting
       status = "Scan the code with the NetEase Cloud Music app"
       beginPolling()
+      // A validated account that intentionally entered account switching
+      // stays closed to new playback until this QR flow is cancelled or
+      // reaches a terminal answer. Otherwise a local file could start after
+      // the old feedback was settled and before authorisation is adopted.
+      keepsPreparationForPolling = true
       return commit(.inconclusive(.busy))
     } catch let error as NeteaseServiceError {
       status = "QR sign-in \(error.source.rawValue) error \(error.statusCode)"
@@ -268,6 +286,7 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
     cancelQRPolling()
     qrSession = nil
     qrStatus = nil
+    finishIdentityMutationPreparation()
   }
 
   /// Starts the timer loop. There is only ever one: every path that replaces
@@ -311,6 +330,7 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
       // endpoint that may be refusing this client.
       guard qrSession?.key == key else { return .finished }
       qrStatus = nil
+      finishIdentityMutationPreparation()
       status = OperationFailure.classify(error, cancelled: Task.isCancelled)
         .statusText(operation: "QR sign-in")
       return .finished
@@ -331,6 +351,7 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
       return .continued
     case .expired:
       arbiter.end(readToken, outcome: .applied)
+      finishIdentityMutationPreparation()
       status = "The code expired; ask for a new one"
       return .finished
     case .authorised(let credential):
@@ -402,7 +423,9 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
 
   /// Exchanges the texted code for a session (1 request), then stores it.
   package func signInWithVerificationCode() async -> SessionMutationResult {
-    guard beginOperation("Phone sign-in") else { return .rejected(.busy) }
+    guard await beginIdentityOperation("Phone sign-in") else {
+      return .rejected(.busy)
+    }
     defer { endOperation() }
 
     do {
@@ -437,7 +460,9 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
   /// — but the status says the cookie may still be live rather than claiming a
   /// clean break.
   package func signOutEverywhere() async -> SessionMutationResult {
-    guard beginOperation("Sign out") else { return .rejected(.busy) }
+    guard await beginIdentityOperation("Sign out") else {
+      return .rejected(.busy)
+    }
     defer { endOperation() }
 
     var serverMessage = "Signed out on NetEase and locally"
@@ -482,7 +507,9 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
   /// refresh that answers 200 without a new cookie refreshed nothing, and
   /// overwriting a working credential with itself would hide that.
   package func refreshSession() async -> SessionMutationResult {
-    guard beginOperation("Refresh session") else { return .rejected(.busy) }
+    guard await beginIdentityOperation("Refresh session") else {
+      return .rejected(.busy)
+    }
     defer { endOperation() }
 
     let stored: NeteaseCredential?
@@ -691,6 +718,17 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
   /// identity in effect changes. It is set once at wiring time.
   @ObservationIgnored package var onIdentityChanged: (@MainActor () -> Void)?
 
+  /// Explicit credential-replacing actions let playback settle feedback while
+  /// the old validated credential still exists and before this coordinator
+  /// takes the exclusive session-mutation slot. Validation and divergence do
+  /// not use this hook: they discover an external identity fact rather than
+  /// initiating a switch, and must not stop healthy playback speculatively.
+  @ObservationIgnored package var onPrepareIdentityMutation:
+    (@MainActor () async -> Void)?
+  @ObservationIgnored package var onFinishIdentityMutationPreparation:
+    (@MainActor () -> Void)?
+  private var identityMutationPreparationIsActive = false
+
   /// Called by the app when the validated account itself changes, including to
   /// none. It is the one place per-account local data is bound, so QR, SMS,
   /// Import and Validate all reach it without any of them carrying its own
@@ -885,6 +923,11 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
   /// owns the exclusive slot, which stops Save/Validate/Clear/Import from
   /// cancelling a write that already reached the server.
   private func beginOperation(_ name: String) -> Bool {
+    guard !identityMutationPreparationIsActive else { return false }
+    return claimOperation(name)
+  }
+
+  private func claimOperation(_ name: String) -> Bool {
     guard let token = arbiter.begin(name: name, effect: .sessionMutation) else {
       return false
     }
@@ -892,10 +935,50 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
     return true
   }
 
-  private func endOperation(outcome: OperationOutcome = .applied) {
-    guard let token = operationToken else { return }
-    operationToken = nil
-    arbiter.end(token, outcome: outcome)
+  private func beginIdentityOperation(_ name: String) async -> Bool {
+    guard !identityMutationPreparationIsActive else { return false }
+    guard await prepareForIdentityMutation() else { return false }
+    guard claimOperation(name) else {
+      finishIdentityMutationPreparation()
+      return false
+    }
+    return true
+  }
+
+  private func prepareForIdentityMutation() async -> Bool {
+    guard arbiter.canStart(), arbiter.activeReadCount == 0 else { return false }
+    guard snapshot.account != nil, let onPrepareIdentityMutation else {
+      return true
+    }
+    identityMutationPreparationIsActive = true
+    await onPrepareIdentityMutation()
+    // The callback suspends while feedback settles. A concurrent operation
+    // may have entered during that suspension, so the ordinary begin check
+    // remains authoritative and this early result is only a fast refusal.
+    guard arbiter.canStart(), arbiter.activeReadCount == 0 else {
+      finishIdentityMutationPreparation()
+      return false
+    }
+    return true
+  }
+
+  private func endOperation(
+    outcome: OperationOutcome = .applied,
+    finishesIdentityPreparation: Bool = true
+  ) {
+    if let token = operationToken {
+      operationToken = nil
+      arbiter.end(token, outcome: outcome)
+    }
+    if finishesIdentityPreparation {
+      finishIdentityMutationPreparation()
+    }
+  }
+
+  private func finishIdentityMutationPreparation() {
+    guard identityMutationPreparationIsActive else { return }
+    identityMutationPreparationIsActive = false
+    onFinishIdentityMutationPreparation?()
   }
 }
 

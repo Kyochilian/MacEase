@@ -7,6 +7,10 @@ import Observation
 package enum OperationEffect: Equatable, Sendable {
   case read
   case write
+  /// Automatic listening feedback. It is still a server write with unknown
+  /// outcome semantics, but may overlap reads that were already admitted.
+  /// New work remains blocked while it owns the exclusive slot.
+  case feedback
   case sessionMutation
   case playbackResolution
 }
@@ -87,9 +91,12 @@ package struct UnresolvedOutcome: Equatable, Identifiable, Sendable {
 /// state — the user could not tell whether the write had taken effect.
 ///
 /// Rules enforced here:
-/// - writes and session mutations are mutually exclusive;
+/// - writes, feedback and session mutations are mutually exclusive;
 /// - reads and playback resolution may run together, but cannot start while an
 ///   exclusive operation is active, and never exceed a fixed ceiling;
+/// - feedback may start alongside reads already in flight, because a remote
+///   track transition necessarily owns its next song-URL read before the old
+///   listening instance can settle; it still blocks every new operation;
 /// - local playback actions (pause, seek, volume) never claim it;
 /// - a read may be abandoned freely;
 /// - a write that has been sent is never silently dropped: abandoning it
@@ -131,16 +138,23 @@ package final class OperationArbiter {
   /// Claims an operation. Reads share the read side up to the ceiling, while a
   /// write or session mutation requires both the read side and the exclusive
   /// slot to be free.
+  package func canBegin(effect: OperationEffect) -> Bool {
+    if effect == .write || effect == .sessionMutation {
+      return active == nil && activeReadTokens.isEmpty
+    }
+    if effect == .feedback { return active == nil }
+    return active == nil && activeReadTokens.count < maximumConcurrentReads
+  }
+
   package func begin(name: String, effect: OperationEffect) -> OperationToken? {
     let id = UUID()
-    guard effect == .write || effect == .sessionMutation else {
-      guard active == nil, activeReadTokens.count < maximumConcurrentReads else {
-        return nil
-      }
+    guard effect == .write || effect == .feedback || effect == .sessionMutation
+    else {
+      guard canBegin(effect: effect) else { return nil }
       activeReadTokens.insert(id)
       return OperationToken(id: id, kind: .read)
     }
-    guard active == nil, activeReadTokens.isEmpty else { return nil }
+    guard canBegin(effect: effect) else { return nil }
     active = ActiveOperation(id: id, name: name, effect: effect, phase: .preparing)
     return OperationToken(id: id, kind: .exclusive)
   }
@@ -201,14 +215,14 @@ package final class OperationArbiter {
   package func abandoningLosesTheOutcome(_ token: OperationToken) -> Bool {
     guard token.kind == .exclusive else { return false }
     guard let operation = active, operation.id == token.id else { return false }
-    return operation.effect == .write && operation.phase == .requestSent
+    return operation.effect.isServerWrite && operation.phase == .requestSent
   }
 
   /// True when a write's request is in flight. A module reset consults this
   /// to refuse to cancel rather than to guess what the server did.
   package var activeWriteIsInFlight: Bool {
     guard let operation = active else { return false }
-    return operation.effect == .write && operation.phase == .requestSent
+    return operation.effect.isServerWrite && operation.phase == .requestSent
   }
 
   @discardableResult
@@ -243,7 +257,7 @@ package final class OperationArbiter {
     _ outcome: OperationOutcome,
     for operation: ActiveOperation
   ) -> OperationOutcome {
-    guard outcome == .cancelled, operation.effect == .write else {
+    guard outcome == .cancelled, operation.effect.isServerWrite else {
       return outcome
     }
     switch operation.phase {
@@ -255,6 +269,12 @@ package final class OperationArbiter {
       // The response was already in hand, so the answer is known.
       return .appliedRemotelyOnly
     }
+  }
+}
+
+extension OperationEffect {
+  fileprivate var isServerWrite: Bool {
+    self == .write || self == .feedback
   }
 }
 

@@ -2,10 +2,10 @@ import Foundation
 import NeteaseKit
 import Observation
 
-/// Explicit queue playback. A queue starts only from a user action, every
-/// track transition performs exactly one `resolveSongURL` request (repeat one
-/// replays the current item with none), and any failure stops the queue with
-/// no automatic retry or skip. There is no prefetch and no background refresh.
+/// Explicit queue playback. A queue starts only from a user action. Confirmed
+/// unavailable resources recover through a fixed downward quality list and a
+/// bounded set of queue entries; ordinary transport failures stop with Play
+/// Again. There is no prefetch, polling or unbounded retry.
 @MainActor
 @Observable
 package final class PlaybackController {
@@ -44,6 +44,10 @@ package final class PlaybackController {
   /// resolve request, cleared only by a terminal failure or a new intent.
   @ObservationIgnored private var attempt: PlaybackAttempt?
   @ObservationIgnored private var currentAssetSummary: String?
+  @ObservationIgnored private let monotonicNow: @MainActor () -> TimeInterval
+  @ObservationIgnored private var playbackAccountID: Int64?
+  @ObservationIgnored private var lifecycle: ActiveLifecycle?
+  private var sessionMutationPending = false
   @ObservationIgnored private var activeToken: PlaybackIntentGate.Token?
   @ObservationIgnored private var queueTracks: [Track] = []
   /// Where the queue came from. A restored queue that says only "these forty
@@ -69,6 +73,17 @@ package final class PlaybackController {
   /// accepted intent; unchanged revisions are ordinary queue progression.
   @ObservationIgnored package var onPlaybackChanged:
     (@MainActor (UInt64) -> Void)?
+  /// The only feedback seam: start is emitted after AudioOutput confirms
+  /// playing, finish after the same instance is settled exactly once.
+  @ObservationIgnored package var onLifecycleEvent:
+    (@MainActor (PlaybackLifecycleEvent) -> Void)?
+
+  private struct ActiveLifecycle {
+    let instance: PlaybackLifecycleInstance
+    var accumulatedSeconds: TimeInterval = 0
+    var playingSince: TimeInterval?
+    var durationSeconds: Double?
+  }
 
   /// Why the machine, rather than the user, stopped playback.
   package enum MachinePause: Equatable, Sendable {
@@ -124,6 +139,12 @@ package final class PlaybackController {
   package var retryResumesPlayback: Bool { attempt?.desiredState != .paused }
   package var canStepNext: Bool { queue?.nextIndex() != nil }
   package var canStepPrevious: Bool { queue?.previousIndex() != nil }
+  package func canPlayNext(session: any SessionProviding) -> Bool {
+    canStep(to: queue?.nextIndex(), session: session)
+  }
+  package func canPlayPrevious(session: any SessionProviding) -> Bool {
+    canStep(to: queue?.previousIndex(), session: session)
+  }
   package var queuePosition: String? {
     queue.map { "\($0.currentIndex + 1) of \($0.count)" }
   }
@@ -154,6 +175,11 @@ package final class PlaybackController {
       trackID: track?.id,
       title: track?.name ?? trackName,
       artist: track?.artistDisplayName,
+      albumTitle: track?.album?.name,
+      artworkURL: track?.artworkURL,
+      artworkIdentity: track?.artworkURL.map {
+        "\(track?.album?.id.map(String.init) ?? "none")|\($0.absoluteString)"
+      },
       durationSeconds: durationSeconds,
       elapsedSeconds: positionSeconds,
       positionEpoch: positionEpoch,
@@ -167,12 +193,16 @@ package final class PlaybackController {
     transport: any NeteaseTransporting,
     vault: any CredentialStoring,
     arbiter: OperationArbiter,
-    output: any AudioOutput = AVPlayerAudioOutput()
+    output: any AudioOutput = AVPlayerAudioOutput(),
+    monotonicNow: @escaping @MainActor () -> TimeInterval = {
+      ProcessInfo.processInfo.systemUptime
+    }
   ) {
     self.transport = transport
     self.vault = vault
     self.arbiter = arbiter
     self.output = output
+    self.monotonicNow = monotonicNow
     if let stored = UserDefaults.standard.object(forKey: Self.volumeDefaultsKey)
       as? Double
     {
@@ -388,6 +418,7 @@ package final class PlaybackController {
       songID: track.id,
       quality: persisted.quality,
       queueIndex: persisted.currentIndex,
+      queueEntryCount: persisted.tracks.count,
       resumePosition: persisted.positionSeconds,
       desiredState: persisted.wasPlaying ? .playing : .paused
     )
@@ -415,7 +446,10 @@ package final class PlaybackController {
       status = "Validate the session before playback"
       return
     }
-    guard let retry = attempt else { return }
+    guard let previousAttempt = attempt else { return }
+    let retry = previousAttempt.restartedRecovery(
+      queueEntryCount: queue?.count ?? 1
+    )
     guard queueTracks.indices.contains(retry.queueIndex),
       queueTracks[retry.queueIndex].id == retry.songID
     else { return }
@@ -447,6 +481,7 @@ package final class PlaybackController {
   @discardableResult
   package func pause() -> Bool {
     guard phase == .playing, hasLoadedItem else { return false }
+    pauseLifecycleClock()
     output.pause()
     phase = .paused
     attempt?.desiredState = .paused
@@ -504,6 +539,40 @@ package final class PlaybackController {
     stopPlayback()
   }
 
+  /// Ends the current listening instance while the old credential is still
+  /// valid, but keeps the queue and retry checkpoint until the session owner
+  /// knows whether its mutation succeeded. The pending flag closes the local
+  /// download bypass while feedback awaits the network.
+  package func prepareForSessionMutation() {
+    sessionMutationPending = true
+    guard queue != nil || attempt != nil || lifecycle != nil else { return }
+    let desiredState = attempt?.desiredState
+      ?? (phase == .paused ? DesiredPlaybackState.paused : .playing)
+    attempt = attempt?.checkpointed(
+      at: currentPosition(),
+      desiredState: desiredState
+    )
+    finishLifecycle()
+    gate.cancel()
+    playTask?.cancel()
+    playTask = nil
+    if let operationToken {
+      releaseResolution(operationToken, outcome: .cancelled)
+    }
+    machinePausedReason = nil
+    clearPendingSleepStop()
+    releasePlayback()
+    phase = attempt == nil ? .idle : .failed
+    status = attempt == nil
+      ? "Session change is preparing"
+      : "Playback settled for a session change; Play Again remains available"
+    playbackBecameInactive()
+  }
+
+  package func finishSessionMutationPreparation() {
+    sessionMutationPending = false
+  }
+
   /// Deleting the exact local resource AVPlayer owns first tears the player
   /// down. This is not interpreted as the user's Stop button, so it does not
   /// erase the account's persisted queue.
@@ -521,6 +590,7 @@ package final class PlaybackController {
   }
 
   private func stopPlayback() {
+    finishLifecycle()
     advanceIntentRevision()
     gate.cancel()
     playTask?.cancel()
@@ -606,6 +676,27 @@ package final class PlaybackController {
     return true
   }
 
+  private func canStep(
+    to target: Int?,
+    session: any SessionProviding
+  ) -> Bool {
+    guard !sessionMutationPending, let account = session.account, let target,
+      queueTracks.indices.contains(target)
+    else { return false }
+    guard arbiter.active?.effect != .sessionMutation else { return false }
+    if offlineDownloads?.hasPlaybackResource(
+      songID: queueTracks[target].id,
+      requestedQuality: quality,
+      accountID: account.userID
+    ) == true {
+      return true
+    }
+    // Superseding this controller's own resolution releases one read slot
+    // synchronously before the replacement claims it.
+    if operationToken != nil { return arbiter.active == nil }
+    return arbiter.canBegin(effect: .playbackResolution)
+  }
+
   private func startEntry(
     at index: Int,
     account: NeteaseAccount,
@@ -617,6 +708,7 @@ package final class PlaybackController {
   ) {
     guard queueTracks.indices.contains(index) else { return }
     let track = queueTracks[index]
+    finishLifecycle()
     let token = beginIntent()
     _ = queue?.moveTo(index)
     // Created before the request leaves, so a resolve that never answers
@@ -624,27 +716,32 @@ package final class PlaybackController {
     attempt = retry ?? PlaybackAttempt(
       songID: track.id,
       quality: requestedQuality,
-      queueIndex: index
+      queueIndex: index,
+      queueEntryCount: queue?.count ?? 1
     )
+    playbackAccountID = account.userID
     trackName = track.name
     phase = .resolving
     switch source {
     case .local(let resource):
       status = "Opening downloaded audio"
       playTask = Task {
-        await openLocal(resource: resource, token: token)
+        await openLocal(
+          resource: resource,
+          account: account,
+          session: session,
+          token: token
+        )
       }
     case .remote(let operation):
       operationToken = operation
       status = retry != nil
-        ? "Re-resolving song URL (1 request)"
+        ? "Re-resolving song URL with bounded quality recovery"
         : auto
-          ? "Auto-playing the next track (1 request)"
-          : "Resolving song URL (1 request)"
+          ? "Auto-playing the next track with bounded quality recovery"
+          : "Resolving song URL with bounded quality recovery"
       playTask = Task {
         await resolveAndPlay(
-          songID: track.id,
-          quality: requestedQuality,
           account: account,
           session: session,
           token: token,
@@ -759,12 +856,14 @@ package final class PlaybackController {
       gate.cancel()
       playTask?.cancel()
       playTask = nil
+      finishLifecycle()
       releasePlayback()
       let successor = remaining[successorIndex]
       attempt = PlaybackAttempt(
         songID: successor.id,
         quality: requestedQuality,
-        queueIndex: successorIndex
+        queueIndex: successorIndex,
+        queueEntryCount: updatedQueue.count
       )
       trackName = successor.name
       movePosition(to: 0)
@@ -784,17 +883,20 @@ package final class PlaybackController {
     account: NeteaseAccount,
     preferredDownload: OfflineDownload? = nil
   ) -> EntrySource? {
+    guard !sessionMutationPending else {
+      status = "Session is changing; try playback again"
+      return nil
+    }
     guard arbiter.active?.effect != .sessionMutation else {
       status = "Session is changing; try playback again"
       return nil
     }
 
-    let local = preferredDownload.flatMap {
-      offlineDownloads?.playbackResource(for: $0)
-    } ?? offlineDownloads?.playbackResource(
+    let local = localResource(
       songID: songID,
       requestedQuality: requestedQuality,
-      accountID: account.userID
+      accountID: account.userID,
+      preferredDownload: preferredDownload
     )
     if let local {
       guard local.accountID == account.userID, local.songID == songID,
@@ -814,16 +916,30 @@ package final class PlaybackController {
       playTask = nil
       releaseResolution(operationToken, outcome: .cancelled)
     }
-    guard
-      let operation = arbiter.begin(
-        name: "Song URL",
-        effect: .playbackResolution
-      )
-    else {
+    guard let operation = claimResolution() else {
       status = "Playback is busy; try again"
       return nil
     }
     return .remote(operation)
+  }
+
+  private func localResource(
+    songID: Int64,
+    requestedQuality: PlaybackQuality,
+    accountID: Int64,
+    preferredDownload: OfflineDownload? = nil
+  ) -> PlaybackResource? {
+    preferredDownload.flatMap {
+      offlineDownloads?.playbackResource(for: $0)
+    } ?? offlineDownloads?.playbackResource(
+      songID: songID,
+      requestedQuality: requestedQuality,
+      accountID: accountID
+    )
+  }
+
+  private func claimResolution() -> OperationToken? {
+    arbiter.begin(name: "Song URL", effect: .playbackResolution)
   }
 
   /// Releases the arbiter slot this controller holds. A stale token is
@@ -843,12 +959,11 @@ package final class PlaybackController {
   }
 
   private func resolveAndPlay(
-    songID: Int64,
-    quality: PlaybackQuality,
     account: NeteaseAccount,
     session: any SessionProviding,
     token: PlaybackIntentGate.Token,
-    operation: OperationToken
+    operation: OperationToken,
+    advanceBeforeResolve: Bool = false
   ) async {
     var outcome = OperationOutcome.failed
     defer {
@@ -869,40 +984,109 @@ package final class PlaybackController {
       else { return }
       requestCredential = credential
 
-      arbiter.markRequestSent(operation)
-      let resolution = try await transport.resolveSongURL(
-        songID: songID,
-        quality: quality,
-        credential: credential
-      )
-      try checkCurrent(token)
-      guard
-        try await sessionRemainsCurrent(
+      if advanceBeforeResolve {
+        guard
+          try await advanceRecoveryEntry(
+            account: account,
+            token: token
+          )
+        else {
+          exhaustRecovery()
+          outcome = .applied
+          return
+        }
+        if try await openRecoveryDownloadIfPresent(
           account: account,
-          credential: credential,
-          session: session,
           token: token
-        )
-      else { return }
+        ) {
+          outcome = .applied
+          return
+        }
+      }
 
-      arbiter.markSettling(operation)
-      outcome = .applied
-      switch resolution {
-      case .unavailable(let itemCode, let fee):
-        // An explicit catalogue or rights refusal: asking again changes
-        // nothing, so no retry is offered.
-        attempt = nil
-        phase = .failed
-        status =
-          "Track unavailable: itemCode=\(itemCode), "
-          + "fee=\(fee.map(String.init) ?? "none"); the queue is not skipped"
-        playbackBecameInactive()
-      case .resolved(let resolved):
-        try await startPlayback(
-          asset: resolved,
-          accountID: account.userID,
-          token: token
+      while true {
+        try checkCurrent(token)
+        guard let attempt else { throw CancellationError() }
+        let currentSongID = attempt.songID
+        let currentQuality = attempt.recovery.currentQuality
+        playbackAccountID = account.userID
+        status = recoveryStatus(
+          prefix: "Resolving",
+          attempt: attempt
         )
+
+        arbiter.markRequestSent(operation)
+        let resolution = try await transport.resolveSongURL(
+          songID: currentSongID,
+          quality: currentQuality,
+          credential: credential
+        )
+        try checkCurrent(token)
+        guard
+          try await sessionRemainsCurrent(
+            account: account,
+            credential: credential,
+            session: session,
+            token: token
+          )
+        else { return }
+
+        arbiter.markSettling(operation)
+        outcome = .applied
+        switch resolution {
+        case .unavailable(let itemCode, let fee):
+          if advanceRecoveryQuality(
+            reason: "itemCode=\(itemCode), fee=\(fee.map(String.init) ?? "none")"
+          ) {
+            continue
+          }
+          guard try await advanceRecoveryEntry(account: account, token: token) else {
+            exhaustRecovery()
+            return
+          }
+          if try await openRecoveryDownloadIfPresent(
+            account: account,
+            token: token
+          ) { return }
+
+        case .resolved(let resolved):
+          do {
+            playbackAccountID = account.userID
+            let playable = try await startPlayback(
+              asset: resolved,
+              accountID: account.userID,
+              token: token
+            )
+            if playable { return }
+            if advanceRecoveryQuality(reason: "resolved asset was not playable") {
+              continue
+            }
+          } catch AudioOutputFailure.resourceUnavailable(let statusCode)
+          where PlaybackExpiryPolicy.confirmsInvalidURL(statusCode: statusCode) {
+            releasePlayback()
+            if beginFreshResolveForCurrentResource() {
+              status = recoveryStatus(
+                prefix: "HTTP \(statusCode); re-resolving once",
+                attempt: self.attempt
+              )
+              continue
+            }
+            if advanceRecoveryQuality(
+              reason: "HTTP \(statusCode) after fresh resolve"
+            ) {
+              continue
+            }
+          }
+
+          guard try await advanceRecoveryEntry(account: account, token: token) else {
+            exhaustRecovery()
+            return
+          }
+          if try await openRecoveryDownloadIfPresent(
+            account: account,
+            token: token
+          ) { return }
+        }
       }
     } catch {
       outcome = Task.isCancelled ? .cancelled : .failed
@@ -921,7 +1105,7 @@ package final class PlaybackController {
     asset resolved: ResolvedAudioAsset,
     accountID: Int64,
     token: PlaybackIntentGate.Token
-  ) async throws {
+  ) async throws -> Bool {
     // A throw here means the asset could not be loaded at all, most often
     // because the URL expired. The attempt survives so Play Again can
     // re-resolve; it is never reused with the stale URL.
@@ -937,9 +1121,9 @@ package final class PlaybackController {
         $0 > 0 ? Date().addingTimeInterval(TimeInterval($0)) : nil
       }
     )
-    _ = try await startPlayback(
+    return try await startPlayback(
       resource: resource,
-      summary: assetSummary(resolved),
+      summary: assetSummary(resolved, attempt: attempt),
       unplayableStatus: "Resolved asset is not playable: " + assetSummary(resolved),
       token: token
     )
@@ -947,6 +1131,8 @@ package final class PlaybackController {
 
   private func openLocal(
     resource: PlaybackResource,
+    account: NeteaseAccount,
+    session: any SessionProviding,
     token: PlaybackIntentGate.Token
   ) async {
     let downloadID = resource.accountID.map {
@@ -960,23 +1146,183 @@ package final class PlaybackController {
       let quality = resource.actualQuality ?? resource.requestedQuality.rawValue
       let isPlayable = try await startPlayback(
         resource: resource,
-        summary: "downloaded quality=\(quality), format=\(resource.format ?? "unknown")",
+        summary: localAssetSummary(resource, actualQuality: quality),
         unplayableStatus: "Downloaded audio is not playable",
         token: token
       )
       if !isPlayable, let downloadID {
         offlineDownloads?.invalidatePlaybackResource(downloadID)
       }
+      guard isPlayable else {
+        await continueOnlineAfterLocalFailure(
+          account: account,
+          session: session,
+          token: token
+        )
+        return
+      }
     } catch {
       guard gate.accepts(token), !Task.isCancelled else { return }
       releasePlayback()
-      phase = .failed
-      status = "Downloaded audio could not be opened"
-      playbackBecameInactive()
       if let downloadID {
         offlineDownloads?.invalidatePlaybackResource(downloadID)
       }
+      await continueOnlineAfterLocalFailure(
+        account: account,
+        session: session,
+        token: token
+      )
     }
+  }
+
+  private func continueOnlineAfterLocalFailure(
+    account: NeteaseAccount,
+    session: any SessionProviding,
+    token: PlaybackIntentGate.Token
+  ) async {
+    guard gate.accepts(token), !Task.isCancelled else { return }
+    guard attempt != nil else {
+      phase = .failed
+      status = "Downloaded audio failed without a current playback attempt"
+      playbackBecameInactive()
+      return
+    }
+    guard let operation = claimResolution() else {
+      phase = .failed
+      status = "Downloaded audio was removed; online recovery is busy; use Play Again"
+      finishLifecycle()
+      playbackBecameInactive()
+      return
+    }
+    operationToken = operation
+    playbackAccountID = account.userID
+    phase = .resolving
+    status = "Downloaded audio was invalid; resolving online audio"
+    await resolveAndPlay(
+      account: account,
+      session: session,
+      token: token,
+      operation: operation
+    )
+  }
+
+  private func beginFreshResolveForCurrentResource() -> Bool {
+    guard var attempt else { return false }
+    let started = attempt.recovery.beginFreshResolve(
+      songID: attempt.songID,
+      quality: attempt.recovery.currentQuality
+    )
+    self.attempt = attempt
+    return started
+  }
+
+  private func advanceRecoveryQuality(reason: String) -> Bool {
+    guard var attempt, let next = attempt.recovery.advanceQuality() else {
+      return false
+    }
+    self.attempt = attempt
+    status = recoveryStatus(
+      prefix: "\(reason); trying \(next.rawValue)",
+      attempt: attempt
+    )
+    return true
+  }
+
+  private func advanceRecoveryEntry(
+    account: NeteaseAccount,
+    token: PlaybackIntentGate.Token
+  ) async throws -> Bool {
+    try checkCurrent(token)
+    guard
+      let target = queue?.nextIndex(),
+      queueTracks.indices.contains(target),
+      let currentAttempt = attempt,
+      let nextAttempt = currentAttempt.advancing(
+        to: queueTracks[target].id,
+        queueIndex: target
+      )
+    else { return false }
+
+    finishLifecycle()
+    releasePlayback()
+    guard queue?.moveTo(target) == true else { return false }
+    attempt = nextAttempt
+    trackName = queueTracks[target].name
+    playbackAccountID = account.userID
+    phase = .resolving
+    movePosition(to: 0)
+    status = recoveryStatus(
+      prefix: "Skipping an unavailable entry",
+      attempt: nextAttempt
+    )
+    notifyPlaybackChanged()
+    return true
+  }
+
+  private func openRecoveryDownloadIfPresent(
+    account: NeteaseAccount,
+    token: PlaybackIntentGate.Token
+  ) async throws -> Bool {
+    guard let attempt else { return false }
+    guard
+      let resource = localResource(
+        songID: attempt.songID,
+        requestedQuality: attempt.quality,
+        accountID: account.userID
+      )
+    else { return false }
+    let downloadID = OfflineDownloadID(
+      accountID: account.userID,
+      songID: attempt.songID,
+      requestedQuality: attempt.quality
+    )
+    do {
+      playbackAccountID = account.userID
+      let actual = resource.actualQuality ?? resource.requestedQuality.rawValue
+      let playable = try await startPlayback(
+        resource: resource,
+        summary: localAssetSummary(resource, actualQuality: actual),
+        unplayableStatus: "Downloaded audio is not playable",
+        token: token
+      )
+      if playable { return true }
+    } catch is CancellationError {
+      throw CancellationError()
+    } catch {
+      releasePlayback()
+    }
+    offlineDownloads?.invalidatePlaybackResource(downloadID)
+    playbackAccountID = account.userID
+    status = recoveryStatus(
+      prefix: "Downloaded audio was invalid; trying online",
+      attempt: self.attempt
+    )
+    return false
+  }
+
+  private func exhaustRecovery() {
+    let exhaustedAttempt = attempt
+    finishLifecycle()
+    attempt = nil
+    releasePlayback()
+    phase = .failed
+    status = "No playable quality remained"
+      + failureQualitySummary(exhaustedAttempt)
+      + "; automatic recovery stopped"
+    playbackBecameInactive()
+  }
+
+  private func recoveryStatus(
+    prefix: String,
+    attempt: PlaybackAttempt?
+  ) -> String {
+    guard let attempt else { return prefix }
+    let current = attempt.recovery.currentQuality
+    return
+      "\(prefix): requestedQuality=\(attempt.recovery.requestedQuality.rawValue), "
+      + "currentQuality=\(current.rawValue), "
+      + "degraded=\(current != attempt.recovery.requestedQuality), "
+      + "skipped=\(attempt.recovery.skippedEntries)"
   }
 
   private func startPlayback(
@@ -1002,9 +1348,7 @@ package final class PlaybackController {
     try checkCurrent(token)
     guard info.isPlayable else {
       releasePlayback()
-      phase = .failed
       status = unplayableStatus
-      playbackBecameInactive()
       return false
     }
 
@@ -1033,6 +1377,13 @@ package final class PlaybackController {
   }
 
   private func observeOutput(token: PlaybackIntentGate.Token) {
+    output.onPlaybackStateChanged = { [weak self] state in
+      guard let self, self.gate.accepts(token) else { return }
+      switch state {
+      case .playing: self.outputStartedPlaying()
+      case .notPlaying: self.pauseLifecycleClock()
+      }
+    }
     output.onPositionUpdate = { [weak self] seconds in
       guard let self, self.gate.accepts(token) else { return }
       self.positionSeconds = seconds
@@ -1051,22 +1402,82 @@ package final class PlaybackController {
     token: PlaybackIntentGate.Token
   ) {
     guard gate.accepts(token) else { return }
-    gate.cancel()
     let failedOfflineDownload = activeOfflineDownloadID
+    let failedAssetSummary = currentAssetSummary
     // Keep where the user was and whether they were listening, so the retry
     // restores the same thing rather than restarting the track.
     attempt = attempt?.checkpointed(
       at: currentPosition(),
       desiredState: phase == .paused ? .paused : .playing
     )
-    releasePlayback()
-    if let failedOfflineDownload {
-      offlineDownloads?.invalidatePlaybackResource(failedOfflineDownload)
+
+    let confirmedExpired: Bool = if case .resourceUnavailable(let statusCode) = failure {
+      PlaybackExpiryPolicy.confirmsInvalidURL(statusCode: statusCode)
+    } else {
+      false
     }
+    if failedOfflineDownload != nil || confirmedExpired {
+      pauseLifecycleClock()
+      releasePlayback()
+      if let failedOfflineDownload {
+        offlineDownloads?.invalidatePlaybackResource(failedOfflineDownload)
+      }
+      guard
+        let session = attachedSession,
+        let account = session.account,
+        var attempt,
+        let operation = claimResolution()
+      else {
+        finishLifecycle()
+        phase = .failed
+        status = "Playback recovery is busy; use Play Again"
+        playbackBecameInactive()
+        return
+      }
+
+      var advanceBeforeResolve = false
+      if failedOfflineDownload == nil {
+        let refreshed = attempt.recovery.beginFreshResolve(
+          songID: attempt.songID,
+          quality: attempt.recovery.currentQuality
+        )
+        if !refreshed, attempt.recovery.advanceQuality() == nil {
+          advanceBeforeResolve = true
+        }
+        self.attempt = attempt
+      }
+
+      let recoveryToken = beginIntent()
+      operationToken = operation
+      playbackAccountID = account.userID
+      phase = .resolving
+      status = recoveryStatus(
+        prefix: failedOfflineDownload == nil
+          ? "Expired URL confirmed; recovering"
+          : "Downloaded audio failed; recovering online",
+        attempt: self.attempt
+      )
+      playTask = Task {
+        await resolveAndPlay(
+          account: account,
+          session: session,
+          token: recoveryToken,
+          operation: operation,
+          advanceBeforeResolve: advanceBeforeResolve
+        )
+      }
+      return
+    }
+
+    gate.cancel()
+    finishLifecycle()
+    releasePlayback()
     phase = .failed
-    status = failedOfflineDownload == nil
-      ? "Playback failed (\(failure.diagnostic)); Play Again re-resolves the URL"
-      : "Downloaded audio failed; Play Again uses online playback"
+    let qualitySummary = failedAssetSummary.map { "; \($0)" }
+      ?? failureQualitySummary(attempt)
+    status = "Playback failed (\(failure.diagnostic))"
+      + qualitySummary
+      + "; Play Again re-resolves the URL"
     playbackBecameInactive()
   }
 
@@ -1084,6 +1495,7 @@ package final class PlaybackController {
     }
     switch queue.afterNaturalEnd() {
     case .replayCurrent:
+      finishLifecycle()
       replayCurrentItem(token: token)
     case .end:
       finishQueue(status: "Queue finished; no automatic repeat")
@@ -1118,6 +1530,7 @@ package final class PlaybackController {
 
   private func finishQueue(status: String) {
     gate.cancel()
+    finishLifecycle()
     // A queue that ended on its own has nothing to retry.
     attempt = nil
     releasePlayback()
@@ -1190,6 +1603,8 @@ package final class PlaybackController {
     session: any SessionProviding,
     token: PlaybackIntentGate.Token
   ) async {
+    let failedAttempt = attempt
+    finishLifecycle()
     releasePlayback()
     if PlaybackFailureClassifier.kind(for: error) == .terminal {
       attempt = nil
@@ -1223,30 +1638,36 @@ package final class PlaybackController {
     case is NeteaseServiceError:
       phase = .failed
       status = OperationFailure.classify(error).statusText(operation: "Song URL")
+        + failureQualitySummary(failedAttempt)
     case NeteasePlaybackError.nonHTTPSURL(let host):
       // MacEase refused the address, so a retry would refuse it again.
       attempt = nil
       phase = .failed
       status = "Rejected non-HTTPS playback host \(host)"
+        + failureQualitySummary(failedAttempt)
     case NeteasePlaybackError.unapprovedHost(let host):
       attempt = nil
       phase = .failed
       status = "Rejected unapproved playback host \(host)"
+        + failureQualitySummary(failedAttempt)
     case NeteasePlaybackError.invalidResponse:
       phase = .failed
-      status = "Song URL invalid response"
+      status = "Song URL invalid response" + failureQualitySummary(failedAttempt)
     case let error as CredentialVaultError:
       phase = .failed
       status = "Keychain error \(error.diagnostic)"
+        + failureQualitySummary(failedAttempt)
     default:
       phase = .failed
       status = "Song URL network or response error"
+        + failureQualitySummary(failedAttempt)
     }
     if phase == .failed { playbackBecameInactive() }
   }
 
   private func abandonPlayback(status: String) {
     advanceIntentRevision()
+    finishLifecycle()
     attempt = nil
     queue = nil
     queueTracks = []
@@ -1318,11 +1739,13 @@ package final class PlaybackController {
   }
 
   private func releasePlayback() {
+    output.onPlaybackStateChanged = nil
     output.onPositionUpdate = nil
     output.onPlayedToEnd = nil
     output.onFailure = nil
     currentAssetSummary = nil
     activeOfflineDownloadID = nil
+    playbackAccountID = nil
     durationSeconds = nil
     hasLoadedItem = false
     output.teardown()
@@ -1332,17 +1755,100 @@ package final class PlaybackController {
     output.currentPositionSeconds ?? attempt?.resumePosition ?? 0
   }
 
+  private func outputStartedPlaying() {
+    let now = monotonicNow()
+    if lifecycle == nil {
+      guard
+        let track = currentTrack,
+        let context = queueContext,
+        let accountID = playbackAccountID
+      else { return }
+      let instance = PlaybackLifecycleInstance(
+        accountID: accountID,
+        track: track,
+        context: context
+      )
+      lifecycle = ActiveLifecycle(
+        instance: instance,
+        playingSince: now,
+        durationSeconds: durationSeconds
+      )
+      onLifecycleEvent?(.started(instance))
+      return
+    }
+    guard var lifecycle, lifecycle.playingSince == nil else { return }
+    lifecycle.playingSince = now
+    if lifecycle.durationSeconds == nil {
+      lifecycle.durationSeconds = durationSeconds
+    }
+    self.lifecycle = lifecycle
+  }
+
+  private func pauseLifecycleClock() {
+    guard var lifecycle, let started = lifecycle.playingSince else { return }
+    let elapsed = monotonicNow() - started
+    if elapsed.isFinite {
+      lifecycle.accumulatedSeconds += max(0, elapsed)
+    }
+    lifecycle.playingSince = nil
+    self.lifecycle = lifecycle
+  }
+
+  private func finishLifecycle() {
+    pauseLifecycleClock()
+    guard let lifecycle else { return }
+    self.lifecycle = nil
+    let played = lifecycle.accumulatedSeconds.isFinite
+      ? max(0, lifecycle.accumulatedSeconds) : 0
+    let duration = lifecycle.durationSeconds.flatMap {
+      $0.isFinite && $0 >= 0 ? $0 : nil
+    }
+    let bounded = duration.map { min(played, $0) } ?? played
+    let wholeSeconds = bounded >= TimeInterval(Int.max)
+      ? Int.max : Int(bounded.rounded(.down))
+    onLifecycleEvent?(
+      .finished(lifecycle.instance, playedSeconds: wholeSeconds)
+    )
+  }
+
   private func checkCurrent(_ token: PlaybackIntentGate.Token) throws {
     try Task.checkCancellation()
     guard gate.accepts(token) else { throw CancellationError() }
   }
 
-  private func assetSummary(_ asset: ResolvedAudioAsset) -> String {
-    "requestedQuality=\(asset.requestedQuality.rawValue), "
+  private func assetSummary(
+    _ asset: ResolvedAudioAsset,
+    attempt: PlaybackAttempt? = nil
+  ) -> String {
+    let requested = attempt?.recovery.requestedQuality ?? asset.requestedQuality
+    let skipped = attempt?.recovery.skippedEntries ?? 0
+    return "requestedQuality=\(requested.rawValue), "
       + "actualQuality=\(asset.actualQuality ?? "none"), "
+      + "degraded=\(asset.actualQuality != nil && asset.actualQuality != requested.rawValue), "
+      + "skipped=\(skipped), "
       + "format=\(asset.format ?? "none"), "
       + "bitRate=\(asset.bitRate.map(String.init) ?? "none"), "
       + "trial=\(asset.trial), "
       + "scheme=\(asset.url.scheme ?? "none")"
+  }
+
+  private func localAssetSummary(
+    _ resource: PlaybackResource,
+    actualQuality: String
+  ) -> String {
+    let requested = attempt?.recovery.requestedQuality ?? resource.requestedQuality
+    return "requestedQuality=\(requested.rawValue), "
+      + "actualQuality=\(actualQuality), "
+      + "degraded=\(actualQuality != requested.rawValue), "
+      + "skipped=\(attempt?.recovery.skippedEntries ?? 0), "
+      + "source=download, format=\(resource.format ?? "unknown")"
+  }
+
+  private func failureQualitySummary(_ attempt: PlaybackAttempt?) -> String {
+    guard let attempt else { return "" }
+    return "; requestedQuality=\(attempt.recovery.requestedQuality.rawValue), "
+      + "actualQuality=none, "
+      + "degraded=\(attempt.recovery.currentQuality != attempt.recovery.requestedQuality), "
+      + "skipped=\(attempt.recovery.skippedEntries)"
   }
 }

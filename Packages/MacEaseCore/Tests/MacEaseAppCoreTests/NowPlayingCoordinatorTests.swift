@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import NeteaseKit
 import Testing
@@ -13,9 +14,14 @@ import Testing
 private final class FakeSystemMedia: SystemMediaControlling {
   var onCommand: (@MainActor (SystemMediaCommand) -> SystemMediaCommandResult)?
   private(set) var published: [PlaybackSnapshot] = []
+  private(set) var artworkTrackIDs: [Int64?] = []
   private(set) var clearCount = 0
 
   func publish(_ snapshot: PlaybackSnapshot) { published.append(snapshot) }
+  func publishArtwork(_ artwork: NSImage, for snapshot: PlaybackSnapshot) {
+    published.append(snapshot)
+    artworkTrackIDs.append(snapshot.trackID)
+  }
   func clear() { clearCount += 1 }
 
   func send(_ command: SystemMediaCommand) -> SystemMediaCommandResult {
@@ -31,14 +37,17 @@ private final class Rig {
   var accepts = true
   var coordinator: NowPlayingCoordinator!
 
-  init() {
+  init(
+    artworkProvider: @escaping NowPlayingCoordinator.ArtworkProvider = { _ in nil }
+  ) {
     coordinator = NowPlayingCoordinator(
       surface: surface,
       snapshotProvider: { [unowned self] in self.snapshot },
       performIntent: { [unowned self] command in
         self.dispatched.append(command)
         return self.accepts
-      }
+      },
+      artworkProvider: artworkProvider
     )
   }
 
@@ -55,13 +64,17 @@ private func makeSnapshot(
   positionEpoch: Int = 0,
   canStepNext: Bool = true,
   canStepPrevious: Bool = true,
-  liked: LikedState = .liked
+  liked: LikedState = .liked,
+  artworkURL: URL? = nil
 ) -> PlaybackSnapshot {
   PlaybackSnapshot(
     state: state,
     trackID: trackID,
     title: trackID.map { "track-\($0)" },
     artist: "artist",
+    albumTitle: trackID.map { "album-\($0)" },
+    artworkURL: artworkURL,
+    artworkIdentity: artworkURL.map { "\(trackID ?? 0)|\($0.absoluteString)" },
     durationSeconds: durationSeconds,
     elapsedSeconds: elapsedSeconds,
     positionEpoch: positionEpoch,
@@ -69,6 +82,23 @@ private func makeSnapshot(
     canStepPrevious: canStepPrevious,
     liked: liked
   )
+}
+
+@MainActor
+private final class ArtworkGate {
+  private var waiters: [URL: CheckedContinuation<NSImage?, Never>] = [:]
+
+  func load(_ url: URL) async -> NSImage? {
+    await withCheckedContinuation { waiters[url] = $0 }
+  }
+
+  func isWaiting(for url: URL) -> Bool { waiters[url] != nil }
+
+  func complete(_ url: URL) {
+    waiters.removeValue(forKey: url)?.resume(
+      returning: NSImage(size: NSSize(width: 8, height: 8))
+    )
+  }
 }
 
 // MARK: - Nothing loaded
@@ -179,6 +209,17 @@ private func makeSnapshot(
   #expect(rig.dispatched == [.setLiked(true)])
 }
 
+@Test @MainActor func aStaleLikeDirectionCannotRepeatTheCurrentState() {
+  let rig = Rig()
+  rig.snapshot = makeSnapshot(liked: .liked)
+
+  #expect(rig.send(.setLiked(true)) == .notPermitted)
+  #expect(rig.dispatched.isEmpty)
+
+  #expect(rig.send(.setLiked(false)) == .handled)
+  #expect(rig.dispatched == [.setLiked(false)])
+}
+
 // MARK: - Result accuracy
 
 @Test @MainActor func aRefusedIntentIsReportedAsFailed() {
@@ -252,4 +293,44 @@ private func makeSnapshot(
   // The projection is read at publish time, so there is no queued update for
   // 101 that could land after 202.
   #expect(rig.surface.published.map(\.trackID) == [101, 202])
+}
+
+@Test @MainActor func lateArtworkForTheOldTrackCannotOverwriteTheNewTrack() async {
+  let gate = ArtworkGate()
+  let oldURL = URL(string: "https://p1.music.126.net/old.jpg")!
+  let newURL = URL(string: "https://p1.music.126.net/new.jpg")!
+  let rig = Rig(artworkProvider: { await gate.load($0) })
+
+  rig.snapshot = makeSnapshot(trackID: 101, artworkURL: oldURL)
+  rig.coordinator.refresh()
+  while !gate.isWaiting(for: oldURL) { await Task.yield() }
+
+  rig.snapshot = makeSnapshot(trackID: 202, artworkURL: newURL)
+  rig.coordinator.refresh()
+  while !gate.isWaiting(for: newURL) { await Task.yield() }
+
+  gate.complete(oldURL)
+  await Task.yield()
+  #expect(rig.surface.artworkTrackIDs.isEmpty)
+
+  gate.complete(newURL)
+  while rig.surface.artworkTrackIDs.isEmpty { await Task.yield() }
+  #expect(rig.surface.artworkTrackIDs == [202])
+  #expect(rig.surface.published.last?.trackID == 202)
+}
+
+@Test @MainActor func clearCancelsArtworkAndRemovesMetadata() async {
+  let gate = ArtworkGate()
+  let url = URL(string: "https://p1.music.126.net/current.jpg")!
+  let rig = Rig(artworkProvider: { await gate.load($0) })
+  rig.snapshot = makeSnapshot(trackID: 101, artworkURL: url)
+  rig.coordinator.refresh()
+  while !gate.isWaiting(for: url) { await Task.yield() }
+
+  rig.coordinator.clear()
+  gate.complete(url)
+  await Task.yield()
+
+  #expect(rig.surface.clearCount == 1)
+  #expect(rig.surface.artworkTrackIDs.isEmpty)
 }

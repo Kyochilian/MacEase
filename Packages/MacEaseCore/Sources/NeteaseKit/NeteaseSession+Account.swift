@@ -723,9 +723,10 @@ extension NeteaseSession {
   static func eapiFormRequest(
     path: String,
     json: String,
-    headerFields: [(String, String)]
+    headerFields: [(String, String)],
+    url explicitURL: URL? = nil
   ) throws -> URLRequest {
-    guard let url = eapiURL(path) else {
+    guard let url = explicitURL ?? eapiURL(path) else {
       throw NeteaseAuthError.invalidResponse
     }
     var request = URLRequest(url: url)

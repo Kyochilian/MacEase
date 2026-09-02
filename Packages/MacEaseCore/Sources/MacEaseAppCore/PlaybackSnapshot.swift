@@ -9,11 +9,6 @@ import NeteaseKit
 /// nothing to keep in sync and no way for the system's view to survive a state
 /// change the controller made.
 ///
-/// It deliberately carries only what the system surface can express. Album and
-/// artwork are absent because the domain has no field for them yet: the queue
-/// is built from `Track`, which is an id, a name and artist names.
-/// Publishing an empty album string would be indistinguishable from a track
-/// that really has none.
 package struct PlaybackSnapshot: Equatable, Sendable {
   /// What the system should show. `resolving` and `failed` are not separate
   /// system states — neither has audio — so both project to `stopped` while
@@ -28,6 +23,11 @@ package struct PlaybackSnapshot: Equatable, Sendable {
   package let trackID: Int64?
   package let title: String?
   package let artist: String?
+  package let albumTitle: String?
+  package let artworkURL: URL?
+  /// Stable across position, state and liked changes. It lets an asynchronous
+  /// cover completion prove that it still describes the current metadata.
+  package let artworkIdentity: String?
   package let durationSeconds: Double?
   package let elapsedSeconds: Double
   /// Increments whenever position moved for a reason other than playback
@@ -44,6 +44,9 @@ package struct PlaybackSnapshot: Equatable, Sendable {
     trackID: Int64?,
     title: String?,
     artist: String?,
+    albumTitle: String? = nil,
+    artworkURL: URL? = nil,
+    artworkIdentity: String? = nil,
     durationSeconds: Double?,
     elapsedSeconds: Double,
     positionEpoch: Int,
@@ -55,6 +58,9 @@ package struct PlaybackSnapshot: Equatable, Sendable {
     self.trackID = trackID
     self.title = title
     self.artist = artist
+    self.albumTitle = albumTitle
+    self.artworkURL = artworkURL
+    self.artworkIdentity = artworkIdentity
     self.durationSeconds = durationSeconds
     self.elapsedSeconds = elapsedSeconds
     self.positionEpoch = positionEpoch
@@ -69,6 +75,9 @@ package struct PlaybackSnapshot: Equatable, Sendable {
     trackID: nil,
     title: nil,
     artist: nil,
+    albumTitle: nil,
+    artworkURL: nil,
+    artworkIdentity: nil,
     durationSeconds: nil,
     elapsedSeconds: 0,
     positionEpoch: 0,
@@ -95,6 +104,8 @@ package struct PlaybackSnapshot: Equatable, Sendable {
       || trackID != previous.trackID
       || title != previous.title
       || artist != previous.artist
+      || albumTitle != previous.albumTitle
+      || artworkIdentity != previous.artworkIdentity
       || durationSeconds != previous.durationSeconds
       || positionEpoch != previous.positionEpoch
       || canStepNext != previous.canStepNext

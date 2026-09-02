@@ -1,12 +1,13 @@
+import AppKit
 import Foundation
 
 /// A command arriving from the system: the media keys, Control Centre, the
 /// Now Playing widget or a Bluetooth remote.
 ///
 /// These are requests, not instructions. Each one is checked against the
-/// current projection before it becomes a playback intent, and none of them
-/// reaches the transport: a remote command can never cause a NetEase request
-/// that the user did not ask for through the app.
+/// current projection before it becomes the same playback or heart intent the
+/// app exposes. The system surface never calls the transport directly; a Next
+/// or Like command may issue exactly the request its in-app counterpart does.
 package enum SystemMediaCommand: Equatable, Sendable {
   case play
   case pause
@@ -48,6 +49,15 @@ package protocol SystemMediaControlling: AnyObject {
   /// Publishes the current projection.
   func publish(_ snapshot: PlaybackSnapshot)
 
+  /// Republishes the same live projection with its decoded cover.
+  func publishArtwork(_ artwork: NSImage, for snapshot: PlaybackSnapshot)
+
   /// Removes MacEase from the system surface entirely.
   func clear()
+}
+
+extension SystemMediaControlling {
+  package func publishArtwork(_ artwork: NSImage, for snapshot: PlaybackSnapshot) {
+    publish(snapshot)
+  }
 }

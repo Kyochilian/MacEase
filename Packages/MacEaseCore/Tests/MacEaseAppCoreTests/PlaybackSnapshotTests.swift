@@ -171,3 +171,17 @@ private struct SnapshotRig {
   let rig = SnapshotRig()
   #expect(rig.playback.snapshot(liked: .unknown).requiresPublishing(comparedTo: nil))
 }
+
+@Test @MainActor func snapshotCarriesTheTracksRealAlbumAndArtworkIdentity() async {
+  let rig = SnapshotRig()
+  await rig.play()
+
+  let snapshot = rig.playback.snapshot(liked: .unknown)
+
+  #expect(snapshot.albumTitle == "album-101")
+  #expect(snapshot.artworkURL?.absoluteString == "https://p1.music.126.net/cover-101.jpg")
+  #expect(
+    snapshot.artworkIdentity
+      == "901|https://p1.music.126.net/cover-101.jpg"
+  )
+}

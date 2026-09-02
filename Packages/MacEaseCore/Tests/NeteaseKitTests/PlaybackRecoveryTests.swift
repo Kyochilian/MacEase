@@ -22,6 +22,18 @@ import Testing
   #expect(!PlaybackExpiryPolicy.confirmsInvalidURL(statusCode: 500))
 }
 
+@Test func everySelectedQualityHasTheExactDownwardFallbackSequence() {
+  #expect(PlaybackQuality.hires.fallbackSequence == [
+    .hires, .lossless, .exhigh, .higher, .standard,
+  ])
+  #expect(PlaybackQuality.lossless.fallbackSequence == [
+    .lossless, .exhigh, .higher, .standard,
+  ])
+  #expect(PlaybackQuality.exhigh.fallbackSequence == [.exhigh, .higher, .standard])
+  #expect(PlaybackQuality.higher.fallbackSequence == [.higher, .standard])
+  #expect(PlaybackQuality.standard.fallbackSequence == [.standard])
+}
+
 @Test func playbackRecoverySnapshotClampsNegativePosition() {
   let snapshot = PlaybackRecoverySnapshot(
     songID: 347230,

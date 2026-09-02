@@ -25,11 +25,13 @@ package struct PlaybackAttempt: Equatable, Sendable {
   package var queueIndex: Int
   package var resumePosition: Double
   package var desiredState: DesiredPlaybackState
+  package var recovery: PlaybackRecoveryState
 
   package init(
     songID: Int64,
     quality: PlaybackQuality,
     queueIndex: Int,
+    queueEntryCount: Int = 1,
     resumePosition: Double = 0,
     desiredState: DesiredPlaybackState = .playing
   ) {
@@ -38,6 +40,11 @@ package struct PlaybackAttempt: Equatable, Sendable {
     self.queueIndex = queueIndex
     self.resumePosition = Self.sanitized(resumePosition)
     self.desiredState = desiredState
+    recovery = PlaybackRecoveryState(
+      requestedQuality: quality,
+      queueIndex: queueIndex,
+      queueEntryCount: queueEntryCount
+    )
   }
 
   /// Positions come from AVPlayer, which reports NaN and infinity for an item
@@ -51,13 +58,89 @@ package struct PlaybackAttempt: Equatable, Sendable {
     at position: Double,
     desiredState: DesiredPlaybackState
   ) -> PlaybackAttempt {
-    PlaybackAttempt(
+    var result = PlaybackAttempt(
       songID: songID,
       quality: quality,
       queueIndex: queueIndex,
       resumePosition: position,
       desiredState: desiredState
     )
+    result.recovery = recovery
+    return result
+  }
+
+  package func restartedRecovery(queueEntryCount: Int) -> PlaybackAttempt {
+    PlaybackAttempt(
+      songID: songID,
+      quality: quality,
+      queueIndex: queueIndex,
+      queueEntryCount: queueEntryCount,
+      resumePosition: resumePosition,
+      desiredState: desiredState
+    )
+  }
+
+  package func advancing(to songID: Int64, queueIndex: Int) -> PlaybackAttempt? {
+    var recovery = recovery
+    guard recovery.visitQueueEntry(queueIndex) else { return nil }
+    var result = PlaybackAttempt(
+      songID: songID,
+      quality: quality,
+      queueIndex: queueIndex
+    )
+    result.recovery = recovery
+    return result
+  }
+}
+
+package struct PlaybackRecoveryState: Equatable, Sendable {
+  private struct Resource: Hashable, Sendable {
+    let songID: Int64
+    let quality: PlaybackQuality
+  }
+
+  package let requestedQuality: PlaybackQuality
+  package private(set) var currentQuality: PlaybackQuality
+  package private(set) var visitedQueueIndices: Set<Int>
+  package private(set) var skippedEntries = 0
+  private var remainingQueueVisits: Int
+  private var refreshedResources: Set<Resource> = []
+
+  package init(
+    requestedQuality: PlaybackQuality,
+    queueIndex: Int,
+    queueEntryCount: Int
+  ) {
+    self.requestedQuality = requestedQuality
+    currentQuality = requestedQuality
+    visitedQueueIndices = [queueIndex]
+    remainingQueueVisits = max(0, queueEntryCount - 1)
+  }
+
+  /// True exactly once for one song/quality in this accepted recovery chain.
+  package mutating func beginFreshResolve(
+    songID: Int64,
+    quality: PlaybackQuality
+  ) -> Bool {
+    refreshedResources.insert(Resource(songID: songID, quality: quality)).inserted
+  }
+
+  package mutating func advanceQuality() -> PlaybackQuality? {
+    let sequence = requestedQuality.fallbackSequence
+    guard let index = sequence.firstIndex(of: currentQuality),
+      sequence.indices.contains(index + 1)
+    else { return nil }
+    currentQuality = sequence[index + 1]
+    return currentQuality
+  }
+
+  package mutating func visitQueueEntry(_ index: Int) -> Bool {
+    guard remainingQueueVisits > 0 else { return false }
+    guard visitedQueueIndices.insert(index).inserted else { return false }
+    remainingQueueVisits -= 1
+    currentQuality = requestedQuality
+    skippedEntries += 1
+    return true
   }
 }
 

@@ -1,6 +1,14 @@
 import Foundation
 import NeteaseKit
 
+package enum AppPlaybackCommand: Equatable, Sendable {
+  case togglePlayback
+  case previous
+  case next
+  case setMode(PlaybackMode)
+  case toggleLiked
+}
+
 /// Connects the system media surface to the objects that actually own
 /// playback and the liked set.
 ///
@@ -64,6 +72,49 @@ package struct SystemMediaRouter {
       // dispatch, so reaching here means the projection and the command
       // disagreed. Refusing is the honest answer.
       return false
+    }
+  }
+
+  package func canPerform(_ command: AppPlaybackCommand) -> Bool {
+    guard let playback else { return false }
+    let snapshot = snapshot()
+    switch command {
+    case .togglePlayback:
+      return snapshot.state == .playing || snapshot.state == .paused
+    case .previous:
+      guard let session else { return false }
+      return playback.canPlayPrevious(session: session)
+    case .next:
+      guard let session else { return false }
+      return playback.canPlayNext(session: session)
+    case .setMode:
+      return true
+    case .toggleLiked:
+      guard let session, let library else { return false }
+      return playback.currentTrack != nil && snapshot.liked != .unknown
+        && library.canSetLiked(session: session)
+    }
+  }
+
+  /// App and Dock commands share this route. It derives toggle direction and
+  /// enablement from the live snapshot, then calls the same owners as system
+  /// media commands.
+  package func perform(_ command: AppPlaybackCommand) -> Bool {
+    guard canPerform(command), let playback else { return false }
+    switch command {
+    case .togglePlayback:
+      return snapshot().state == .playing
+        ? perform(.pause) : perform(.play)
+    case .previous:
+      return perform(SystemMediaCommand.previous)
+    case .next:
+      return perform(SystemMediaCommand.next)
+    case .setMode(let mode):
+      playback.playbackMode = mode
+      return true
+    case .toggleLiked:
+      let liked = snapshot().liked
+      return perform(.setLiked(liked != .liked))
     }
   }
 }

@@ -162,7 +162,7 @@ private struct PlaybackRig {
   #expect(resource?.expiresAt != nil)
 }
 
-@Test @MainActor func anAssetReportedUnplayableKeepsPlayAgain() async {
+@Test @MainActor func anAssetReportedUnplayableExhaustsTheOnlySelectedQuality() async {
   let rig = PlaybackRig()
   await rig.transport.setSongURL(.success(makeResolvedAsset(songID: 101)))
   rig.output.prepareResult = .success(
@@ -172,7 +172,7 @@ private struct PlaybackRig {
   await rig.play()
 
   #expect(rig.playback.phase == .failed)
-  #expect(rig.playback.canPlayAgain)
+  #expect(!rig.playback.canPlayAgain)
   #expect(rig.output.teardownCount > 0)
 }
 
@@ -495,4 +495,228 @@ private struct PlaybackRig {
   #expect(await rig.transport.callCount() == 2)
   #expect(rig.playback.phase == .failed)
   #expect(rig.arbiter.end(blocker, outcome: .applied) == .applied)
+}
+
+// MARK: - P4 bounded automatic recovery
+
+@Test @MainActor func unavailableQualitiesDescendWithoutChangingThePreference() async {
+  let rig = PlaybackRig()
+  rig.playback.quality = .hires
+  await rig.transport.setSongURLs([
+    .success(.unavailable(itemCode: 404, fee: 1)),
+    .success(.unavailable(itemCode: 404, fee: 1)),
+    .success(.unavailable(itemCode: 404, fee: 1)),
+    .success(.unavailable(itemCode: 404, fee: 1)),
+    .success(makeResolvedAsset(songID: 101, requestedQuality: .standard)),
+  ])
+
+  await rig.play()
+
+  #expect(await rig.transport.recordedCalls() == [
+    .resolveSongURL(101, .hires),
+    .resolveSongURL(101, .lossless),
+    .resolveSongURL(101, .exhigh),
+    .resolveSongURL(101, .higher),
+    .resolveSongURL(101, .standard),
+  ])
+  #expect(rig.playback.quality == .hires)
+  #expect(rig.playback.phase == .playing)
+  #expect(rig.playback.status.contains("requestedQuality=hires"))
+  #expect(rig.playback.status.contains("actualQuality=standard"))
+  #expect(rig.playback.status.contains("degraded=true"))
+  #expect(rig.arbiter.activeReadCount == 0)
+}
+
+@Test @MainActor func confirmedHTTPFailureReResolvesOnceThenFallsBack() async {
+  let rig = PlaybackRig()
+  rig.playback.quality = .lossless
+  await rig.transport.setSongURLs([
+    .success(makeResolvedAsset(songID: 101, requestedQuality: .lossless)),
+    .success(makeResolvedAsset(songID: 101, requestedQuality: .lossless)),
+    .success(makeResolvedAsset(songID: 101, requestedQuality: .exhigh)),
+  ])
+  rig.output.prepareResults = [
+    .failure(AudioOutputFailure.resourceUnavailable(statusCode: 403)),
+    .failure(AudioOutputFailure.resourceUnavailable(statusCode: 404)),
+    .success(AudioAssetInfo(isPlayable: true, durationSeconds: 200)),
+  ]
+
+  await rig.play()
+
+  #expect(await rig.transport.recordedCalls() == [
+    .resolveSongURL(101, .lossless),
+    .resolveSongURL(101, .lossless),
+    .resolveSongURL(101, .exhigh),
+  ])
+  #expect(rig.playback.phase == .playing)
+  #expect(rig.playback.quality == .lossless)
+}
+
+@Test @MainActor func ordinaryAssetNetworkFailureNeverDowngradesOrSkips() async {
+  let rig = PlaybackRig()
+  rig.playback.quality = .hires
+  await rig.transport.setSongURL(
+    .success(makeResolvedAsset(songID: 101, requestedQuality: .hires))
+  )
+  rig.output.prepareResult = .failure(AudioOutputFailure.assetLoad("NSURLErrorDomain -1009"))
+
+  await rig.play([101, 202])
+
+  #expect(await rig.transport.recordedCalls() == [.resolveSongURL(101, .hires)])
+  #expect(rig.playback.currentTrack?.id == 101)
+  #expect(rig.playback.phase == .failed)
+  #expect(rig.playback.canPlayAgain)
+}
+
+@Test @MainActor func allQualitiesMustFailBeforeTheNextEntryIsVisited() async {
+  let rig = PlaybackRig()
+  rig.playback.quality = .higher
+  await rig.transport.setSongURLs([
+    .success(.unavailable(itemCode: 404, fee: nil)),
+    .success(.unavailable(itemCode: 404, fee: nil)),
+    .success(makeResolvedAsset(songID: 202, requestedQuality: .higher)),
+  ])
+
+  await rig.play([101, 202])
+
+  #expect(await rig.transport.recordedCalls() == [
+    .resolveSongURL(101, .higher),
+    .resolveSongURL(101, .standard),
+    .resolveSongURL(202, .higher),
+  ])
+  #expect(rig.playback.currentTrack?.id == 202)
+  #expect(rig.playback.status.contains("skipped=1"))
+}
+
+@Test @MainActor func repeatOneAndRepeatAllRecoveryCannotLoop() async {
+  let repeatOne = PlaybackRig()
+  repeatOne.playback.playbackMode = .repeatOne
+  repeatOne.playback.quality = .standard
+  await repeatOne.transport.setSongURL(
+    .success(.unavailable(itemCode: 404, fee: nil))
+  )
+  await repeatOne.play([101])
+  #expect(await repeatOne.transport.recordedCalls() == [
+    .resolveSongURL(101, .standard)
+  ])
+  #expect(repeatOne.playback.phase == .failed)
+
+  let repeatAll = PlaybackRig()
+  repeatAll.playback.playbackMode = .repeatAll
+  repeatAll.playback.quality = .standard
+  await repeatAll.transport.setSongURLs([
+    .success(.unavailable(itemCode: 404, fee: nil)),
+    .success(.unavailable(itemCode: 404, fee: nil)),
+  ])
+  await repeatAll.play([101, 202])
+  #expect(await repeatAll.transport.recordedCalls() == [
+    .resolveSongURL(101, .standard),
+    .resolveSongURL(202, .standard),
+  ])
+  #expect(repeatAll.playback.phase == .failed)
+  #expect(repeatAll.arbiter.activeReadCount == 0)
+}
+
+@Test @MainActor func shuffleRecoveryVisitsEveryEntryAtMostOnce() async {
+  let rig = PlaybackRig()
+  rig.playback.playbackMode = .shuffle
+  rig.playback.quality = .standard
+  await rig.transport.setSongURL(
+    .success(.unavailable(itemCode: 404, fee: nil))
+  )
+
+  await rig.play([101, 202, 303])
+
+  let calls = await rig.transport.recordedCalls()
+  #expect(calls.count == 3)
+  let ids = calls.compactMap { call -> Int64? in
+    guard case .resolveSongURL(let id, .standard) = call else { return nil }
+    return id
+  }
+  #expect(Set(ids) == [101, 202, 303])
+  #expect(rig.playback.phase == .failed)
+}
+
+@Test @MainActor func continuationCannotExtendAnAcceptedRecoveryChain() async {
+  let rig = PlaybackRig()
+  rig.playback.quality = .standard
+  await rig.transport.setSongURL(
+    .success(.unavailable(itemCode: 404, fee: nil))
+  )
+  await rig.transport.gate.close()
+
+  rig.playback.play(
+    tracks: makeTracks([101]),
+    startIndex: 0,
+    context: .personalFM,
+    session: rig.session
+  )
+  while await rig.transport.gate.arrivalCount() == 0 { await Task.yield() }
+  #expect(
+    rig.playback.extendQueue(
+      with: makeTracks([202]),
+      context: .personalFM
+    ) == 1
+  )
+  await rig.transport.gate.open()
+  await rig.playback.settleForTesting()
+
+  #expect(await rig.transport.recordedCalls() == [
+    .resolveSongURL(101, .standard)
+  ])
+  #expect(rig.playback.queuedTracks(context: .personalFM).map(\.id) == [101, 202])
+  #expect(rig.playback.currentTrack?.id == 101)
+  #expect(rig.playback.phase == .failed)
+}
+
+@Test @MainActor func runtimeExpiredURLRecoversWithoutASecondLifecycleStart() async {
+  let clock = LifecycleClockForRecovery()
+  let transport = FakeTransport()
+  let credential = makeCredential()
+  let vault = FakeVault(stored: credential)
+  let session = FakeSession(credential: credential)
+  let output = FakeAudioOutput()
+  let playback = PlaybackController(
+    transport: transport,
+    vault: vault,
+    arbiter: OperationArbiter(),
+    output: output,
+    monotonicNow: { clock.now }
+  )
+  playback.attach(session: session)
+  var events: [PlaybackLifecycleEvent] = []
+  playback.onLifecycleEvent = { events.append($0) }
+  await transport.setSongURLs([
+    .success(makeResolvedAsset(songID: 101)),
+    .success(makeResolvedAsset(songID: 101)),
+  ])
+
+  playback.play(
+    tracks: makeTracks([101]),
+    startIndex: 0,
+    context: .dailyRecommendations,
+    session: session
+  )
+  await playback.settleForTesting()
+  clock.now += 5
+  output.reportFailure(.resourceUnavailable(statusCode: 403))
+  await playback.settleForTesting()
+  clock.now += 4
+  playback.stop()
+
+  #expect(await transport.recordedCalls() == [
+    .resolveSongURL(101, .standard),
+    .resolveSongURL(101, .standard),
+  ])
+  #expect(events.compactMap { if case .started = $0 { 1 } else { nil } }.count == 1)
+  guard case .finished(_, let seconds) = events.last else {
+    Issue.record("Expected one final lifecycle settlement")
+    return
+  }
+  #expect(seconds == 9)
+}
+
+@MainActor
+private final class LifecycleClockForRecovery {
+  var now: TimeInterval = 1_000
 }

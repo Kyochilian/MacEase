@@ -62,6 +62,26 @@ private actor SupersedeWAVFetcher: AudioByteFetching {
   }
 }
 
+private actor HTTPFailureFetcher: AudioByteFetching {
+  let statusCode: Int
+
+  init(statusCode: Int) { self.statusCode = statusCode }
+
+  func fetch(
+    url: URL,
+    range: AudioByteRange,
+    userAgent: String
+  ) async throws -> AudioHTTPRangeResponse {
+    AudioHTTPRangeResponse(
+      statusCode: statusCode,
+      contentRange: nil,
+      contentLength: 0,
+      mimeType: nil,
+      data: Data()
+    )
+  }
+}
+
 private func wavBytes() -> Data {
   let sampleRate: UInt32 = 8_000
   let sampleCount: UInt32 = 800
@@ -145,6 +165,32 @@ private func appendLittleEndian<T: FixedWidthInteger>(
 
   #expect(base.cacheKey == nil)
   #expect(unknownLength.cacheKey == nil)
+}
+
+@Test @MainActor func rangeHTTP403BecomesATypedExpiredResourceFailure() async throws {
+  let directory = FileManager.default.temporaryDirectory
+    .appendingPathComponent("MacEase-output-403-\(UUID().uuidString)", isDirectory: true)
+  defer { try? FileManager.default.removeItem(at: directory) }
+  let store = try AudioRangeStore(directory: directory, limitBytes: 1024 * 1024)
+  let pipeline = AudioRangePipeline(
+    store: store,
+    fetcher: HTTPFailureFetcher(statusCode: 403)
+  )
+  let output = AVPlayerAudioOutput(rangePipeline: pipeline)
+  let resource = PlaybackResource(
+    location: .remote(URL(string: "https://m8.music.126.net/expired.wav")!),
+    accountID: 42,
+    songID: 7,
+    requestedQuality: .standard,
+    actualQuality: "standard",
+    format: "wav",
+    byteCount: Int64(wavBytes().count),
+    expiresAt: Date().addingTimeInterval(-1)
+  )
+
+  await #expect(throws: AudioOutputFailure.resourceUnavailable(statusCode: 403)) {
+    try await output.prepare(resource: resource, userAgent: "test")
+  }
 }
 
 @Test @MainActor func supersededDelegateCannotCommitOrReplaceTheNewAsset() async throws {

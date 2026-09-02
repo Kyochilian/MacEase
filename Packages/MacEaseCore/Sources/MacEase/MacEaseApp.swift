@@ -20,6 +20,9 @@ struct MacEaseApp: App {
     case settings
   }
 
+  @NSApplicationDelegateAdaptor(MacEaseAppDelegate.self)
+  private var appDelegate
+
   @State private var session: LoginCoordinator
   @State private var library: PlaylistLibraryCoordinator
   @State private var discovery: DiscoveryCoordinator
@@ -28,6 +31,7 @@ struct MacEaseApp: App {
   @State private var radio: RadioCoordinator
   @State private var lyrics: LyricsCoordinator
   @State private var playback: PlaybackController
+  @State private var scrobble: ScrobbleCoordinator
   @State private var arbiter: OperationArbiter
   @State private var settings: AppSettings
   @State private var artwork: ArtworkLoader
@@ -39,6 +43,7 @@ struct MacEaseApp: App {
   /// Held so the Now Playing bridge lives as long as the app does; the views
   /// never read it.
   @State private var nowPlaying: NowPlayingCoordinator
+  @State private var mediaRouter: SystemMediaRouter
   /// Same: the machine-state observer must outlive the initialiser that
   /// started it, or sleep and device changes would stop being reported.
   @State private var systemEvents: MacSystemEventObserver
@@ -107,6 +112,22 @@ struct MacEaseApp: App {
       output: AVPlayerAudioOutput(rangePipeline: audioCache.pipeline)
     )
     playback.attach(session: login)
+    let scrobble = ScrobbleCoordinator(
+      transport: transport,
+      vault: vault,
+      arbiter: arbiter
+    )
+    playback.onLifecycleEvent = { [weak scrobble, weak login] event in
+      guard let login else { return }
+      scrobble?.handle(event, session: login)
+    }
+    login.onPrepareIdentityMutation = { [weak playback, weak scrobble] in
+      playback?.prepareForSessionMutation()
+      await scrobble?.settle()
+    }
+    login.onFinishIdentityMutationPreparation = { [weak playback] in
+      playback?.finishSessionMutationPreparation()
+    }
     radio.attach(playback: playback)
     // One playback callback both invalidates old radio responses and reports
     // ordinary queue movement that may need a continuation. It is neither a
@@ -127,7 +148,10 @@ struct MacEaseApp: App {
     let nowPlaying = NowPlayingCoordinator(
       surface: MPSystemMediaController(),
       snapshotProvider: { router.snapshot() },
-      performIntent: { router.perform($0) }
+      performIntent: { router.perform($0) },
+      artworkProvider: { [weak artwork] url in
+        await artwork?.image(for: url)
+      }
     )
     nowPlaying.startObserving()
     // A store that will not open is not a reason to refuse to run: queue
@@ -157,9 +181,10 @@ struct MacEaseApp: App {
     // of them, so the session owner clears everything, not just the reporter.
     login.onIdentityChanged = {
       [weak playback, weak library, weak discovery, weak collections, weak lyrics,
-        weak catalog, weak radio, weak downloads, weak nowPlaying] in
+        weak catalog, weak radio, weak downloads, weak scrobble, weak nowPlaying] in
       Self.clearSessionScopedState(
         playback: playback,
+        scrobble: scrobble,
         downloads: downloads,
         library: library,
         discovery: discovery,
@@ -207,12 +232,14 @@ struct MacEaseApp: App {
     _radio = State(initialValue: radio)
     _lyrics = State(initialValue: lyrics)
     _playback = State(initialValue: playback)
+    _scrobble = State(initialValue: scrobble)
     _arbiter = State(initialValue: arbiter)
     _settings = State(initialValue: settings)
     _artwork = State(initialValue: artwork)
     _audioRanges = State(initialValue: audioCache.pipeline)
     _downloads = State(initialValue: downloads)
     _nowPlaying = State(initialValue: nowPlaying)
+    _mediaRouter = State(initialValue: router)
     _systemEvents = State(initialValue: systemEvents)
     _queuePersistence = State(initialValue: queuePersistence)
     let combinedDiagnostic = [storage.diagnostic, audioCache.diagnostic]
@@ -220,6 +247,14 @@ struct MacEaseApp: App {
       .joined(separator: " ")
     _storageDiagnostic = State(
       initialValue: combinedDiagnostic.isEmpty ? nil : combinedDiagnostic
+    )
+    appDelegate.configure(
+      router: router,
+      prepareForTermination: {
+        playback.prepareForSessionMutation()
+        await scrobble.settle()
+        nowPlaying.clear()
+      }
     )
   }
 
@@ -233,6 +268,7 @@ struct MacEaseApp: App {
   @MainActor
   static func clearSessionScopedState(
     playback: PlaybackController?,
+    scrobble: ScrobbleCoordinator? = nil,
     downloads: DownloadCoordinator?,
     library: PlaylistLibraryCoordinator?,
     discovery: DiscoveryCoordinator?,
@@ -243,6 +279,7 @@ struct MacEaseApp: App {
     nowPlaying: NowPlayingCoordinator?
   ) {
     playback?.stopForSessionChange()
+    scrobble?.reset()
     downloads?.bind(accountID: nil)
     library?.reset()
     discovery?.reset()
@@ -419,6 +456,7 @@ struct MacEaseApp: App {
             library: library,
             discovery: discovery,
             playback: playback,
+            scrobble: scrobble,
             arbiter: arbiter,
             artwork: artwork
           )
@@ -465,6 +503,12 @@ struct MacEaseApp: App {
       }
       .frame(minWidth: 760, minHeight: 600)
       .preferredColorScheme(settings.theme.colorScheme)
+      .background {
+        SafeSpacePlaybackShortcut {
+          mediaRouter.perform(.togglePlayback)
+        }
+        .frame(width: 0, height: 0)
+      }
       // A queue is worth remembering when it changes in a way the user would
       // notice: a new track or a seek bumps the epoch, and pausing or stopping
       // changes the phase. The slow tick inside `QueuePersistence` covers the
@@ -480,6 +524,67 @@ struct MacEaseApp: App {
       }
     }
     .defaultSize(width: 980, height: 760)
+    .commands {
+      CommandMenu("Playback") {
+        Button("Play/Pause") {
+          _ = mediaRouter.perform(.togglePlayback)
+        }
+        .disabled(!mediaRouter.canPerform(.togglePlayback))
+
+        Divider()
+
+        Button("Previous") {
+          _ = mediaRouter.perform(AppPlaybackCommand.previous)
+        }
+          .keyboardShortcut(.leftArrow, modifiers: [.command, .option])
+          .disabled(!mediaRouter.canPerform(.previous))
+        Button("Next") {
+          _ = mediaRouter.perform(AppPlaybackCommand.next)
+        }
+          .keyboardShortcut(.rightArrow, modifiers: [.command, .option])
+          .disabled(!mediaRouter.canPerform(.next))
+
+        Divider()
+
+        modeCommand("Sequential", mode: .sequential)
+        modeCommand("Shuffle", mode: .shuffle)
+        modeCommand("Repeat One", mode: .repeatOne)
+        modeCommand("Repeat All", mode: .repeatAll)
+
+        Divider()
+
+        Button(likeCommandTitle(mediaRouter.snapshot().liked)) {
+          _ = mediaRouter.perform(.toggleLiked)
+        }
+        .keyboardShortcut("l", modifiers: [.command])
+        .disabled(!mediaRouter.canPerform(.toggleLiked))
+
+        Button("Show Lyrics") { selectedTab = .lyrics }
+          .keyboardShortcut("l", modifiers: [.command, .option])
+      }
+    }
+  }
+
+  @ViewBuilder
+  private func modeCommand(_ title: String, mode: PlaybackMode) -> some View {
+    Button {
+      _ = mediaRouter.perform(.setMode(mode))
+    } label: {
+      if playback.playbackMode == mode {
+        Label(title, systemImage: "checkmark")
+      } else {
+        Text(title)
+      }
+    }
+    .disabled(!mediaRouter.canPerform(.setMode(mode)))
+  }
+
+  private func likeCommandTitle(_ state: LikedState) -> String {
+    switch state {
+    case .liked: "Unlike"
+    case .notLiked: "Like"
+    case .unknown: "Like/Unlike"
+    }
   }
 
   /// Opens a playlist that came from discovery, browsing or search through the
@@ -986,6 +1091,7 @@ private struct PlayRecordsView: View {
   let library: PlaylistLibraryCoordinator
   @Bindable var discovery: DiscoveryCoordinator
   let playback: PlaybackController
+  let scrobble: ScrobbleCoordinator
   let arbiter: OperationArbiter
   let artwork: ArtworkLoader
 
@@ -996,7 +1102,7 @@ private struct PlayRecordsView: View {
       HStack {
         Text("Listening Rankings")
           .font(.headline)
-        Text("Server-side data only; MacEase scrobbling is not implemented yet")
+        Text(scrobble.status)
           .font(.caption)
           .foregroundStyle(.secondary)
         Spacer()
@@ -1113,6 +1219,9 @@ private struct PlaybackBarView: View {
             disabled: requestInFlight
           )
         }
+        SystemRoutePicker()
+          .frame(width: 28, height: 28)
+          .help("Choose an AirPlay or system audio route")
         Picker("Quality", selection: $playback.quality) {
           ForEach(PlaybackQuality.allCases, id: \.self) { quality in
             Text(quality.rawValue).tag(quality)
@@ -1146,7 +1255,7 @@ private struct PlaybackBarView: View {
         Button("Previous", systemImage: "backward.end.fill") {
           playback.playPrevious(session: session)
         }
-        .disabled(!playback.canStepPrevious || session.account == nil)
+        .disabled(!playback.canPlayPrevious(session: session))
         if playback.phase == .paused {
           Button("Resume", systemImage: "play.fill") {
             playback.resume()
@@ -1160,7 +1269,7 @@ private struct PlaybackBarView: View {
         Button("Next", systemImage: "forward.end.fill") {
           playback.playNext(session: session)
         }
-        .disabled(!playback.canStepNext || session.account == nil)
+        .disabled(!playback.canPlayNext(session: session))
 
         Picker("Mode", selection: $playback.playbackMode) {
           ForEach(PlaybackMode.allCases, id: \.self) { mode in
@@ -1170,7 +1279,7 @@ private struct PlaybackBarView: View {
         .fixedSize()
         .help(
           "Order after a track ends naturally; matching downloads play locally, "
-            + "otherwise each new track resolves once"
+            + "otherwise confirmed unavailability uses bounded downward quality recovery"
         )
 
         Spacer()

@@ -10,7 +10,7 @@ package enum PlaybackMode: String, CaseIterable, Sendable, Codable {
 package enum QueueAdvance: Equatable, Sendable {
   /// Restart the current item from zero without a new URL resolution.
   case replayCurrent
-  /// Resolve and play the entry at this index (exactly one request).
+  /// Resolve and play the entry at this index.
   case play(Int)
   /// The queue is exhausted; playback stops.
   case end

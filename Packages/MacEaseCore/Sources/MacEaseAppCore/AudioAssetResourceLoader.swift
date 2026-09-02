@@ -1,5 +1,6 @@
 @preconcurrency import AVFoundation
 import Foundation
+import NeteaseKit
 import UniformTypeIdentifiers
 
 /// Bridges AVFoundation's pull-style loading requests to the validated range
@@ -21,6 +22,11 @@ package final class AudioAssetResourceLoader: NSObject,
   private var activeRequests: Set<ObjectIdentifier> = []
   private var tasks: [ObjectIdentifier: Task<Void, Never>] = [:]
   private var invalidated = false
+  private var failure: AudioOutputFailure?
+
+  package var reportedFailure: AudioOutputFailure? {
+    lock.withLock { failure }
+  }
 
   package init(
     resource: PlaybackResource,
@@ -60,6 +66,7 @@ package final class AudioAssetResourceLoader: NSObject,
         guard self.finish(id) else { return }
         box.value.finishLoading()
       } catch {
+        self.recordFailure(error)
         guard self.finish(id) else { return }
         box.value.finishLoading(with: Self.loadingError(error))
       }
@@ -172,6 +179,17 @@ package final class AudioAssetResourceLoader: NSObject,
     let task = tasks.removeValue(forKey: id)
     lock.unlock()
     task?.cancel()
+  }
+
+  private func recordFailure(_ error: any Error) {
+    guard case AudioRangeError.unsupportedStatus(let statusCode) = error,
+      PlaybackExpiryPolicy.confirmsInvalidURL(statusCode: statusCode)
+    else { return }
+    lock.withLock {
+      if failure == nil {
+        failure = .resourceUnavailable(statusCode: statusCode)
+      }
+    }
   }
 
   private static func contentType(format: String?) -> String {

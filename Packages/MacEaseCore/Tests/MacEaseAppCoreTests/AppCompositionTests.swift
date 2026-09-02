@@ -1,9 +1,47 @@
+import AppKit
 import Foundation
 import Testing
+import WebKit
 
 @testable import MacEase
 @testable import MacEaseAppCore
 @testable import NeteaseKit
+
+@Test @MainActor func spacePlaybackShortcutLeavesTextInputAndModifiedKeysAlone() {
+  typealias Shortcut = SafeSpacePlaybackShortcut.Coordinator
+  #expect(
+    Shortcut.shouldHandleSpace(
+      characters: " ",
+      modifiers: [],
+      isRepeat: false,
+      focusedElementConsumesSpace: false
+    )
+  )
+  #expect(
+    !Shortcut.shouldHandleSpace(
+      characters: " ",
+      modifiers: [],
+      isRepeat: false,
+      focusedElementConsumesSpace: true
+    )
+  )
+  #expect(
+    !Shortcut.shouldHandleSpace(
+      characters: " ",
+      modifiers: .command,
+      isRepeat: false,
+      focusedElementConsumesSpace: false
+    )
+  )
+
+  let button = NSButton()
+  #expect(Shortcut.focusedElementConsumesSpace(button))
+
+  let webView = WKWebView()
+  let webContent = NSView()
+  webView.addSubview(webContent)
+  #expect(Shortcut.focusedElementConsumesSpace(webContent))
+}
 
 @Test @MainActor func audioCacheFailureDoesNotRemovePersistentDownloadServices() async throws {
   let root = FileManager.default.temporaryDirectory.appendingPathComponent(

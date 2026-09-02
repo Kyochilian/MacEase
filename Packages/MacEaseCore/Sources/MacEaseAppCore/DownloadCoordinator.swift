@@ -268,6 +268,25 @@ package final class DownloadCoordinator: SessionGuardedCoordinator {
     return playbackResource(for: download)
   }
 
+  /// Read-only counterpart used by command enablement. It validates the same
+  /// exact account/song/requested-quality file without deleting a damaged
+  /// record merely because a menu was opened.
+  package func hasPlaybackResource(
+    songID: Int64,
+    requestedQuality: PlaybackQuality,
+    accountID: Int64
+  ) -> Bool {
+    let id = OfflineDownloadID(
+      accountID: accountID,
+      songID: songID,
+      requestedQuality: requestedQuality
+    )
+    guard let download = downloads.first(where: { $0.id == id }),
+      let url = localURLs[id]
+    else { return false }
+    return Self.fileSize(url) == download.byteCount
+  }
+
   package func playbackResource(for download: OfflineDownload) -> PlaybackResource? {
     guard download.accountID == accountID,
       downloads.contains(where: { $0.id == download.id }),
@@ -295,8 +314,8 @@ package final class DownloadCoordinator: SessionGuardedCoordinator {
 
   /// AVFoundation is the final authority after a file has passed the startup
   /// check. If it later rejects that exact local resource, remove it from the
-  /// current account immediately so an explicit Play Again can use the normal
-  /// online resolution path instead of reopening the same damaged file.
+  /// current account immediately so bounded online recovery does not reopen
+  /// the same damaged file.
   package func invalidatePlaybackResource(_ id: OfflineDownloadID) {
     guard id.accountID == accountID,
       let download = downloads.first(where: { $0.id == id })

@@ -62,8 +62,8 @@ private final class RouterRig {
   await rig.play()
   rig.session.account = nil
 
-  #expect(!rig.router.perform(.next))
-  #expect(!rig.router.perform(.previous))
+  #expect(!rig.router.perform(AppPlaybackCommand.next))
+  #expect(!rig.router.perform(AppPlaybackCommand.previous))
 }
 
 @Test @MainActor func steppingPastTheEndOfTheQueueIsRefused() async {
@@ -71,8 +71,8 @@ private final class RouterRig {
   await rig.play([101])
 
   // A single-track sequential queue has nowhere to step.
-  #expect(!rig.router.perform(.next))
-  #expect(!rig.router.perform(.previous))
+  #expect(!rig.router.perform(AppPlaybackCommand.next))
+  #expect(!rig.router.perform(AppPlaybackCommand.previous))
 }
 
 @Test @MainActor func steppingIsRefusedWhileAWriteOwnsTheArbiter() async {
@@ -83,7 +83,8 @@ private final class RouterRig {
   let write = rig.arbiter.begin(name: "Like", effect: .write)
   #expect(write != nil)
 
-  #expect(!rig.router.perform(.next))
+  #expect(!rig.router.canPerform(AppPlaybackCommand.next))
+  #expect(!rig.router.perform(AppPlaybackCommand.next))
   #expect(await rig.transport.callCount() == 1)
 }
 
@@ -174,4 +175,63 @@ private final class RouterRig {
 
   #expect(surface.onCommand?(.next) == .failed)
   withExtendedLifetime(coordinator) {}
+}
+
+// MARK: - App and Dock command route
+
+@Test @MainActor func appToggleUsesTheSameLivePlaybackState() async {
+  let rig = RouterRig()
+  await rig.play()
+
+  #expect(rig.router.canPerform(.togglePlayback))
+  #expect(rig.router.perform(.togglePlayback))
+  #expect(rig.playback.phase == .paused)
+  #expect(rig.router.perform(.togglePlayback))
+  #expect(rig.playback.phase == .playing)
+}
+
+@Test @MainActor func appModeCommandMutatesOnlyPlaybackControllersMode() {
+  let rig = RouterRig()
+
+  #expect(rig.router.perform(.setMode(.shuffle)))
+  #expect(rig.playback.playbackMode == .shuffle)
+  #expect(rig.router.snapshot().trackID == nil)
+}
+
+@Test @MainActor func appLikeToggleRefusesUnknownAndArbiterRejection() async {
+  let rig = RouterRig()
+  await rig.play()
+
+  #expect(!rig.router.canPerform(.toggleLiked))
+  #expect(!rig.router.perform(.toggleLiked))
+
+  #expect(rig.router.perform(SystemMediaCommand.setLiked(true)))
+  await rig.library.settleForTesting()
+  #expect(rig.router.canPerform(.toggleLiked))
+
+  let blocker = rig.arbiter.begin(name: "Another write", effect: .write)!
+  #expect(!rig.router.canPerform(.toggleLiked))
+  #expect(!rig.router.perform(.toggleLiked))
+  #expect(rig.arbiter.end(blocker, outcome: .applied) == .applied)
+}
+
+@Test @MainActor func appPreviousAndNextReportRealQueueBoundaries() async {
+  let rig = RouterRig()
+  await rig.play([101])
+  #expect(!rig.router.canPerform(.previous))
+  #expect(!rig.router.canPerform(.next))
+
+  await rig.transport.setSongURL(.success(makeResolvedAsset(songID: 101)))
+  rig.playback.play(
+    tracks: makeTracks([101, 202]),
+    startIndex: 0,
+    context: .dailyRecommendations,
+    session: rig.session
+  )
+  await rig.playback.settleForTesting()
+  await rig.transport.setSongURL(.success(makeResolvedAsset(songID: 202)))
+
+  #expect(rig.router.perform(AppPlaybackCommand.next))
+  await rig.playback.settleForTesting()
+  #expect(rig.playback.currentTrack?.id == 202)
 }

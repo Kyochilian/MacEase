@@ -98,6 +98,19 @@ package protocol NeteaseTransporting: Sendable {
     credential: NeteaseCredential
   ) async throws -> SongURLResolution
 
+  func scrobbleStart(
+    songID: Int64,
+    context: ScrobbleContext,
+    credential: NeteaseCredential
+  ) async throws
+
+  func scrobbleFinish(
+    songID: Int64,
+    context: ScrobbleContext,
+    playedSeconds: Int,
+    credential: NeteaseCredential
+  ) async throws
+
   // MARK: - Sign-in, sign-out and refresh
 
   func beginQRLogin() async throws -> QRLoginSession

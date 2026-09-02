@@ -107,6 +107,8 @@ actor FakeTransport: NeteaseTransporting {
     case renamePlaylist(Int64, String)
     case setPlaylistSubscribed(Bool, Int64)
     case resolveSongURL(Int64, PlaybackQuality)
+    case scrobbleStart(Int64, ScrobbleContext)
+    case scrobbleFinish(Int64, ScrobbleContext, Int)
     case beginQRLogin
     case pollQRLogin(String)
     case sendLoginCode(String)
@@ -161,6 +163,7 @@ actor FakeTransport: NeteaseTransporting {
   var songURLResult: Result<SongURLResolution, any Error> = .success(
     .unavailable(itemCode: 404, fee: nil)
   )
+  var songURLResults: [Result<SongURLResolution, any Error>] = []
   var lyricsResult: Result<Lyrics, any Error> = .success(.none)
 
   func setLyrics(_ value: Result<Lyrics, any Error>) { lyricsResult = value }
@@ -303,7 +306,13 @@ actor FakeTransport: NeteaseTransporting {
   }
   func setRecords(_ value: Result<[PlayRecordEntry], any Error>) { recordsResult = value }
   func setWriteResult(_ value: Result<Void, any Error>) { writeResult = value }
-  func setSongURL(_ value: Result<SongURLResolution, any Error>) { songURLResult = value }
+  func setSongURL(_ value: Result<SongURLResolution, any Error>) {
+    songURLResults = []
+    songURLResult = value
+  }
+  func setSongURLs(_ values: [Result<SongURLResolution, any Error>]) {
+    songURLResults = values
+  }
 
   func recordedCalls() -> [Call] { calls }
   func callCount() -> Int { calls.count }
@@ -697,7 +706,29 @@ actor FakeTransport: NeteaseTransporting {
     credential: NeteaseCredential
   ) async throws -> SongURLResolution {
     await record(.resolveSongURL(songID, quality))
+    if !songURLResults.isEmpty {
+      return try songURLResults.removeFirst().get()
+    }
     return try songURLResult.get()
+  }
+
+  func scrobbleStart(
+    songID: Int64,
+    context: ScrobbleContext,
+    credential: NeteaseCredential
+  ) async throws {
+    await record(.scrobbleStart(songID, context))
+    try writeResult.get()
+  }
+
+  func scrobbleFinish(
+    songID: Int64,
+    context: ScrobbleContext,
+    playedSeconds: Int,
+    credential: NeteaseCredential
+  ) async throws {
+    await record(.scrobbleFinish(songID, context, playedSeconds))
+    try writeResult.get()
   }
 }
 
@@ -798,6 +829,8 @@ final class FakeAudioOutput: AudioOutput {
   var currentPositionSeconds: Double?
 
   var onPositionUpdate: (@MainActor (Double) -> Void)?
+  var onPlaybackStateChanged:
+    (@MainActor (AudioOutputPlaybackState) -> Void)?
   var onPlayedToEnd: (@MainActor () -> Void)?
   var onFailure: (@MainActor (AudioOutputFailure) -> Void)?
 
@@ -805,12 +838,14 @@ final class FakeAudioOutput: AudioOutput {
   var prepareResult: Result<AudioAssetInfo, any Error> = .success(
     AudioAssetInfo(isPlayable: true, durationSeconds: 200)
   )
+  var prepareResults: [Result<AudioAssetInfo, any Error>] = []
   private(set) var preparedURLs: [URL] = []
   private(set) var preparedResources: [PlaybackResource] = []
   private(set) var isPlaying = false
   private(set) var seeks: [Double] = []
   private(set) var teardownCount = 0
   private(set) var loadedURL: URL?
+  var automaticallyReportsPlaying = true
   private(set) var prepareIsBlocked = false
   private var generation: UInt64 = 0
   private var shouldBlockNextPrepare = false
@@ -836,14 +871,24 @@ final class FakeAudioOutput: AudioOutput {
     }
     try Task.checkCancellation()
     guard self.generation == generation else { throw CancellationError() }
-    let result = try prepareResult.get()
+    let result = try (
+      prepareResults.isEmpty ? prepareResult : prepareResults.removeFirst()
+    ).get()
     loadedURL = url
     return result
   }
 
-  func play() { isPlaying = true }
+  func play() {
+    isPlaying = true
+    if automaticallyReportsPlaying {
+      onPlaybackStateChanged?(.playing)
+    }
+  }
 
-  func pause() { isPlaying = false }
+  func pause() {
+    isPlaying = false
+    onPlaybackStateChanged?(.notPlaying)
+  }
 
   func seek(to seconds: Double) async throws {
     seeks.append(seconds)
@@ -881,8 +926,16 @@ final class FakeAudioOutput: AudioOutput {
     onPositionUpdate?(seconds)
   }
 
+  func reportPlaybackState(_ state: AudioOutputPlaybackState) {
+    onPlaybackStateChanged?(state)
+  }
+
   func reportFailure(_ detail: String) {
     onFailure?(.itemPlayback(detail))
+  }
+
+  func reportFailure(_ failure: AudioOutputFailure) {
+    onFailure?(failure)
   }
 
   func reportPlayedToEnd() {
@@ -892,15 +945,17 @@ final class FakeAudioOutput: AudioOutput {
 
 func makeResolvedAsset(
   songID: Int64,
-  urlString: String = "https://m8.music.126.net/track.mp3"
+  urlString: String = "https://m8.music.126.net/track.mp3",
+  requestedQuality: PlaybackQuality = .standard,
+  actualQuality: String? = nil
 ) -> SongURLResolution {
   .resolved(
     ResolvedAudioAsset(
       songID: songID,
       url: URL(string: urlString)!,
       sourceScheme: "https",
-      requestedQuality: .standard,
-      actualQuality: "standard",
+      requestedQuality: requestedQuality,
+      actualQuality: actualQuality ?? requestedQuality.rawValue,
       format: "mp3",
       bitRate: 128_000,
       byteCount: 3_000_000,

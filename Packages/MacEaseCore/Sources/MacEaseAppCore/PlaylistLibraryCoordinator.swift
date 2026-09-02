@@ -302,6 +302,10 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
   /// auto-refreshed. Any failure is reported and stops.
   /// Returns whether the request was started, so a system control can report
   /// what actually happened instead of assuming it worked.
+  package func canSetLiked(session: any SessionProviding) -> Bool {
+    session.account != nil && arbiter.canBegin(effect: .write)
+  }
+
   @discardableResult
   package func setLiked(
     _ liked: Bool,

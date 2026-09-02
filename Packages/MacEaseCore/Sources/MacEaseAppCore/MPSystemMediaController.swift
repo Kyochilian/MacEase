@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import MediaPlayer
 
@@ -52,12 +53,31 @@ package final class MPSystemMediaController: SystemMediaControlling {
   }
 
   package func publish(_ snapshot: PlaybackSnapshot) {
+    publish(snapshot, artwork: nil)
+  }
+
+  package func publishArtwork(
+    _ artwork: NSImage,
+    for snapshot: PlaybackSnapshot
+  ) {
+    publish(snapshot, artwork: artwork)
+  }
+
+  private func publish(_ snapshot: PlaybackSnapshot, artwork: NSImage?) {
     lastPublished = snapshot
 
     var info: [String: Any] = [:]
     info[MPMediaItemPropertyTitle] = snapshot.title ?? ""
     if let artist = snapshot.artist {
       info[MPMediaItemPropertyArtist] = artist
+    }
+    if let albumTitle = snapshot.albumTitle {
+      info[MPMediaItemPropertyAlbumTitle] = albumTitle
+    }
+    if let artwork {
+      info[MPMediaItemPropertyArtwork] = MPMediaItemArtwork(
+        boundsSize: artwork.size
+      ) { _ in artwork }
     }
     if let duration = snapshot.durationSeconds {
       info[MPMediaItemPropertyPlaybackDuration] = duration
@@ -67,9 +87,6 @@ package final class MPSystemMediaController: SystemMediaControlling {
     if let trackID = snapshot.trackID {
       info[MPMediaItemPropertyPersistentID] = UInt64(bitPattern: trackID)
     }
-    // Album and artwork are omitted rather than blanked: the queue's track
-    // model has neither, and an empty string reads as "this release has no
-    // name" rather than "MacEase does not know it yet".
     infoCenter.nowPlayingInfo = info
     infoCenter.playbackState = playbackState(for: snapshot.state)
 

@@ -28,7 +28,7 @@ public struct NeteaseServiceError: Error, Equatable, Sendable {
   }
 }
 
-public enum PlaybackQuality: String, CaseIterable, Sendable, Codable {
+public enum PlaybackQuality: String, CaseIterable, Hashable, Sendable, Codable {
   case standard
   case higher
   case exhigh

@@ -11,16 +11,25 @@ package struct AudioAssetInfo: Equatable, Sendable {
   }
 }
 
+package enum AudioOutputPlaybackState: Equatable, Sendable {
+  case playing
+  case notPlaying
+}
+
 /// Failures produced by the AVFoundation boundary for which rebuilding the
 /// asset or item from a freshly resolved URL is meaningful.
 package enum AudioOutputFailure: Error, Equatable, Sendable {
   case assetLoad(String)
   case itemPlayback(String)
+  /// A credential-free CDN response proving that this signed URL is dead.
+  case resourceUnavailable(statusCode: Int)
 
   package var diagnostic: String {
     switch self {
     case .assetLoad(let detail): "asset load: \(detail)"
     case .itemPlayback(let detail): "item playback: \(detail)"
+    case .resourceUnavailable(let statusCode):
+      "resource unavailable: HTTP \(statusCode)"
     }
   }
 }
@@ -36,6 +45,10 @@ package protocol AudioOutput: AnyObject {
   var currentPositionSeconds: Double? { get }
 
   var onPositionUpdate: (@MainActor (Double) -> Void)? { get set }
+  /// Tracks AVPlayer's actual time-control state, including buffering gaps.
+  var onPlaybackStateChanged: (@MainActor (AudioOutputPlaybackState) -> Void)? {
+    get set
+  }
   var onPlayedToEnd: (@MainActor () -> Void)? { get set }
   /// Reports a failure of the loaded item after playback began. The payload
   /// is a short, credential-free diagnostic.
@@ -59,6 +72,7 @@ package final class AVPlayerAudioOutput: AudioOutput {
   private var loadedAsset: AVURLAsset?
   private var periodicObserver: Any?
   private var itemStatusObservation: NSKeyValueObservation?
+  private var timeControlStatusObservation: NSKeyValueObservation?
   private var playedToEndObserver: NSObjectProtocol?
   private var rangeLoader: AudioAssetResourceLoader?
   private var pinnedCacheKey: AudioCacheKey?
@@ -66,6 +80,8 @@ package final class AVPlayerAudioOutput: AudioOutput {
   private let rangePipeline: AudioRangePipeline?
 
   package var onPositionUpdate: (@MainActor (Double) -> Void)?
+  package var onPlaybackStateChanged:
+    (@MainActor (AudioOutputPlaybackState) -> Void)?
   package var onPlayedToEnd: (@MainActor () -> Void)?
   package var onFailure: (@MainActor (AudioOutputFailure) -> Void)?
 
@@ -132,8 +148,9 @@ package final class AVPlayerAudioOutput: AudioOutput {
     } catch {
       try Task.checkCancellation()
       guard self.generation == generation else { throw CancellationError() }
+      let rangeFailure = rangeLoader?.reportedFailure
       teardown()
-      throw AudioOutputFailure.assetLoad(Self.failureDetail(error))
+      throw rangeFailure ?? AudioOutputFailure.assetLoad(Self.failureDetail(error))
     }
     try Task.checkCancellation()
     guard self.generation == generation else { throw CancellationError() }
@@ -178,6 +195,8 @@ package final class AVPlayerAudioOutput: AudioOutput {
     rangeLoader = nil
     itemStatusObservation?.invalidate()
     itemStatusObservation = nil
+    timeControlStatusObservation?.invalidate()
+    timeControlStatusObservation = nil
     if let playedToEndObserver {
       NotificationCenter.default.removeObserver(playedToEndObserver)
       self.playedToEndObserver = nil
@@ -202,13 +221,26 @@ package final class AVPlayerAudioOutput: AudioOutput {
     of player: AVPlayer,
     generation: UInt64
   ) {
+    timeControlStatusObservation = player.observe(
+      \.timeControlStatus,
+      options: [.new]
+    ) { [weak self] player, _ in
+      let state: AudioOutputPlaybackState =
+        player.timeControlStatus == .playing ? .playing : .notPlaying
+      Task { @MainActor [weak self] in
+        guard let self, self.generation == generation else { return }
+        self.onPlaybackStateChanged?(state)
+      }
+    }
     itemStatusObservation = item.observe(\.status, options: [.new]) {
       [weak self] item, _ in
       guard item.status == .failed else { return }
       let detail = item.error.map(Self.failureDetail) ?? "unknown"
       Task { @MainActor [weak self] in
         guard let self, self.generation == generation else { return }
-        self.onFailure?(.itemPlayback(detail))
+        self.onFailure?(
+          self.rangeLoader?.reportedFailure ?? .itemPlayback(detail)
+        )
       }
     }
     playedToEndObserver = NotificationCenter.default.addObserver(

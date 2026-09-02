@@ -19,6 +19,18 @@ package enum PlaybackExpiryPolicy {
   }
 }
 
+extension PlaybackQuality {
+  /// The endpoint's five supported levels, best to least expensive. Recovery
+  /// begins at the selected value and never climbs above it.
+  package var fallbackSequence: [PlaybackQuality] {
+    let descending: [PlaybackQuality] = [
+      .hires, .lossless, .exhigh, .higher, .standard,
+    ]
+    guard let start = descending.firstIndex(of: self) else { return [self] }
+    return Array(descending[start...])
+  }
+}
+
 /// The minimum state needed to rebuild a short-lived playback asset.
 package struct PlaybackRecoverySnapshot: Equatable, Sendable {
   package let songID: Int64

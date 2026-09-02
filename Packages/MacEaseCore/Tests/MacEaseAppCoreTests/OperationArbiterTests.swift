@@ -53,6 +53,24 @@ import Testing
   #expect(arbiter.begin(name: "Like", effect: .write) != nil)
 }
 
+@Test @MainActor func feedbackSettlesBesideAnAdmittedReadButBlocksNewWork() {
+  let arbiter = OperationArbiter()
+  let playback = arbiter.begin(name: "Next song URL", effect: .playbackResolution)!
+
+  let feedback = arbiter.begin(name: "Scrobble finish", effect: .feedback)!
+  #expect(feedback.kind == .exclusive)
+  #expect(arbiter.active?.effect == .feedback)
+  #expect(arbiter.activeReadCount == 1)
+  #expect(arbiter.begin(name: "Discovery", effect: .read) == nil)
+  #expect(arbiter.begin(name: "Like", effect: .write) == nil)
+  #expect(arbiter.begin(name: "Sign out", effect: .sessionMutation) == nil)
+
+  arbiter.markRequestSent(feedback)
+  #expect(arbiter.abandoningLosesTheOutcome(feedback))
+  #expect(arbiter.end(feedback, outcome: .applied) == .applied)
+  #expect(arbiter.end(playback, outcome: .applied) == .applied)
+}
+
 @Test @MainActor func theCeilingNeverRefusesEveryRead() {
   // Configuration must not be able to deadlock reads entirely.
   let arbiter = OperationArbiter(maximumConcurrentReads: 0)
