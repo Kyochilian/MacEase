@@ -1363,6 +1363,11 @@ public actor NeteaseSession {
     guard (200..<300).contains(response.statusCode) else {
       throw NeteaseServiceError(source: .http, statusCode: response.statusCode)
     }
+    guard data.count <= LyricsParser.maximumResponseBytes else {
+      throw DecodingError.dataCorrupted(
+        .init(codingPath: [], debugDescription: "Lyric response exceeds the size limit")
+      )
+    }
 
     let payload = try JSONDecoder().decode(LyricsPayload.self, from: data)
     guard payload.code == 200 else {
@@ -1373,8 +1378,11 @@ public actor NeteaseSession {
     }
     return LyricsParser.parse(
       lrc: payload.lrc?.lyric,
+      yrc: payload.yrc?.lyric,
       translation: payload.tlyric?.lyric,
-      romanisation: payload.romalrc?.lyric
+      yrcTranslation: payload.ytlrc?.lyric,
+      romanisation: payload.romalrc?.lyric,
+      yrcRomanisation: payload.yromalrc?.lyric
     )
   }
 
@@ -1836,13 +1844,16 @@ private struct LyricsProbePayload: Decodable {
   let uncollected: Bool?
 }
 
-/// The product lyric payload. `tlyric` is the translation and `romalrc` the
-/// romanisation; both are separate LRC documents keyed to the same timeline.
+/// The product lyric payload. `yrc` carries absolute millisecond word timing;
+/// its translation and romanisation companions remain line-timed documents.
 private struct LyricsPayload: Decodable {
   let code: Int
   let lrc: LyricsContent?
+  let yrc: LyricsContent?
   let tlyric: LyricsContent?
+  let ytlrc: LyricsContent?
   let romalrc: LyricsContent?
+  let yromalrc: LyricsContent?
   let nolyric: Bool?
   let uncollected: Bool?
 }

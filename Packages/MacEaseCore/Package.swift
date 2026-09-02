@@ -13,6 +13,9 @@ let package = Package(
     .executable(name: "GateCPlaybackProbe", targets: ["GateCPlaybackProbe"]),
     .executable(name: "GatePhase2PlaylistProbe", targets: ["GatePhase2PlaylistProbe"]),
   ],
+  dependencies: [
+    .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.9.6"),
+  ],
   targets: [
     .target(name: "NeteaseKit"),
     // App state, coordinators and the operation arbiter. It reaches system
@@ -30,7 +33,17 @@ let package = Package(
     ),
     .executableTarget(
       name: "MacEase",
-      dependencies: ["MacEaseSession", "MacEaseAppCore", "NeteaseKit"]
+      dependencies: [
+        "MacEaseSession",
+        "MacEaseAppCore",
+        "NeteaseKit",
+        .product(name: "Sparkle", package: "Sparkle"),
+      ],
+      linkerSettings: [
+        .unsafeFlags([
+          "-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks",
+        ])
+      ]
     ),
     .executableTarget(
       name: "GateALyricsProbe",

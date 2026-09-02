@@ -96,6 +96,20 @@ package final class PlaybackController {
   package private(set) var sleepTimer: SleepTimerState = .off
   package private(set) var trackName: String?
   package private(set) var positionSeconds: Double = 0
+  /// A read-through position for animation-rate UI such as YRC highlighting.
+  /// It comes from the same AudioOutput clock as `positionSeconds`; it is not
+  /// another cursor and falls back to the observed snapshot while inactive.
+  package var presentationPositionSeconds: Double {
+    guard phase == .playing,
+      let live = output.currentPositionSeconds,
+      live.isFinite,
+      live >= 0
+    else { return positionSeconds }
+    if let durationSeconds, durationSeconds.isFinite, durationSeconds >= 0 {
+      return min(live, durationSeconds)
+    }
+    return live
+  }
   /// Bumped whenever position moved for a reason other than the clock
   /// advancing: a seek, a newly loaded item, or a teardown. `PlaybackSnapshot`
   /// carries it so a system surface that extrapolates elapsed time knows when

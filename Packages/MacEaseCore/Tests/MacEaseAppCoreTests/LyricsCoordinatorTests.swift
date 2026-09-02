@@ -93,6 +93,30 @@ private let document = Lyrics.lines([LyricLine(timeSeconds: 1, text: "One")])
   await rig.lyrics.settleForTesting()
 }
 
+@Test @MainActor func aLateLyricResponseCannotReplaceTheNewTracksDocument() async {
+  let rig = LyricsRig()
+  let old = Lyrics.lines([LyricLine(timeSeconds: 1, text: "Old")])
+  let new = Lyrics.lines([LyricLine(timeSeconds: 2, text: "New")])
+  await rig.transport.setLyrics([.success(old), .success(new)])
+  await rig.transport.gate.close()
+  let tracks = makeTracks([1, 2])
+
+  rig.lyrics.setPanelVisible(true, track: tracks[0], session: rig.session)
+  while await rig.transport.gate.arrivalCount() < 1 { await Task.yield() }
+  rig.lyrics.load(track: tracks[1], session: rig.session)
+  while await rig.transport.gate.arrivalCount() < 2 { await Task.yield() }
+  await rig.transport.gate.releaseNewestArrival()
+  await rig.lyrics.settleForTesting()
+
+  #expect(rig.lyrics.content == .document(new))
+  #expect(rig.lyrics.status.hasSuffix("for track-2"))
+
+  await rig.transport.gate.open()
+  for _ in 0..<5 { await Task.yield() }
+  #expect(rig.lyrics.content == .document(new))
+  #expect(rig.lyrics.status.hasSuffix("for track-2"))
+}
+
 @Test @MainActor func aSongWithoutLyricsIsAnAnswerRatherThanAFailure() async {
   let rig = LyricsRig()
   await rig.transport.setLyrics(.success(.none))
@@ -168,11 +192,18 @@ private let document = Lyrics.lines([LyricLine(timeSeconds: 1, text: "One")])
   #expect(rig.arbiter.activeReadCount == 0)
 }
 
-@Test @MainActor func theTranslationPreferenceSurvivesTheCoordinator() {
+@Test @MainActor func lyricDisplayPreferencesPersistInTheSingleSettingsSource() {
   let suite = UserDefaults(suiteName: "macease.tests.\(UUID().uuidString)") ?? .standard
   let settings = AppSettings(defaults: suite)
   #expect(settings.showsLyricTranslation)
+  #expect(!settings.showsLyricRomanisation)
+  #expect(settings.usesVerbatimLyrics)
 
   settings.showsLyricTranslation = false
-  #expect(AppSettings(defaults: suite).showsLyricTranslation == false)
+  settings.showsLyricRomanisation = true
+  settings.usesVerbatimLyrics = false
+  let restored = AppSettings(defaults: suite)
+  #expect(!restored.showsLyricTranslation)
+  #expect(restored.showsLyricRomanisation)
+  #expect(!restored.usesVerbatimLyrics)
 }

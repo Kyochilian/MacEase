@@ -34,6 +34,7 @@ struct MacEaseApp: App {
   @State private var scrobble: ScrobbleCoordinator
   @State private var arbiter: OperationArbiter
   @State private var settings: AppSettings
+  @State private var updater: AppUpdater
   @State private var artwork: ArtworkLoader
   /// Temporary, evictable HTTP ranges. The player owns the active pin; the
   /// settings page only observes and maintains the same store.
@@ -65,6 +66,7 @@ struct MacEaseApp: App {
     // One arbiter protects writes and destructive session mutations.
     let arbiter = OperationArbiter()
     let settings = AppSettings()
+    let updater = AppUpdater()
     let artwork = ArtworkLoader(
       diskCapacityBytes: Int(settings.imageCacheLimitBytes)
     )
@@ -235,6 +237,7 @@ struct MacEaseApp: App {
     _scrobble = State(initialValue: scrobble)
     _arbiter = State(initialValue: arbiter)
     _settings = State(initialValue: settings)
+    _updater = State(initialValue: updater)
     _artwork = State(initialValue: artwork)
     _audioRanges = State(initialValue: audioCache.pipeline)
     _downloads = State(initialValue: downloads)
@@ -483,6 +486,7 @@ struct MacEaseApp: App {
           }
           SettingsView(
             settings: settings,
+            updater: updater,
             artwork: artwork,
             audioRanges: audioRanges,
             downloads: downloads
@@ -525,6 +529,13 @@ struct MacEaseApp: App {
     }
     .defaultSize(width: 980, height: 760)
     .commands {
+      CommandGroup(after: .appInfo) {
+        Button("Check for Updates…") {
+          updater.checkForUpdates()
+        }
+        .disabled(!updater.canCheckForUpdates)
+      }
+
       CommandMenu("Playback") {
         Button("Play/Pause") {
           _ = mediaRouter.perform(.togglePlayback)

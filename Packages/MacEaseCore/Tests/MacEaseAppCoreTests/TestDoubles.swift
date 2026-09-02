@@ -72,6 +72,13 @@ actor RequestGate {
     for continuation in pending { continuation.resume() }
   }
 
+  /// Releases only the newest blocked arrival while the gate stays closed.
+  /// This lets a supersession test make the old request finish last.
+  func releaseNewestArrival() {
+    guard let continuation = waiters.popLast() else { return }
+    continuation.resume()
+  }
+
   func arrivalCount() -> Int { arrivals }
 
   func pass() async {
@@ -165,8 +172,10 @@ actor FakeTransport: NeteaseTransporting {
   )
   var songURLResults: [Result<SongURLResolution, any Error>] = []
   var lyricsResult: Result<Lyrics, any Error> = .success(.none)
+  var lyricsResults: [Result<Lyrics, any Error>] = []
 
   func setLyrics(_ value: Result<Lyrics, any Error>) { lyricsResult = value }
+  func setLyrics(_ values: [Result<Lyrics, any Error>]) { lyricsResults = values }
 
   var qrSessionResult: Result<QRLoginSession, any Error> = .success(
     QRLoginSession(key: "key", url: URL(string: "https://music.163.com/login?codekey=key")!)
@@ -322,6 +331,19 @@ actor FakeTransport: NeteaseTransporting {
     await gate.pass()
   }
 
+  /// Reserves a FIFO answer before the gate suspends the request. When several
+  /// waiters are released together, executor resume order must not decide
+  /// which request receives which programmed response.
+  private func record<Response>(
+    _ call: Call,
+    reserving response: () -> Result<Response, any Error>
+  ) async throws -> Response {
+    calls.append(call)
+    let reserved = response()
+    await gate.pass()
+    return try reserved.get()
+  }
+
   func accountStatus(
     credential: NeteaseCredential
   ) async throws -> AccountSessionState {
@@ -372,8 +394,9 @@ actor FakeTransport: NeteaseTransporting {
   }
 
   func lyrics(songID: Int64, credential: NeteaseCredential) async throws -> Lyrics {
-    await record(.lyrics(songID))
-    return try lyricsResult.get()
+    try await record(.lyrics(songID)) {
+      lyricsResults.isEmpty ? lyricsResult : lyricsResults.removeFirst()
+    }
   }
 
   func playRecords(
@@ -566,10 +589,13 @@ actor FakeTransport: NeteaseTransporting {
     offset: Int,
     credential: NeteaseCredential
   ) async throws -> SearchPage {
-    await record(.search(keywords, scope, offset: offset))
-    if let searchError { throw searchError }
-    guard !searchPages.isEmpty else { throw Unprogrammed(call: "search") }
-    return searchPages.removeFirst()
+    try await record(.search(keywords, scope, offset: offset)) {
+      if let searchError { return .failure(searchError) }
+      guard !searchPages.isEmpty else {
+        return .failure(Unprogrammed(call: "search"))
+      }
+      return .success(searchPages.removeFirst())
+    }
   }
 
   func searchSuggestions(

@@ -50,7 +50,15 @@ struct LyricsView: View {
   @ViewBuilder private func body(for content: LyricsCoordinator.Content) -> some View {
     switch content {
     case .document(let document):
-      scroller(document)
+      TimelineView(
+        .animation(
+          minimumInterval: 1.0 / 30.0,
+          paused: playback.phase != .playing || !settings.usesVerbatimLyrics
+            || document.lines.allSatisfy(\.words.isEmpty)
+        )
+      ) { _ in
+        scroller(document, at: playback.presentationPositionSeconds)
+      }
     case .loading:
       ProgressView()
         .controlSize(.small)
@@ -83,13 +91,13 @@ struct LyricsView: View {
     .padding(12)
   }
 
-  @ViewBuilder private func scroller(_ document: Lyrics) -> some View {
-    let current = document.lineIndex(at: playback.positionSeconds)
+  @ViewBuilder private func scroller(_ document: Lyrics, at position: Double) -> some View {
+    let current = document.lineIndex(at: position)
     ScrollViewReader { proxy in
       ScrollView {
         LazyVStack(alignment: .leading, spacing: 10) {
           ForEach(Array(document.lines.enumerated()), id: \.offset) { index, entry in
-            row(entry, isCurrent: index == current)
+            row(entry, isCurrent: index == current, at: position)
               .id(index)
           }
         }
@@ -106,12 +114,26 @@ struct LyricsView: View {
     }
   }
 
-  @ViewBuilder private func row(_ entry: LyricLine, isCurrent: Bool) -> some View {
+  @ViewBuilder private func row(
+    _ entry: LyricLine,
+    isCurrent: Bool,
+    at position: Double
+  ) -> some View {
     let text: String = entry.text.isEmpty ? " " : entry.text
     VStack(alignment: .leading, spacing: 3) {
-      Text(text)
-        .font(isCurrent ? .title3.weight(.semibold) : .body)
-        .foregroundStyle(isCurrent ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
+      if settings.showsLyricRomanisation, let romanisation = entry.romanisation {
+        Text(romanisation)
+          .font(.caption)
+          .foregroundStyle(.secondary)
+      }
+      if isCurrent, settings.usesVerbatimLyrics, !entry.words.isEmpty {
+        verbatimText(entry, at: position)
+          .font(.title3.weight(.semibold))
+      } else {
+        Text(text)
+          .font(isCurrent ? .title3.weight(.semibold) : .body)
+          .foregroundStyle(isCurrent ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
+      }
       if settings.showsLyricTranslation, let translation = entry.translation {
         Text(translation)
           .font(.caption)
@@ -123,6 +145,23 @@ struct LyricsView: View {
       // Seeking is local and issues no request, so a tapped line is the
       // cheapest way to move within a track.
       playback.seek(to: entry.timeSeconds)
+    }
+  }
+
+  /// One wrapping Text keeps NetEase's intentional spaces intact while each
+  /// YRC word receives its state from the one playback clock.
+  private func verbatimText(_ entry: LyricLine, at seconds: Double) -> Text {
+    let current = entry.wordIndex(at: seconds)
+    return entry.words.enumerated().reduce(Text(verbatim: "")) { text, pair in
+      let (index, word) = pair
+      let color: Color = if index == current {
+        .accentColor
+      } else if seconds >= word.endSeconds {
+        .primary
+      } else {
+        .secondary
+      }
+      return text + Text(verbatim: word.text).foregroundColor(color)
     }
   }
 }

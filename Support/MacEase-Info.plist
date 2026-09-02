@@ -18,6 +18,8 @@
   <string>0.1</string>
   <key>CFBundleVersion</key>
   <string>1</string>
+  <key>LSApplicationCategoryType</key>
+  <string>public.app-category.music</string>
   <key>LSMinimumSystemVersion</key>
   <string>15.0</string>
   <key>NSAppTransportSecurity</key>
@@ -33,5 +35,7 @@
       </dict>
     </dict>
   </dict>
+  <key>SUEnableInstallerLauncherService</key>
+  <true/>
 </dict>
 </plist>

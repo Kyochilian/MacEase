@@ -65,6 +65,179 @@ private let okResponse = HTTPURLResponse(
   )
 }
 
+@Test func lyricsPreferValidatedYRCAndItsCompanionDocuments() throws {
+  let lyrics = try NeteaseSession.classifyLyrics(
+    data: Data(try #require(
+      """
+      {
+        "code": 200,
+        "lrc": {"lyric": "[00:01.00]LRC fallback\\n"},
+        "yrc": {"lyric": "{\\\"t\\\":0}\\n[1000,1200](1000,500,0)One (1500,700,0)line\\n[3000,800](3000,800,0)Two"},
+        "tlyric": {"lyric": "[00:01.00]ordinary translation"},
+        "ytlrc": {"lyric": "[00:01.12]逐字翻译\\n[00:03.00]第二行"},
+        "romalrc": {"lyric": "[00:01.00]ordinary romanisation"},
+        "yromalrc": {"lyric": "[00:01.08]ichi\\n[00:03.00]ni"}
+      }
+      """.data(using: .utf8)
+    )),
+    response: okResponse
+  )
+
+  #expect(lyrics.lines.count == 2)
+  #expect(lyrics.lines[0].timeSeconds == 1)
+  #expect(lyrics.lines[0].text == "One line")
+  #expect(lyrics.lines[0].translation == "逐字翻译")
+  #expect(lyrics.lines[0].romanisation == "ichi")
+  #expect(
+    lyrics.lines[0].words == [
+      LyricWord(startSeconds: 1, durationSeconds: 0.5, text: "One "),
+      LyricWord(startSeconds: 1.5, durationSeconds: 0.7, text: "line"),
+    ]
+  )
+  #expect(lyrics.lines[1].text == "Two")
+  #expect(lyrics.lines[1].translation == "第二行")
+  #expect(lyrics.lines[1].romanisation == "ni")
+}
+
+@Test func lyricsWordSelectionUsesHalfOpenTimingBoundaries() {
+  let line = LyricLine(
+    timeSeconds: 1,
+    text: "ABC",
+    words: [
+      LyricWord(startSeconds: 1, durationSeconds: 0.5, text: "A"),
+      LyricWord(startSeconds: 1.5, durationSeconds: 0.25, text: "B"),
+      LyricWord(startSeconds: 1.75, durationSeconds: 0.25, text: "C"),
+    ]
+  )
+
+  #expect(line.wordIndex(at: 0.999) == nil)
+  #expect(line.wordIndex(at: 1) == 0)
+  #expect(line.wordIndex(at: 1.499) == 0)
+  #expect(line.wordIndex(at: 1.5) == 1)
+  #expect(line.wordIndex(at: 1.75) == 2)
+  #expect(line.wordIndex(at: 2) == nil)
+  #expect(line.wordIndex(at: .nan) == nil)
+  #expect(line.wordIndex(at: .infinity) == nil)
+  #expect(line.wordIndex(at: -.infinity) == nil)
+}
+
+@Test func blankAndMalformedYRCAlwaysFallsBackToTheCompleteLRC() {
+  let malformed = [
+    " ",
+    "[-1,1000](0,500,0)negative line",
+    "[1000,-1](1000,500,0)negative duration",
+    "[1000,1000](-1,500,0)negative",
+    "[9223372036854775807,1](9223372036854775807,1,0)line end overflow",
+    "[1000,9223372036854775807](1000,1,0)duration overflow",
+    "[1000,1000](9223372036854775807,1,0)word end overflow",
+    "[1000,1000](1000,500,0broken",
+    "[1000,1000(1000,500,0)missing line bracket",
+    "[2000,500](2000,500,0)later\n[1000,500](1000,500,0)earlier",
+    "[1000,1000](1000,800,0)first(1500,400,0)overlap",
+    "[1000,1000](1500,400,0)later(1000,400,0)out of order",
+    "[1000,1000](1000,1000,0)first\n[1500,500](1500,500,0)line overlap",
+    "[1000,0](1000,1,0)zero line",
+    "[1000,1000](1000,0,0)zero word",
+    "[1000,1000](900,500,0)outside line",
+    "[1000,1000](1600,500,0)past line end",
+    "[1000,1000](9223372036854775808,1,0)overflow",
+    "{not valid JSON}",
+    "[1000,1000](1000,500,0)",
+  ]
+
+  for yrc in malformed {
+    let lyrics = LyricsParser.parse(
+      lrc: "[00:02.00]Fallback",
+      yrc: yrc,
+      translation: nil,
+      romanisation: nil
+    )
+    #expect(
+      lyrics.lines == [LyricLine(timeSeconds: 2, text: "Fallback")],
+      "unexpected partial YRC for \(yrc)"
+    )
+  }
+}
+
+@Test func oversizedYRCIsRejectedBeforeParsing() {
+  let oversized = String(
+    repeating: "x",
+    count: LyricsParser.maximumDocumentBytes + 1
+  )
+  let lyrics = LyricsParser.parse(
+    lrc: "[00:02.00]Fallback",
+    yrc: oversized,
+    translation: nil,
+    romanisation: nil
+  )
+
+  #expect(lyrics.lines == [LyricLine(timeSeconds: 2, text: "Fallback")])
+}
+
+@Test func everyLyricDocumentHasTheSameResponseSizeBound() {
+  let oversized = String(
+    repeating: "x",
+    count: LyricsParser.maximumDocumentBytes + 1
+  )
+
+  #expect(
+    LyricsParser.parse(
+      lrc: oversized,
+      translation: nil,
+      romanisation: nil
+    ) == .none
+  )
+  let lyrics = LyricsParser.parse(
+    lrc: "[00:02.00]Original",
+    translation: oversized,
+    romanisation: oversized
+  )
+  #expect(lyrics.lines == [LyricLine(timeSeconds: 2, text: "Original")])
+}
+
+@Test func oversizedLyricResponsesAreRejectedBeforeJSONDecoding() {
+  let oversized = Data(
+    repeating: 0x20,
+    count: LyricsParser.maximumResponseBytes + 1
+  )
+
+  #expect(throws: DecodingError.self) {
+    try NeteaseSession.classifyLyrics(data: oversized, response: okResponse)
+  }
+}
+
+@Test func mismatchedVerbatimCompanionsNeverReuseOrGuessLines() {
+  let lyrics = LyricsParser.parse(
+    lrc: "[00:01.00]A\n[00:03.00]B",
+    yrc: "[1000,500](1000,500,0)A\n[3000,500](3000,500,0)B",
+    translation: "[00:01.10]Only match\n[00:09.00]Unrelated",
+    romanisation: "[00:02.50]Too far",
+  )
+
+  #expect(lyrics.lines.map(\.translation) == ["Only match", nil])
+  #expect(lyrics.lines.map(\.romanisation) == [nil, nil])
+}
+
+@Test func japaneseLyricsFillOnlyMissingRomanisationLocally() throws {
+  let lyrics = LyricsParser.parse(
+    lrc: "[00:01.00]こんにちは\n[00:03.00]世界",
+    translation: nil,
+    romanisation: "[00:01.00]checked reading"
+  )
+
+  #expect(lyrics.lines[0].romanisation == "checked reading")
+  let generated = try #require(lyrics.lines[1].romanisation)
+  #expect(!generated.isEmpty)
+  #expect(generated != lyrics.lines[1].text)
+
+  let nonJapanese = LyricsParser.parse(
+    lrc: "[00:01.00]中文歌词",
+    translation: nil,
+    romanisation: nil
+  )
+  #expect(nonJapanese.lines[0].romanisation == nil)
+}
+
 /// The two spellings of one centisecond — `.34` and `.340` — must key to the
 /// same line, or every translation NetEase writes at millisecond precision
 /// would silently vanish.
@@ -154,6 +327,9 @@ private let okResponse = HTTPURLResponse(
   #expect(lyrics.lineIndex(at: 19.9) == 0)
   #expect(lyrics.lineIndex(at: 20) == 1)
   #expect(lyrics.lineIndex(at: 3600) == 2)
+  #expect(lyrics.lineIndex(at: .nan) == nil)
+  #expect(lyrics.lineIndex(at: .infinity) == nil)
+  #expect(lyrics.lineIndex(at: -.infinity) == nil)
   #expect(Lyrics.none.lineIndex(at: 5) == nil)
 }
 

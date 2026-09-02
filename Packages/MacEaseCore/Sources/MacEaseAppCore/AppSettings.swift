@@ -32,6 +32,8 @@ package final class AppSettings {
   private enum Key {
     static let theme = "settings.theme"
     static let lyricTranslation = "settings.lyrics.showsTranslation"
+    static let lyricRomanisation = "settings.lyrics.showsRomanisation"
+    static let verbatimLyrics = "settings.lyrics.verbatim"
     static let imageCacheLimitBytes = "settings.images.diskLimitBytes"
     static let audioCacheLimitBytes = "settings.audio.diskLimitBytes"
   }
@@ -53,6 +55,10 @@ package final class AppSettings {
     // `bool(forKey:)` cannot; the translation default is on.
     showsLyricTranslation =
       defaults.object(forKey: Key.lyricTranslation) as? Bool ?? true
+    showsLyricRomanisation =
+      defaults.object(forKey: Key.lyricRomanisation) as? Bool ?? false
+    usesVerbatimLyrics =
+      defaults.object(forKey: Key.verbatimLyrics) as? Bool ?? true
     imageCacheLimitBytes = Self.storedLimit(
       defaults,
       key: Key.imageCacheLimitBytes,
@@ -71,6 +77,14 @@ package final class AppSettings {
 
   package var showsLyricTranslation: Bool {
     didSet { defaults.set(showsLyricTranslation, forKey: Key.lyricTranslation) }
+  }
+
+  package var showsLyricRomanisation: Bool {
+    didSet { defaults.set(showsLyricRomanisation, forKey: Key.lyricRomanisation) }
+  }
+
+  package var usesVerbatimLyrics: Bool {
+    didSet { defaults.set(usesVerbatimLyrics, forKey: Key.verbatimLyrics) }
   }
 
   package var imageCacheLimitBytes: Int64 {

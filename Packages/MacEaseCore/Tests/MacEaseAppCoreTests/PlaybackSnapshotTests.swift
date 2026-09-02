@@ -97,6 +97,22 @@ private struct SnapshotRig {
   #expect(snapshot.liked == .notLiked)
 }
 
+@Test @MainActor func lyricPresentationReadsTheLiveClockOnlyWhilePlaying() async {
+  let rig = SnapshotRig()
+  await rig.play()
+  rig.output.reportPosition(1)
+  rig.output.currentPositionSeconds = 1.125
+
+  #expect(rig.playback.presentationPositionSeconds == 1.125)
+
+  rig.playback.pause()
+  rig.output.currentPositionSeconds = 99
+  #expect(rig.playback.presentationPositionSeconds == 1)
+
+  #expect(rig.playback.seek(to: 7))
+  #expect(rig.playback.presentationPositionSeconds == 7)
+}
+
 @Test @MainActor func queueBoundariesDisableTheStepsTheyShould() async {
   let rig = SnapshotRig()
   await rig.play([101, 102], startIndex: 0)

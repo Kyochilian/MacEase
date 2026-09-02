@@ -3,11 +3,11 @@ import SwiftUI
 
 /// Settings and maintenance.
 ///
-/// Everything here is local: nothing on this page issues a NetEase request, so
-/// the cache figures are what is on this disk and the theme is what this app
-/// asks the system for.
+/// No control here issues a NetEase request. The update section delegates its
+/// one explicit network action to the app's single Sparkle controller.
 struct SettingsView: View {
   @Bindable var settings: AppSettings
+  @Bindable var updater: AppUpdater
   let artwork: ArtworkLoader
   let audioRanges: AudioRangePipeline?
   let downloads: DownloadCoordinator?
@@ -30,6 +30,28 @@ struct SettingsView: View {
       Section("Lyrics") {
         Toggle("Show translations under each line", isOn: $settings.showsLyricTranslation)
           .help("Applies to the lyrics panel; it never changes what is requested")
+        Toggle("Highlight timed words", isOn: $settings.usesVerbatimLyrics)
+          .help("Uses YRC timing when available and otherwise keeps line highlighting")
+        Toggle("Show romanisation above each line", isOn: $settings.showsLyricRomanisation)
+      }
+
+      Section("Updates") {
+        Toggle(
+          "Automatically check for updates",
+          isOn: $updater.automaticallyChecksForUpdates
+        )
+        .disabled(!updater.isConfigured)
+        Button("Check for Updates…", systemImage: "arrow.triangle.2.circlepath") {
+          updater.checkForUpdates()
+        }
+        .disabled(!updater.canCheckForUpdates)
+        Text(updater.status)
+          .font(.caption)
+          .foregroundStyle(.secondary)
+      }
+
+      Section("About") {
+        LabeledContent("Version", value: Self.versionDescription)
       }
 
       Section("Artwork cache") {
@@ -131,8 +153,8 @@ struct SettingsView: View {
 
       Section {
         Text(
-          "Nothing on this page sends a request. Temporary audio ranges are "
-            + "recreated as needed; clearing them does not delete offline downloads."
+          "Cache maintenance stays on this Mac. Update checks use only the "
+            + "configured Sparkle appcast; clearing caches does not delete downloads."
         )
         .font(.caption)
         .foregroundStyle(.secondary)
@@ -186,6 +208,13 @@ struct SettingsView: View {
     2 * 1024 * 1024 * 1024,
     4 * 1024 * 1024 * 1024,
   ]
+
+  private static var versionDescription: String {
+    let info = Bundle.main.infoDictionary ?? [:]
+    let version = info["CFBundleShortVersionString"] as? String ?? "Development"
+    guard let build = info["CFBundleVersion"] as? String else { return version }
+    return "\(version) (\(build))"
+  }
 
   private func refresh() async {
     imageCacheBytes = artwork.diskUsageBytes
