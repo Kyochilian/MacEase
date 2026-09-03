@@ -3,6 +3,10 @@ import NeteaseKit
 
 @MainActor
 extension PlaybackController {
+  package var canStartNonSessionOperation: Bool {
+    !sessionMutationPending && arbiter.active?.effect != .sessionMutation
+  }
+
     /// Returns whether the step was accepted. A caller that reports success to
     /// the system — the media keys do — must not assume it was.
     @discardableResult
@@ -15,9 +19,8 @@ extension PlaybackController {
       step(to: queue?.previousIndex(), session: session)
     }
   
-    package var canSetPlaybackMode: Bool {
-      !sessionMutationPending
-        && arbiter.active?.effect != .sessionMutation
+  package var canSetPlaybackMode: Bool {
+      canStartNonSessionOperation
         && queueContext.map(Self.allowsUserQueueEditing) != false
     }
   
@@ -237,8 +240,7 @@ extension PlaybackController {
     revision: UInt64,
     session: any SessionProviding
   ) -> Bool {
-    guard !sessionMutationPending,
-      arbiter.active?.effect != .sessionMutation,
+    guard canStartNonSessionOperation,
       session.account?.userID == accountID,
       queueAccountID == accountID,
       queueRevision == revision,
@@ -255,8 +257,7 @@ extension PlaybackController {
     revision: UInt64,
     session: any SessionProviding
   ) -> Bool {
-    guard !sessionMutationPending,
-      arbiter.active?.effect != .sessionMutation,
+    guard canStartNonSessionOperation,
       session.account?.userID == accountID,
       queueAccountID == nil,
       queueRevision == revision,

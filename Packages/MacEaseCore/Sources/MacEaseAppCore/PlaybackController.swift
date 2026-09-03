@@ -724,10 +724,9 @@ package final class PlaybackController {
     to target: Int?,
     session: any SessionProviding
   ) -> Bool {
-    guard !sessionMutationPending, let account = session.account, let target,
+    guard canStartNonSessionOperation, let account = session.account, let target,
       queueTracks.indices.contains(target)
     else { return false }
-    guard arbiter.active?.effect != .sessionMutation else { return false }
     if offlineDownloads?.hasPlaybackResource(
       songID: queueTracks[target].id,
       requestedQuality: quality,
@@ -965,11 +964,7 @@ package final class PlaybackController {
     account: NeteaseAccount,
     preferredDownload: OfflineDownload? = nil
   ) -> EntrySource? {
-    guard !sessionMutationPending else {
-      status = "Session is changing; try playback again"
-      return nil
-    }
-    guard arbiter.active?.effect != .sessionMutation else {
+    guard canStartNonSessionOperation else {
       status = "Session is changing; try playback again"
       return nil
     }
