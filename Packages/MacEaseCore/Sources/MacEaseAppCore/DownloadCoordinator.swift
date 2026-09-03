@@ -25,6 +25,48 @@ private enum DownloadFailure: Error {
   case unplayableFile
 }
 
+package enum DownloadTerminalFailure: Equatable, Sendable {
+  case unavailable
+  case connection
+  case invalidAudio
+  case storage
+  case other
+
+  package var message: String {
+    switch self {
+    case .unavailable: "This track is not available for download."
+    case .connection: "The download could not be completed because of a connection problem."
+    case .invalidAudio: "The downloaded audio could not be verified."
+    case .storage: "MacEase could not save the downloaded audio."
+    case .other: "The download could not be completed."
+    }
+  }
+}
+
+package enum DownloadTerminalOutcome: Equatable, Sendable {
+  case succeeded
+  case failed(DownloadTerminalFailure)
+}
+
+package struct DownloadTerminalEvent: Equatable, Sendable {
+  package let taskID: UUID
+  package let accountID: Int64
+  package let track: Track
+  package let outcome: DownloadTerminalOutcome
+
+  package init(
+    taskID: UUID,
+    accountID: Int64,
+    track: Track,
+    outcome: DownloadTerminalOutcome
+  ) {
+    self.taskID = taskID
+    self.accountID = accountID
+    self.track = track
+    self.outcome = outcome
+  }
+}
+
 /// Owns the one foreground download and the current account's completed
 /// files. URL resolution uses the ordinary read arbitration; the much longer
 /// CDN transfer begins only after that token has been released.
@@ -55,6 +97,8 @@ package final class DownloadCoordinator: SessionGuardedCoordinator {
   @ObservationIgnored private var maintenanceTask: Task<Void, Never>?
   @ObservationIgnored private var maintenanceTaskID: UUID?
   @ObservationIgnored private var localURLs: [OfflineDownloadID: URL] = [:]
+  @ObservationIgnored package var onTerminalEvent:
+    (@MainActor (DownloadTerminalEvent) -> Void)?
 
   package private(set) var downloads: [OfflineDownload] = []
   package private(set) var activity: Activity = .idle
@@ -113,7 +157,8 @@ package final class DownloadCoordinator: SessionGuardedCoordinator {
     maintenanceTask?.cancel()
     downloadTask?.cancel()
     if let operationToken {
-      release(operationToken, outcome: .cancelled)
+      self.operationToken = nil
+      arbiter.end(operationToken, outcome: .cancelled)
     }
     self.accountID = accountID
     downloads = []
@@ -181,7 +226,7 @@ package final class DownloadCoordinator: SessionGuardedCoordinator {
     status = "Resolving download URL (1 request)"
     downloadTask = Task { [weak self] in
       guard let self else { return }
-      await self.runDownload(
+      let outcome = await self.runDownload(
         track: track,
         quality: quality,
         account: account,
@@ -193,7 +238,9 @@ package final class DownloadCoordinator: SessionGuardedCoordinator {
       self.finishDownloadTask(
         taskID,
         accountID: account.userID,
-        generation: generation
+        generation: generation,
+        track: track,
+        outcome: outcome
       )
     }
   }
@@ -202,7 +249,8 @@ package final class DownloadCoordinator: SessionGuardedCoordinator {
     guard let downloadTask else { return }
     downloadTask.cancel()
     if let operationToken {
-      release(operationToken, outcome: .cancelled)
+      self.operationToken = nil
+      arbiter.end(operationToken, outcome: .cancelled)
     }
     activity = .idle
     progress = nil
@@ -345,11 +393,18 @@ package final class DownloadCoordinator: SessionGuardedCoordinator {
     generation: Int,
     taskID: UUID,
     operation: OperationToken
-  ) async {
+  ) async -> DownloadTerminalOutcome? {
     var resolutionIsHeld = true
     var credential: NeteaseCredential?
     defer {
-      if resolutionIsHeld { release(operation, outcome: .cancelled) }
+      if resolutionIsHeld {
+        releaseSessionOperation(
+          operation,
+          currentToken: &self.operationToken,
+          arbiter: self.arbiter,
+          outcome: .cancelled
+        )
+      }
     }
 
     do {
@@ -358,7 +413,7 @@ package final class DownloadCoordinator: SessionGuardedCoordinator {
         generation: generation,
         session: session
       )
-      guard let credential else { return }
+      guard let credential else { return nil }
       try checkCurrent(
         accountID: account.userID,
         generation: generation,
@@ -377,14 +432,19 @@ package final class DownloadCoordinator: SessionGuardedCoordinator {
           generation: generation,
           session: session
         )
-      else { return }
+      else { return nil }
       try checkCurrent(
         accountID: account.userID,
         generation: generation,
         taskID: taskID
       )
 
-      release(operation, outcome: .applied)
+      releaseSessionOperation(
+        operation,
+        currentToken: &self.operationToken,
+        arbiter: self.arbiter,
+        outcome: .applied
+      )
       resolutionIsHeld = false
       guard case .resolved(let asset) = resolution else {
         throw DownloadFailure.unavailable
@@ -401,8 +461,10 @@ package final class DownloadCoordinator: SessionGuardedCoordinator {
         generation: generation,
         taskID: taskID
       )
+      return .succeeded
     } catch is CancellationError {
       // Explicit cancel and account replacement already published the reason.
+      return nil
     } catch {
       if resolutionIsHeld,
         let service = error as? NeteaseServiceError,
@@ -421,7 +483,7 @@ package final class DownloadCoordinator: SessionGuardedCoordinator {
         accountID: account.userID,
         generation: generation,
         taskID: taskID
-      ) else { return }
+      ) else { return nil }
       var message = Self.diagnostic(for: error)
       if let cleanup = lastFailure, cleanup != message {
         message += "; " + cleanup
@@ -430,6 +492,7 @@ package final class DownloadCoordinator: SessionGuardedCoordinator {
       status = message
       activity = .idle
       progress = nil
+      return .failed(Self.terminalFailure(for: error))
     }
   }
 
@@ -945,7 +1008,9 @@ package final class DownloadCoordinator: SessionGuardedCoordinator {
   private func finishDownloadTask(
     _ taskID: UUID,
     accountID: Int64,
-    generation: Int
+    generation: Int,
+    track: Track,
+    outcome: DownloadTerminalOutcome?
   ) {
     guard downloadTaskID == taskID else { return }
     downloadTask = nil
@@ -955,17 +1020,21 @@ package final class DownloadCoordinator: SessionGuardedCoordinator {
     }
     activity = .idle
     if progress != 1 { progress = nil }
+    guard let outcome else { return }
+    onTerminalEvent?(
+      DownloadTerminalEvent(
+        taskID: taskID,
+        accountID: accountID,
+        track: track,
+        outcome: outcome
+      )
+    )
   }
 
   private func finishMaintenanceTask(_ taskID: UUID) {
     guard maintenanceTaskID == taskID else { return }
     maintenanceTask = nil
     maintenanceTaskID = nil
-  }
-
-  private func release(_ token: OperationToken, outcome: OperationOutcome) {
-    if operationToken == token { operationToken = nil }
-    arbiter.end(token, outcome: outcome)
   }
 
   private static func fileSize(_ url: URL) -> Int64? {
@@ -1005,5 +1074,30 @@ package final class DownloadCoordinator: SessionGuardedCoordinator {
       }
     }
     return "Download file operation failed"
+  }
+
+  /// Notification copy is intentionally coarser than diagnostics shown in the
+  /// app: no endpoint, URL, status code, service code or disk path crosses the
+  /// user-notification boundary.
+  private static func terminalFailure(
+    for error: any Error
+  ) -> DownloadTerminalFailure {
+    if error is URLError || error is NeteaseServiceError {
+      return .connection
+    }
+    if error is LibraryStoreError {
+      return .storage
+    }
+    if let error = error as? AudioRangeError {
+      return error == .storageFailure ? .storage : .invalidAudio
+    }
+    if let error = error as? DownloadFailure {
+      switch error {
+      case .unavailable: return .unavailable
+      case .expiredURL: return .connection
+      case .invalidResource, .unplayableFile: return .invalidAudio
+      }
+    }
+    return .other
   }
 }

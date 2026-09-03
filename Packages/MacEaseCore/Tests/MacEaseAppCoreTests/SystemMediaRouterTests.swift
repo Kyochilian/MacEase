@@ -235,3 +235,43 @@ private final class RouterRig {
   await rig.playback.settleForTesting()
   #expect(rig.playback.currentTrack?.id == 202)
 }
+
+@Test @MainActor func queuePanelCommandsUseTheSharedRouterAndRejectStaleRows() async throws {
+  let rig = RouterRig()
+  await rig.play([101, 102, 103])
+  let first = try #require(rig.playback.queueSnapshot)
+
+  #expect(
+    rig.router.perform(
+      .removeQueueEntry(
+        songID: 103,
+        accountID: first.accountID,
+        revision: first.revision
+      )
+    )
+  )
+  #expect(rig.playback.queueSnapshot?.upcoming.map(\.id) == [102])
+  #expect(
+    !rig.router.perform(
+      .clearUpcoming(accountID: first.accountID, revision: first.revision)
+    )
+  )
+
+  let second = try #require(rig.playback.queueSnapshot)
+  #expect(
+    rig.router.perform(
+      .removeQueueEntry(
+        songID: 102,
+        accountID: second.accountID,
+        revision: second.revision
+      )
+    )
+  )
+  let third = try #require(rig.playback.queueSnapshot)
+  #expect(
+    rig.router.perform(
+      .clearUpcoming(accountID: third.accountID, revision: third.revision)
+    )
+  )
+  #expect(rig.playback.queueSnapshot?.upcoming.isEmpty == true)
+}

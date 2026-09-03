@@ -160,6 +160,49 @@ private struct Rig {
   #expect(arbiter.canStart())
 }
 
+/// A feedback write can occupy the exclusive slot while this controller's
+/// resolve is still a read. Refusing the supersession must leave that resolve
+/// alive; cancelling it first strands the controller in `.resolving`.
+@Test @MainActor func feedbackCannotStrandTheCurrentInFlightResolve() async throws {
+  let credential = makeCredential()
+  let transport = FakeTransport()
+  let vault = FakeVault(stored: credential)
+  let arbiter = OperationArbiter()
+  let output = FakeAudioOutput()
+  let session = FakeSession(credential: credential)
+  let playback = PlaybackController(
+    transport: transport,
+    vault: vault,
+    arbiter: arbiter,
+    output: output
+  )
+  playback.attach(session: session)
+  await transport.setSongURL(.success(makeResolvedAsset(songID: 101)))
+  await transport.gate.close()
+
+  playback.play(
+    tracks: makeTracks([101, 202]),
+    startIndex: 0,
+    context: .dailyRecommendations,
+    session: session
+  )
+  while await transport.gate.arrivalCount() == 0 { await Task.yield() }
+
+  let feedback = try #require(
+    arbiter.begin(name: "Scrobble finish", effect: .feedback)
+  )
+  #expect(!playback.playNext(session: session))
+  #expect(playback.phase == .resolving)
+  #expect(playback.currentTrack?.id == 101)
+
+  await transport.gate.open()
+  await playback.settleForTesting()
+
+  #expect(playback.phase == .playing)
+  #expect(playback.currentTrack?.id == 101)
+  #expect(arbiter.end(feedback, outcome: .applied) == .applied)
+}
+
 @Test @MainActor func aCancelledPlaybackTaskIsNotOfferedAsARetry() {
   #expect(PlaybackFailureClassifier.kind(for: CancellationError()) == .terminal)
 }

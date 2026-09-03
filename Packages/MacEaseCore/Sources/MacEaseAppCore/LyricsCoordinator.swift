@@ -64,12 +64,7 @@ package final class LyricsCoordinator: SessionGuardedCoordinator {
     guard visible != isPanelVisible else { return }
     isPanelVisible = visible
     guard visible else {
-      generation += 1
-      loadTask?.cancel()
-      loadTask = nil
-      if let operationToken {
-        release(operationToken, outcome: .cancelled)
-      }
+      cancelInFlightLoad()
       return
     }
     load(track: track, session: session)
@@ -79,11 +74,13 @@ package final class LyricsCoordinator: SessionGuardedCoordinator {
   package func load(track: Track?, session: any SessionProviding) {
     guard isPanelVisible else { return }
     guard let track else {
+      cancelInFlightLoad()
       clearDocument()
       status = "Nothing is playing"
       return
     }
     guard track.id != loadedTrackID else { return }
+    cancelInFlightLoad()
     guard let token = arbiter.begin(name: "Lyrics", effect: .read) else { return }
     guard let account = session.account else {
       arbiter.end(token, outcome: .failed)
@@ -102,7 +99,12 @@ package final class LyricsCoordinator: SessionGuardedCoordinator {
     loadTask = Task {
       var outcome = OperationOutcome.failed
       defer {
-        release(token, outcome: outcome)
+        releaseSessionOperation(
+          token,
+          currentToken: &self.operationToken,
+          arbiter: self.arbiter,
+          outcome: outcome
+        )
         if self.generation == currentGeneration { self.loadTask = nil }
       }
       do {
@@ -131,6 +133,9 @@ package final class LyricsCoordinator: SessionGuardedCoordinator {
         if lyrics.isEmpty {
           content = .unavailable
           status = "\(track.name) has no lyrics"
+        } else if lyrics.isInstrumental {
+          content = .document(lyrics)
+          status = "\(track.name) is instrumental"
         } else {
           content = .document(lyrics)
           status = "Loaded \(lyrics.lines.count) lyric lines for \(track.name)"
@@ -156,14 +161,19 @@ package final class LyricsCoordinator: SessionGuardedCoordinator {
   }
 
   package func reset() {
+    cancelInFlightLoad()
+    clearDocument()
+    status = "Open a track to see its lyrics"
+  }
+
+  private func cancelInFlightLoad() {
     generation += 1
     loadTask?.cancel()
     loadTask = nil
     if let operationToken {
-      release(operationToken, outcome: .cancelled)
+      self.operationToken = nil
+      arbiter.end(operationToken, outcome: .cancelled)
     }
-    clearDocument()
-    status = "Open a track to see its lyrics"
   }
 
   private func clearDocument() {
@@ -171,8 +181,4 @@ package final class LyricsCoordinator: SessionGuardedCoordinator {
     content = .idle
   }
 
-  private func release(_ token: OperationToken, outcome: OperationOutcome) {
-    if operationToken == token { operationToken = nil }
-    arbiter.end(token, outcome: outcome)
-  }
 }

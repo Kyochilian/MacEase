@@ -523,8 +523,7 @@ private func songPage(_ ids: [Int64], total: Int?) -> SearchPage {
     CatalogPage(items: makeAlbums([2, 3, 3]), more: false),
   ])
   await rig.transport.setTopArtistPages([
-    CatalogPage(items: makeArtists([7, 7, 8]), more: true),
-    CatalogPage(items: makeArtists([8, 9, 9]), more: false),
+    CatalogPage(items: makeArtists([7, 7, 8, 9]), more: true),
   ])
 
   rig.catalog.loadNewAlbums(reset: true, session: rig.session)
@@ -544,8 +543,7 @@ private func songPage(_ ids: [Int64], total: Int?) -> SearchPage {
     await rig.transport.recordedCalls() == [
       .newAlbums(.all, offset: 0),
       .newAlbums(.all, offset: 3),
-      .topArtists(offset: 0),
-      .topArtists(offset: 3),
+      .topArtists,
     ]
   )
 }

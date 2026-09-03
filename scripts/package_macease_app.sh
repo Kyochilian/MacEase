@@ -154,6 +154,11 @@ if $check_only; then
   exit 0
 fi
 
+[[ "$signing_identity" == - ]] \
+  || die "package only creates ad-hoc staging; use release sign for Developer ID signing"
+[[ -z "$feed_url" && -z "$public_key" ]] \
+  || die "an ad-hoc package must not contain live update configuration"
+
 mkdir -p -- "$output_directory"
 output_directory=${output_directory:A}
 [[ -d "$output_directory" && -w "$output_directory" ]] \
@@ -191,27 +196,11 @@ plutil -replace CFBundleShortVersionString -string "$short_version" \
   "$staged_app/Contents/Info.plist"
 plutil -replace CFBundleVersion -string "$build_number" \
   "$staged_app/Contents/Info.plist"
-if [[ -n "$feed_url" ]]; then
-  plutil -insert SUFeedURL -string "$feed_url" "$staged_app/Contents/Info.plist"
-  plutil -insert SUPublicEDKey -string "$public_key" "$staged_app/Contents/Info.plist"
-fi
 plutil -lint "$staged_app/Contents/Info.plist" >/dev/null
 
-if [[ "$signing_identity" == - ]]; then
-  # A development package does not enable Hardened Runtime: Sparkle documents
-  # that ad-hoc signatures cannot satisfy runtime library validation.
-  codesign --force --sign - --entitlements "$entitlements" "$staged_app"
-else
-  sparkle_version="$framework_path/Versions/B"
-  sign_nested=(--force --sign "$signing_identity" --options runtime --timestamp)
-  codesign "${sign_nested[@]}" "$sparkle_version/XPCServices/Installer.xpc"
-  codesign "${sign_nested[@]}" --preserve-metadata=entitlements \
-    "$sparkle_version/XPCServices/Downloader.xpc"
-  codesign "${sign_nested[@]}" "$sparkle_version/Autoupdate"
-  codesign "${sign_nested[@]}" "$sparkle_version/Updater.app"
-  codesign "${sign_nested[@]}" "$framework_path"
-  codesign "${sign_nested[@]}" --entitlements "$entitlements" "$staged_app"
-fi
+# A development package does not enable Hardened Runtime: Sparkle documents
+# that ad-hoc signatures cannot satisfy runtime library validation.
+codesign --force --sign - --entitlements "$entitlements" "$staged_app"
 
 codesign --verify --deep --strict --verbose=2 "$staged_app"
 [[ $(lipo -archs "$executable_path") == arm64 ]] \

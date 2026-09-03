@@ -280,6 +280,18 @@ private final class AuthRig {
   #expect(rig.session.status.contains("no stored session to revoke"))
 }
 
+@Test @MainActor func aKeychainReadFailureDoesNotPretendThereWasNoSession() async {
+  let rig = AuthRig(stored: makeCredential("live"))
+  await rig.vault.setLoadError(CredentialVaultError.keychain(-25308))
+
+  let result = await rig.session.signOutEverywhere()
+
+  #expect(result == .storedPresenceUnknown)
+  #expect(await rig.transport.recordedCalls().isEmpty)
+  #expect(!rig.session.status.contains("no stored session to revoke"))
+  #expect(rig.session.status.contains("unable to read the stored session"))
+}
+
 // MARK: - Refresh
 
 @Test @MainActor func refreshStoresTheNewCookieWithoutClaimingAnAccount() async {

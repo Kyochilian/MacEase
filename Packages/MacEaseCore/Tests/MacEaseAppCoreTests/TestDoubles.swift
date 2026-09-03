@@ -145,7 +145,7 @@ actor FakeTransport: NeteaseTransporting {
     case newAlbums(AlbumArea, offset: Int)
     case artistDetail(Int64)
     case artistAlbums(Int64, offset: Int)
-    case topArtists(offset: Int)
+    case topArtists
   }
 
   struct Unprogrammed: Error, Equatable {
@@ -665,11 +665,9 @@ actor FakeTransport: NeteaseTransporting {
   }
 
   func topArtists(
-    limit: Int,
-    offset: Int,
     credential: NeteaseCredential
   ) async throws -> CatalogPage<Artist> {
-    await record(.topArtists(offset: offset))
+    await record(.topArtists)
     if let catalogError { throw catalogError }
     guard !topArtistPages.isEmpty else { throw Unprogrammed(call: "topArtists") }
     return topArtistPages.removeFirst()
@@ -874,6 +872,7 @@ final class FakeAudioOutput: AudioOutput {
   var automaticallyReportsPlaying = true
   private(set) var prepareIsBlocked = false
   private var generation: UInt64 = 0
+  private var preparingGeneration: UInt64?
   private var shouldBlockNextPrepare = false
   private var blockedPrepare: CheckedContinuation<Void, Never>?
 
@@ -881,8 +880,12 @@ final class FakeAudioOutput: AudioOutput {
     resource: PlaybackResource,
     userAgent: String
   ) async throws -> AudioAssetInfo {
-    teardown()
+    if preparingGeneration != nil || loadedURL != nil { teardown() }
     let generation = self.generation
+    preparingGeneration = generation
+    defer {
+      if preparingGeneration == generation { preparingGeneration = nil }
+    }
     preparedResources.append(resource)
     let url: URL
     switch resource.location {
@@ -923,6 +926,7 @@ final class FakeAudioOutput: AudioOutput {
 
   func teardown() {
     generation &+= 1
+    preparingGeneration = nil
     isPlaying = false
     loadedURL = nil
     teardownCount += 1

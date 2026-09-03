@@ -130,7 +130,6 @@ package final class CatalogCoordinator: SessionGuardedCoordinator {
   package private(set) var topArtists: [Artist] = []
   package private(set) var topArtistsHaveMore = false
   @ObservationIgnored private var newAlbumOffset = 0
-  @ObservationIgnored private var topArtistOffset = 0
   package var isLoadingDetail = false
   package var detailStatus = "Open an album or artist, or load a browse list"
 
@@ -275,7 +274,6 @@ package final class CatalogCoordinator: SessionGuardedCoordinator {
             session: session
           )
         else { return }
-        self.arbiter.markRequestSent(token)
         let rows = try await self.transport.searchSuggestions(
           keywords: keywords,
           credential: credential
@@ -517,10 +515,9 @@ package final class CatalogCoordinator: SessionGuardedCoordinator {
 
   package func loadTopArtists(reset: Bool, session: any SessionProviding) {
     guard reset || topArtistsHaveMore else { return }
-    let offset = reset ? 0 : topArtistOffset
     read(
       in: detail,
-      identity: "top-artists-\(offset)",
+      identity: "top-artists",
       operation: "Top artists",
       loading: "Loading top artists (1 request)",
       report: { self.detailStatus = $0 },
@@ -529,8 +526,6 @@ package final class CatalogCoordinator: SessionGuardedCoordinator {
       onStart: {},
       fetch: { credential in
         try await self.transport.topArtists(
-          limit: Self.artistPageSize,
-          offset: offset,
           credential: credential
         )
       },
@@ -541,8 +536,7 @@ package final class CatalogCoordinator: SessionGuardedCoordinator {
           var seen = Set(self.topArtists.map(\.id))
           self.topArtists += page.items.filter { seen.insert($0.id).inserted }
         }
-        self.topArtistOffset = offset + page.items.count
-        self.topArtistsHaveMore = page.more && !page.items.isEmpty
+        self.topArtistsHaveMore = false
         return "Loaded \(self.topArtists.count) top artists"
       }
     )
@@ -625,9 +619,7 @@ package final class CatalogCoordinator: SessionGuardedCoordinator {
           outcome = .cancelled
           return
         }
-        self.arbiter.markRequestSent(token)
         let value = try await fetch(credential)
-        self.arbiter.markSettling(token)
         guard
           lane.accepts(laneGeneration),
           try await self.sessionRemainsCurrent(
@@ -688,7 +680,6 @@ package final class CatalogCoordinator: SessionGuardedCoordinator {
     newAlbumOffset = 0
     topArtists = []
     topArtistsHaveMore = false
-    topArtistOffset = 0
   }
 
   private var currentSearchInput: SearchInput {

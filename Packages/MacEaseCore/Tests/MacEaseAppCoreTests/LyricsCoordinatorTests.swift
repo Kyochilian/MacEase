@@ -105,16 +105,43 @@ private let document = Lyrics.lines([LyricLine(timeSeconds: 1, text: "One")])
   while await rig.transport.gate.arrivalCount() < 1 { await Task.yield() }
   rig.lyrics.load(track: tracks[1], session: rig.session)
   while await rig.transport.gate.arrivalCount() < 2 { await Task.yield() }
-  await rig.transport.gate.releaseNewestArrival()
+  // Loading the second track cancelled and released the first read before it
+  // claimed a new token. Only the replacement remains active in the arbiter.
+  #expect(rig.arbiter.activeReadCount == 1)
+  await rig.transport.gate.open()
   await rig.lyrics.settleForTesting()
 
   #expect(rig.lyrics.content == .document(new))
   #expect(rig.lyrics.status.hasSuffix("for track-2"))
 
-  await rig.transport.gate.open()
   for _ in 0..<5 { await Task.yield() }
   #expect(rig.lyrics.content == .document(new))
   #expect(rig.lyrics.status.hasSuffix("for track-2"))
+}
+
+@Test @MainActor func replacingLyricsLoadsReleasesEachOldReadBeforeTheNextOne() async {
+  let rig = LyricsRig()
+  await rig.transport.setLyrics(.success(document))
+  await rig.transport.gate.close()
+  rig.lyrics.setPanelVisible(true, track: nil, session: rig.session)
+
+  for id in 1...8 {
+    rig.lyrics.load(track: makeTracks([Int64(id)])[0], session: rig.session)
+    await Task.yield()
+    #expect(rig.arbiter.activeReadCount <= 1)
+  }
+
+  for _ in 0..<100 {
+    if await rig.transport.gate.arrivalCount() >= 1 { break }
+    try? await Task.sleep(for: .milliseconds(1))
+  }
+  #expect(await rig.transport.gate.arrivalCount() > 0)
+  #expect(rig.arbiter.activeReadCount == 1)
+  await rig.transport.gate.open()
+  await rig.lyrics.settleForTesting()
+
+  #expect(await rig.transport.recordedCalls().last == .lyrics(8))
+  #expect(rig.lyrics.content == .document(document))
 }
 
 @Test @MainActor func aSongWithoutLyricsIsAnAnswerRatherThanAFailure() async {
@@ -125,6 +152,19 @@ private let document = Lyrics.lines([LyricLine(timeSeconds: 1, text: "One")])
 
   #expect(rig.lyrics.content == .unavailable)
   #expect(rig.lyrics.status.hasSuffix("has no lyrics"))
+}
+
+@Test @MainActor func anInstrumentalGetsItsDedicatedLoadedState() async {
+  let rig = LyricsRig()
+  let instrumental = Lyrics.instrumental(
+    LyricAttribution(contributor: "Alice", translationContributor: nil)
+  )
+  await rig.transport.setLyrics(.success(instrumental))
+
+  await rig.open(makeTracks([1])[0])
+
+  #expect(rig.lyrics.content == .document(instrumental))
+  #expect(rig.lyrics.status == "track-1 is instrumental")
 }
 
 @Test @MainActor func aFailedLoadReportsWithoutRetrying() async {

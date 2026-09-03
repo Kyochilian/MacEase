@@ -171,6 +171,99 @@ private func makeQueue(
   #expect(queue.currentIndex == 0)
 }
 
+// MARK: - User queue editing
+
+@Test func insertingNextKeepsTheCurrentIdentityAndSequentialOrder() {
+  var queue = makeQueue(count: 4, startIndex: 1, mode: .repeatAll)!
+
+  let inserted = queue.insertNext()
+
+  #expect(inserted == 2)
+  #expect(queue.count == 5)
+  #expect(queue.currentIndex == 1)
+  #expect(queue.nextIndex() == 2)
+  #expect(queue.upcomingIndices == [2, 3, 4])
+}
+
+@Test func insertingNextExtendsAValidShufflePermutationAtTheNextSlot() {
+  var queue = makeQueue(count: 6, startIndex: 3, mode: .shuffle, seed: 19)!
+  let oldCurrent = queue.currentIndex
+
+  let inserted = queue.insertNext()
+
+  #expect(queue.currentIndex == oldCurrent)
+  #expect(queue.nextIndex() == inserted)
+  #expect(queue.shuffleOrder.sorted() == Array(0..<7))
+  #expect(Set(queue.shuffleOrder).count == 7)
+}
+
+@Test func movingAnEarlierEntryNextKeepsTheCurrentSongInSequentialMode() {
+  var queue = makeQueue(count: 5, startIndex: 3, mode: .sequential)!
+
+  let destination = queue.moveNext(from: 0)
+
+  #expect(destination == 3)
+  #expect(queue.currentIndex == 2)
+  #expect(queue.nextIndex() == 3)
+  #expect(queue.upcomingIndices == [3, 4])
+}
+
+@Test func movingAnEntryNextReordersOnlyTheShufflePermutationOnce() {
+  var queue = makeQueue(count: 8, startIndex: 4, mode: .shuffle, seed: 23)!
+  let source = queue.upcomingIndices.last!
+
+  let destination = queue.moveNext(from: source)
+
+  #expect(destination != nil)
+  #expect(queue.nextIndex() == destination)
+  #expect(queue.shuffleOrder.sorted() == Array(0..<8))
+  #expect(Set(queue.shuffleOrder).count == 8)
+}
+
+@Test func currentAndInvalidEntriesCannotBeMovedNext() {
+  var queue = makeQueue(count: 3, startIndex: 1, mode: .sequential)!
+  let original = queue
+
+  #expect(queue.moveNext(from: 1) == nil)
+  #expect(queue.moveNext(from: -1) == nil)
+  #expect(queue.moveNext(from: 3) == nil)
+  #expect(queue == original)
+}
+
+@Test func everyMoveNextRemapsIdentityAndPermutationForEveryMode() {
+  for mode in PlaybackMode.allCases {
+    for count in 2...10 {
+      for current in 0..<count {
+        for source in 0..<count where source != current {
+          var queue = makeQueue(
+            count: count,
+            startIndex: current,
+            mode: mode,
+            seed: UInt64(count * 100 + current)
+          )!
+          var identities = Array(0..<count)
+          let currentIdentity = identities[current]
+          let movedIdentity = identities.remove(at: source)
+          let currentAfterRemoval = identities.firstIndex(of: currentIdentity)!
+          identities.insert(movedIdentity, at: currentAfterRemoval + 1)
+
+          let destination = queue.moveNext(from: source)
+
+          #expect(destination == currentAfterRemoval + 1)
+          #expect(identities[queue.currentIndex] == currentIdentity)
+          #expect(queue.nextIndex().map { identities[$0] } == movedIdentity)
+          if mode == .shuffle {
+            #expect(queue.shuffleOrder.sorted() == Array(0..<count))
+            #expect(Set(queue.shuffleOrder).count == count)
+          } else {
+            #expect(queue.shuffleOrder.isEmpty)
+          }
+        }
+      }
+    }
+  }
+}
+
 // MARK: - Continuation
 
 /// Personal FM and heartbeat mode have no end, so their queue grows while it

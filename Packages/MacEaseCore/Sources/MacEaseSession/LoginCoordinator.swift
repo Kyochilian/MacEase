@@ -466,15 +466,22 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
     defer { endOperation() }
 
     var serverMessage = "Signed out on NetEase and locally"
-    if let credential = try? await vault.load() {
-      do {
-        try await transport.signOut(credential: credential)
-      } catch {
-        serverMessage =
-          "Signed out locally; NetEase did not confirm, so the session may still be live"
+    var loadError: (any Error)?
+    do {
+      if let credential = try await vault.load() {
+        do {
+          try await transport.signOut(credential: credential)
+        } catch {
+          serverMessage =
+            "Signed out locally; NetEase did not confirm, so the session may still be live"
+        }
+      } else {
+        serverMessage = "Signed out locally; there was no stored session to revoke"
       }
-    } else {
-      serverMessage = "Signed out locally; there was no stored session to revoke"
+    } catch {
+      loadError = error
+      serverMessage =
+        "Unable to read the stored session; the NetEase session may still be live"
     }
 
     webView.stopLoading()
@@ -495,6 +502,12 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
       status =
         keychainErrorMessage(keychainError)
         + "; WebKit data cleared, the stored session may remain"
+      return commit(.storedItemPresenceUnknown)
+    }
+    if let loadError {
+      status =
+        keychainErrorMessage(loadError)
+        + "; unable to read the stored session, so the NetEase session may still be live"
       return commit(.storedItemPresenceUnknown)
     }
     status = serverMessage

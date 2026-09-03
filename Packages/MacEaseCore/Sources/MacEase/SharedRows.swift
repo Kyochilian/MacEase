@@ -224,6 +224,46 @@ struct AddToPlaylistMenu: View {
   }
 }
 
+/// The same local queue command is available from every ordinary track row.
+/// Its captured account and revision make a menu left open across a sign-in
+/// change fail closed instead of editing the replacement account's queue.
+struct QueueNextButton: View {
+  let track: Track
+  let context: PlaybackContext
+  let playback: PlaybackController
+  let session: LoginCoordinator
+
+  var body: some View {
+    let snapshot = playback.queueSnapshot
+    let accountID = snapshot?.accountID ?? session.account?.userID
+    let revision = snapshot?.revision ?? playback.queueRevision
+    let canQueue = accountID.map {
+      playback.canQueueNext(
+        context: context,
+        accountID: $0,
+        revision: revision,
+        session: session
+      )
+    } ?? false
+    Button {
+      guard let accountID else { return }
+      _ = playback.queueNext(
+        track,
+        context: context,
+        accountID: accountID,
+        revision: revision,
+        session: session
+      )
+    } label: {
+      Image(systemName: "text.line.first.and.arrowtriangle.forward")
+    }
+    .buttonStyle(.borderless)
+    .disabled(!canQueue || snapshot?.current.id == track.id)
+    .help("Play next · local queue edit, no request")
+    .accessibilityLabel("Play \(track.name) next")
+  }
+}
+
 /// Resolves the row's position at action time from the track id, so a list
 /// that changed between render and click cannot start the wrong track.
 struct PlayTrackButton: View {
@@ -234,20 +274,28 @@ struct PlayTrackButton: View {
   let session: LoginCoordinator
 
   var body: some View {
-    Button("Play", systemImage: "play.fill") {
-      guard let index = tracks.firstIndex(where: { $0.id == track.id }) else {
-        return
-      }
-      playback.play(
-        tracks: tracks,
-        startIndex: index,
+    HStack(spacing: 6) {
+      QueueNextButton(
+        track: track,
         context: context,
+        playback: playback,
         session: session
       )
+      Button("Play", systemImage: "play.fill") {
+        guard let index = tracks.firstIndex(where: { $0.id == track.id }) else {
+          return
+        }
+        playback.play(
+          tracks: tracks,
+          startIndex: index,
+          context: context,
+          session: session
+        )
+      }
+      .buttonStyle(.borderless)
+      .disabled(session.account == nil)
+      .accessibilityLabel("Play \(track.name)")
     }
-    .buttonStyle(.borderless)
-    .disabled(session.account == nil)
-    .accessibilityLabel("Play \(track.name)")
   }
 }
 

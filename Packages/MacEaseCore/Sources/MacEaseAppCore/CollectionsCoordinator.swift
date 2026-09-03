@@ -307,7 +307,8 @@ package final class CollectionsCoordinator: SessionGuardedCoordinator {
       loadTask?.cancel()
       loadTask = nil
       if let operationToken {
-        release(operationToken, outcome: .cancelled)
+        self.operationToken = nil
+        arbiter.end(operationToken, outcome: .cancelled)
       }
     }
     clearAll()
@@ -317,25 +318,21 @@ package final class CollectionsCoordinator: SessionGuardedCoordinator {
 
   // MARK: - Shared execution
 
-  private struct Claim {
-    let token: OperationToken
-    let account: NeteaseAccount
-  }
-
   private func claim(
     _ name: String,
     effect: OperationEffect,
     session: any SessionProviding
-  ) -> Claim? {
-    guard !isLoading else { return nil }
-    guard let token = arbiter.begin(name: name, effect: effect) else { return nil }
-    guard let account = session.account else {
-      arbiter.end(token, outcome: .failed)
-      status = "Validate the session before loading collections"
-      return nil
-    }
-    operationToken = token
-    return Claim(token: token, account: account)
+  ) -> SessionOperationClaim? {
+    claimSessionOperation(
+      name,
+      effect: effect,
+      session: session,
+      arbiter: arbiter,
+      isLoading: isLoading,
+      noAccountStatus: "Validate the session before loading collections",
+      status: &status,
+      operationToken: &operationToken
+    )
   }
 
   private func read(
@@ -355,8 +352,18 @@ package final class CollectionsCoordinator: SessionGuardedCoordinator {
     loadTask = Task {
       var outcome = OperationOutcome.failed
       defer {
-        release(claim.token, outcome: outcome)
-        finish(generation: currentGeneration)
+        releaseSessionOperation(
+          claim.token,
+          currentToken: &self.operationToken,
+          arbiter: self.arbiter,
+          outcome: outcome
+        )
+        finishSessionOperation(
+          generation: currentGeneration,
+          currentGeneration: self.generation,
+          isLoading: &self.isLoading,
+          task: &self.loadTask
+        )
       }
       do {
         guard
@@ -366,9 +373,7 @@ package final class CollectionsCoordinator: SessionGuardedCoordinator {
             session: session
           )
         else { return }
-        arbiter.markRequestSent(claim.token)
         let apply = try await body(credential, account)
-        arbiter.markSettling(claim.token)
         guard
           try await sessionRemainsCurrent(
             account: account,
@@ -406,8 +411,18 @@ package final class CollectionsCoordinator: SessionGuardedCoordinator {
     loadTask = Task {
       var outcome = OperationOutcome.failed
       defer {
-        release(claim.token, outcome: outcome)
-        finish(generation: currentGeneration)
+        releaseSessionOperation(
+          claim.token,
+          currentToken: &self.operationToken,
+          arbiter: self.arbiter,
+          outcome: outcome
+        )
+        finishSessionOperation(
+          generation: currentGeneration,
+          currentGeneration: self.generation,
+          isLoading: &self.isLoading,
+          task: &self.loadTask
+        )
       }
       do {
         guard
@@ -439,7 +454,7 @@ package final class CollectionsCoordinator: SessionGuardedCoordinator {
         if Task.isCancelled {
           outcome = .cancelled
         } else if let service = error as? NeteaseServiceError,
-          Self.provesTheWriteDidNotRun(service)
+          service.provesWriteDidNotRun
         {
           outcome = .failed
         } else if arbiter.abandoningLosesTheOutcome(claim.token) {
@@ -451,30 +466,11 @@ package final class CollectionsCoordinator: SessionGuardedCoordinator {
     }
   }
 
-  /// A `service` error is the endpoint's own answer, so it proves the write did
-  /// not run. An HTTP 5xx says the server broke while handling it, which says
-  /// nothing about whether the mutation landed first.
-  private static func provesTheWriteDidNotRun(_ error: NeteaseServiceError) -> Bool {
-    guard error.source == .http else { return true }
-    return !(500...599).contains(error.statusCode)
-  }
-
   private func report(_ error: any Error, operation: String, generation: Int) {
     guard self.generation == generation else { return }
     let failure = OperationFailure.classify(error, cancelled: Task.isCancelled)
     guard failure.isReportable else { return }
     status = failure.statusText(operation: operation)
-  }
-
-  private func finish(generation: Int) {
-    guard self.generation == generation else { return }
-    isLoading = false
-    loadTask = nil
-  }
-
-  private func release(_ token: OperationToken, outcome: OperationOutcome) {
-    if operationToken == token { operationToken = nil }
-    arbiter.end(token, outcome: outcome)
   }
 
   private func clearAll() {

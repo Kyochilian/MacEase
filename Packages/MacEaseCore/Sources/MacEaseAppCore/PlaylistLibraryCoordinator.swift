@@ -627,11 +627,21 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
     loadTask = Task {
       var outcome = OperationOutcome.failed
       defer {
-        let resolved = release(claim.token, outcome: outcome)
+        let resolved = releaseSessionOperation(
+          claim.token,
+          currentToken: &self.operationToken,
+          arbiter: self.arbiter,
+          outcome: outcome
+        )
         if recordsCreateReceipt, let resolved {
           self.lastCreateReceipt = CreateReceipt(outcome: resolved)
         }
-        finish(generation: currentGeneration)
+        finishSessionOperation(
+          generation: currentGeneration,
+          currentGeneration: self.generation,
+          isLoading: &self.isLoading,
+          task: &self.loadTask
+        )
       }
 
       var credential: NeteaseCredential?
@@ -673,7 +683,7 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
         if Task.isCancelled {
           outcome = .cancelled
         } else if let service = error as? NeteaseServiceError,
-          Self.provesTheWriteDidNotRun(service)
+          service.provesWriteDidNotRun
         {
           outcome = .failed
         } else if arbiter.abandoningLosesTheOutcome(claim.token) {
@@ -696,19 +706,6 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
     return true
   }
 
-  /// Whether a classified error is evidence that a write which had already
-  /// been sent did not take effect.
-  ///
-  /// A `service` error is an application-layer answer: the request reached the
-  /// endpoint, the endpoint decided, and it said no. A `http` 5xx is not an
-  /// answer — the server failed while handling the request, and nothing in the
-  /// response says whether it failed before or after applying the mutation. So
-  /// only the first is a proven failure; the second must stay unknown.
-  private static func provesTheWriteDidNotRun(_ error: NeteaseServiceError) -> Bool {
-    guard error.source == .http else { return true }
-    return !(500...599).contains(error.statusCode)
-  }
-
   /// module's work, and it never cancels a write whose request is already in
   /// flight: that request is left to finish so the arbiter can classify what
   /// the server did, instead of the client guessing.
@@ -718,7 +715,8 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
       loadTask?.cancel()
       loadTask = nil
       if let operationToken {
-        release(operationToken, outcome: .cancelled)
+        self.operationToken = nil
+        arbiter.end(operationToken, outcome: .cancelled)
       }
     }
     clearLibrary()
@@ -732,11 +730,6 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
     await loadTask?.value
   }
 
-  private struct Claim {
-    let token: OperationToken
-    let account: NeteaseAccount
-  }
-
   /// Claims the arbiter and the validated account together, so no entry point
   /// can start a request without holding both.
   private func claim(
@@ -744,23 +737,24 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
     effect: OperationEffect,
     session: any SessionProviding,
     noAccountStatus: String
-  ) -> Claim? {
-    guard !isLoading else { return nil }
-    guard let token = arbiter.begin(name: name, effect: effect) else { return nil }
-    guard let account = session.account else {
-      arbiter.end(token, outcome: .failed)
-      status = noAccountStatus
-      return nil
-    }
-    operationToken = token
-    return Claim(token: token, account: account)
+  ) -> SessionOperationClaim? {
+    claimSessionOperation(
+      name,
+      effect: effect,
+      session: session,
+      arbiter: arbiter,
+      isLoading: isLoading,
+      noAccountStatus: noAccountStatus,
+      status: &status,
+      operationToken: &operationToken
+    )
   }
 
   /// Runs the body under the claimed operation. The body returns whether its
   /// result was published; a write that was sent but not published leaves the
   /// server outcome unknown, which the arbiter records.
   private func perform(
-    claim: Claim,
+    claim: SessionOperationClaim,
     generation: Int,
     session: any SessionProviding,
     invalidateOnService301: Bool,
@@ -769,8 +763,18 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
   ) async {
     var outcome = OperationOutcome.failed
     defer {
-      release(claim.token, outcome: outcome)
-      finish(generation: generation)
+      releaseSessionOperation(
+        claim.token,
+        currentToken: &self.operationToken,
+        arbiter: self.arbiter,
+        outcome: outcome
+      )
+      finishSessionOperation(
+        generation: generation,
+        currentGeneration: self.generation,
+        isLoading: &self.isLoading,
+        task: &self.loadTask
+      )
     }
 
     var credential: NeteaseCredential?
@@ -781,9 +785,7 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
         session: session
       )
       guard let credential else { return }
-      arbiter.markRequestSent(claim.token)
       let published = try await body(credential)
-      arbiter.markSettling(claim.token)
       // A read that could not be published changed nothing on the server.
       outcome = published ? .applied : .cancelled
     } catch is CancellationError {
@@ -853,21 +855,6 @@ package final class PlaylistLibraryCoordinator: SessionGuardedCoordinator {
     let failure = OperationFailure.classify(error, cancelled: Task.isCancelled)
     guard failure.isReportable else { return }
     status = failure.statusText(operation: operation)
-  }
-
-  private func finish(generation: Int) {
-    guard self.generation == generation else { return }
-    isLoading = false
-    loadTask = nil
-  }
-
-  @discardableResult
-  private func release(
-    _ token: OperationToken,
-    outcome: OperationOutcome
-  ) -> OperationOutcome? {
-    if operationToken == token { operationToken = nil }
-    return arbiter.end(token, outcome: outcome)
   }
 
   private func detachTokenForInvalidation(_ token: OperationToken) {

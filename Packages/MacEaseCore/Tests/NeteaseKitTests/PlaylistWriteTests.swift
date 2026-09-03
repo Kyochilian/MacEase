@@ -216,13 +216,13 @@ private let eapiHeader =
 }
 
 @Test func writeAcknowledgementAcceptsOnlyCode200() throws {
-  try NeteaseSession.classifyWriteAcknowledgement(
+  try NeteaseSession.requireSuccess(
     data: Data(#"{"code":200}"#.utf8),
     response: okResponse
   )
   // 512 is the reference implementation's retry trigger; MacEase reports it.
   #expect(throws: NeteaseServiceError(source: .service, statusCode: 512)) {
-    try NeteaseSession.classifyWriteAcknowledgement(
+    try NeteaseSession.requireSuccess(
       data: Data(#"{"code":512}"#.utf8),
       response: okResponse
     )

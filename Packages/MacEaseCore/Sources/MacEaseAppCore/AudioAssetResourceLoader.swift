@@ -96,32 +96,22 @@ package final class AudioAssetResourceLoader: NSObject,
     to loadingRequest: AVAssetResourceLoadingRequest,
     dataRequest: AVAssetResourceLoadingDataRequest
   ) async throws {
-    let requestedOffset = dataRequest.requestedOffset
-    let currentOffset = max(dataRequest.currentOffset, requestedOffset)
-    guard requestedOffset >= 0, currentOffset >= 0 else {
-      throw AudioRangeError.invalidRange
-    }
+    guard
+      let requestedRange = try Self.requestedRange(
+        requestedOffset: dataRequest.requestedOffset,
+        currentOffset: dataRequest.currentOffset,
+        requestedLength: dataRequest.requestedLength,
+        requestsAllDataToEnd: dataRequest.requestsAllDataToEndOfResource,
+        byteCount: key.byteCount
+      )
+    else { return }
 
-    let requestedEnd: Int64
-    if dataRequest.requestsAllDataToEndOfResource {
-      requestedEnd = key.byteCount
-    } else {
-      let requestedLength = Int64(dataRequest.requestedLength)
-      guard requestedLength > 0, requestedOffset <= Int64.max - requestedLength else {
-        throw AudioRangeError.invalidRange
-      }
-      requestedEnd = min(requestedOffset + requestedLength, key.byteCount)
-    }
-    guard currentOffset < requestedEnd, currentOffset < key.byteCount else {
-      throw AudioRangeError.rangeOutOfBounds
-    }
-
-    var cursor = currentOffset
-    while cursor < requestedEnd {
+    var cursor = requestedRange.lowerBound
+    while cursor < requestedRange.upperBound {
       try Task.checkCancellation()
       let length = min(
         AudioRangePipeline.transferChunkBytes,
-        requestedEnd - cursor
+        requestedRange.upperBound - cursor
       )
       let range = try AudioByteRange(offset: cursor, length: length)
       let bytes = try await pipeline.data(
@@ -136,6 +126,37 @@ package final class AudioAssetResourceLoader: NSObject,
       dataRequest.respond(with: bytes)
       cursor += length
     }
+  }
+
+  /// Computes the unread byte interval. EOF probes and zero-length reads are
+  /// successful no-ops; only offsets beyond the resource are out of bounds.
+  package static func requestedRange(
+    requestedOffset: Int64,
+    currentOffset: Int64,
+    requestedLength: Int,
+    requestsAllDataToEnd: Bool,
+    byteCount: Int64
+  ) throws -> Range<Int64>? {
+    let currentOffset = max(currentOffset, requestedOffset)
+    guard requestedOffset >= 0, currentOffset >= 0, requestedLength >= 0 else {
+      throw AudioRangeError.invalidRange
+    }
+    guard requestedOffset <= byteCount, currentOffset <= byteCount else {
+      throw AudioRangeError.rangeOutOfBounds
+    }
+
+    let requestedEnd: Int64
+    if requestsAllDataToEnd {
+      requestedEnd = byteCount
+    } else {
+      let requestedLength = Int64(requestedLength)
+      guard requestedOffset <= Int64.max - requestedLength else {
+        throw AudioRangeError.invalidRange
+      }
+      requestedEnd = min(requestedOffset + requestedLength, byteCount)
+    }
+    guard currentOffset < requestedEnd else { return nil }
+    return currentOffset..<requestedEnd
   }
 
   private func fillContentInformation(

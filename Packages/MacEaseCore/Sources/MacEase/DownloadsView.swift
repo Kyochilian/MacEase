@@ -56,6 +56,12 @@ struct DownloadsView: View {
             Text(ByteFormat.short(download.byteCount))
               .font(.caption.monospacedDigit())
               .foregroundStyle(.secondary)
+            QueueNextButton(
+              track: download.track,
+              context: .downloads,
+              playback: playback,
+              session: session
+            )
             Button {
               playback.playDownloaded(download, session: session)
             } label: {

@@ -34,6 +34,9 @@ package final class AppSettings {
     static let lyricTranslation = "settings.lyrics.showsTranslation"
     static let lyricRomanisation = "settings.lyrics.showsRomanisation"
     static let verbatimLyrics = "settings.lyrics.verbatim"
+    static let nativeNotifications = "settings.notifications.enabled"
+    static let playbackNotifications = "settings.notifications.playback"
+    static let downloadNotifications = "settings.notifications.downloads"
     static let imageCacheLimitBytes = "settings.images.diskLimitBytes"
     static let audioCacheLimitBytes = "settings.audio.diskLimitBytes"
   }
@@ -59,6 +62,12 @@ package final class AppSettings {
       defaults.object(forKey: Key.lyricRomanisation) as? Bool ?? false
     usesVerbatimLyrics =
       defaults.object(forKey: Key.verbatimLyrics) as? Bool ?? true
+    nativeNotificationsEnabled =
+      defaults.object(forKey: Key.nativeNotifications) as? Bool ?? false
+    playbackNotificationsEnabled =
+      defaults.object(forKey: Key.playbackNotifications) as? Bool ?? true
+    downloadNotificationsEnabled =
+      defaults.object(forKey: Key.downloadNotifications) as? Bool ?? true
     imageCacheLimitBytes = Self.storedLimit(
       defaults,
       key: Key.imageCacheLimitBytes,
@@ -85,6 +94,27 @@ package final class AppSettings {
 
   package var usesVerbatimLyrics: Bool {
     didSet { defaults.set(usesVerbatimLyrics, forKey: Key.verbatimLyrics) }
+  }
+
+  /// Product preferences are deliberately separate from the system's
+  /// authorization. The master switch defaults off, so constructing settings
+  /// or launching the app can never itself cause a permission prompt.
+  package var nativeNotificationsEnabled: Bool {
+    didSet {
+      defaults.set(nativeNotificationsEnabled, forKey: Key.nativeNotifications)
+    }
+  }
+
+  package var playbackNotificationsEnabled: Bool {
+    didSet {
+      defaults.set(playbackNotificationsEnabled, forKey: Key.playbackNotifications)
+    }
+  }
+
+  package var downloadNotificationsEnabled: Bool {
+    didSet {
+      defaults.set(downloadNotificationsEnabled, forKey: Key.downloadNotifications)
+    }
   }
 
   package var imageCacheLimitBytes: Int64 {

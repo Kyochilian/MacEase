@@ -120,6 +120,76 @@ package struct PlaybackQueue: Equatable, Sendable {
     step(by: -1)
   }
 
+  /// Entries still ahead in the current pass, without wrapping into rows the
+  /// user has already heard. Queue UI uses this same order as Next.
+  package var upcomingIndices: [Int] {
+    let order = mode == .shuffle ? shuffleOrder : Array(0..<count)
+    guard let slot = order.firstIndex(of: currentIndex) else { return [] }
+    return Array(order.dropFirst(slot + 1))
+  }
+
+  /// Adds one new entry directly after the current entry in both sequential
+  /// and shuffled order. The returned index is where the caller inserts the
+  /// matching track in its one authoritative track array.
+  package mutating func insertNext() -> Int {
+    let insertionIndex = currentIndex + 1
+    count += 1
+    guard mode == .shuffle else { return insertionIndex }
+
+    shuffleOrder = shuffleOrder.map {
+      $0 >= insertionIndex ? $0 + 1 : $0
+    }
+    guard let slot = shuffleOrder.firstIndex(of: currentIndex) else {
+      preconditionFailure("Shuffle order lost the current queue entry")
+    }
+    shuffleOrder.insert(insertionIndex, at: slot + 1)
+    return insertionIndex
+  }
+
+  /// Moves an existing non-current entry to be the next one. Physical indices
+  /// and the shuffle permutation are remapped together; the current song keeps
+  /// its identity even when the moved entry came from before it.
+  package mutating func moveNext(from sourceIndex: Int) -> Int? {
+    guard (0..<count).contains(sourceIndex), sourceIndex != currentIndex else {
+      return nil
+    }
+
+    let oldCurrentIndex = currentIndex
+    let currentAfterRemoval = oldCurrentIndex - (sourceIndex < oldCurrentIndex ? 1 : 0)
+    let destinationIndex = currentAfterRemoval + 1
+    let remapped = Self.remapForMoveNext(
+      source: sourceIndex,
+      destination: destinationIndex
+    )
+
+    currentIndex = remapped(oldCurrentIndex)
+    guard mode == .shuffle else { return destinationIndex }
+
+    var order = shuffleOrder
+      .filter { $0 != sourceIndex }
+      .map(remapped)
+    guard let currentSlot = order.firstIndex(of: currentIndex) else {
+      preconditionFailure("Shuffle order lost the current queue entry")
+    }
+    order.insert(destinationIndex, at: currentSlot + 1)
+    shuffleOrder = order
+    return destinationIndex
+  }
+
+  /// Remaps a physical queue index after moving `source` to `destination`.
+  /// Both the queue's permutation and the controller's retry checkpoint use
+  /// this one mapping, so a shuffle edit cannot make them disagree.
+  package static func remapForMoveNext(
+    source: Int,
+    destination: Int
+  ) -> (Int) -> Int {
+    { oldIndex in
+      if oldIndex == source { return destination }
+      let afterRemoval = oldIndex > source ? oldIndex - 1 : oldIndex
+      return afterRemoval >= destination ? afterRemoval + 1 : afterRemoval
+    }
+  }
+
   /// Transition after the current track finished playing on its own.
   package func afterNaturalEnd() -> QueueAdvance {
     if mode == .repeatOne { return .replayCurrent }

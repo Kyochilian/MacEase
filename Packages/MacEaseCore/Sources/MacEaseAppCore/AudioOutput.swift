@@ -77,6 +77,7 @@ package final class AVPlayerAudioOutput: AudioOutput {
   private var rangeLoader: AudioAssetResourceLoader?
   private var pinnedCacheKey: AudioCacheKey?
   private var generation: UInt64 = 0
+  private var preparingGeneration: UInt64?
   private let rangePipeline: AudioRangePipeline?
 
   package var onPositionUpdate: (@MainActor (Double) -> Void)?
@@ -107,8 +108,16 @@ package final class AVPlayerAudioOutput: AudioOutput {
     resource: PlaybackResource,
     userAgent: String
   ) async throws -> AudioAssetInfo {
-    teardown()
+    // A controller intent already tears down the previous item. Keep direct
+    // callers safe too, without performing the same teardown twice.
+    if preparingGeneration != nil || loadedAsset != nil || player != nil {
+      teardown()
+    }
     let generation = self.generation
+    preparingGeneration = generation
+    defer {
+      if preparingGeneration == generation { preparingGeneration = nil }
+    }
     let asset: AVURLAsset
     switch resource.location {
     case .local(let url):
@@ -189,6 +198,7 @@ package final class AVPlayerAudioOutput: AudioOutput {
 
   package func teardown() {
     generation &+= 1
+    preparingGeneration = nil
     loadedAsset?.cancelLoading()
     loadedAsset = nil
     rangeLoader?.cancelAll()

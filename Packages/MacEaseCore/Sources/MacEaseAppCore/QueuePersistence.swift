@@ -73,7 +73,7 @@ package final class QueuePersistence {
       let stored = try await store.queue(accountID: accountID)
       guard isBound(to: accountID, revision: revision) else { return }
       if let stored {
-        playback?.restore(stored)
+        playback?.restore(stored, accountID: accountID)
         lastWritten = stored
       }
       lastFailure = nil

@@ -91,7 +91,12 @@ extension NeteaseSession {
   /// (1 request). The address is assembled locally; there is no endpoint for
   /// it, and no image is fetched from anyone.
   package func beginQRLogin() async throws -> QRLoginSession {
-    let request = try Self.qrKeyRequest()
+    let timestamp = Date().timeIntervalSince1970
+    let request = try Self.qrKeyRequest(
+      osVersion: Self.osVersion,
+      buildVersion: String(Int(timestamp)),
+      requestID: Self.requestID(timestamp: timestamp)
+    )
     let (data, response) = try await urlSession.data(for: request)
     let key = try Self.classifyQRKey(
       data: data,
@@ -108,7 +113,13 @@ extension NeteaseSession {
   /// One poll of a QR sign-in (1 request). The caller decides the interval and
   /// when to stop; nothing here schedules itself.
   package func pollQRLogin(key: String) async throws -> QRLoginStatus {
-    let request = try Self.qrCheckRequest(key: key)
+    let timestamp = Date().timeIntervalSince1970
+    let request = try Self.qrCheckRequest(
+      key: key,
+      osVersion: Self.osVersion,
+      buildVersion: String(Int(timestamp)),
+      requestID: Self.requestID(timestamp: timestamp)
+    )
     let (data, response) = try await urlSession.data(for: request)
     return try Self.classifyQRPoll(
       data: data,
@@ -116,15 +127,33 @@ extension NeteaseSession {
     )
   }
 
-  package static func qrKeyRequest() throws -> URLRequest {
-    try anonymousEAPIRequest(path: qrKeyEndpoint, body: #""type":3"#)
+  package static func qrKeyRequest(
+    osVersion: String,
+    buildVersion: String,
+    requestID: String
+  ) throws -> URLRequest {
+    try anonymousEAPIRequest(
+      path: qrKeyEndpoint,
+      body: #""type":3"#,
+      osVersion: osVersion,
+      buildVersion: buildVersion,
+      requestID: requestID
+    )
   }
 
-  package static func qrCheckRequest(key: String) throws -> URLRequest {
+  package static func qrCheckRequest(
+    key: String,
+    osVersion: String,
+    buildVersion: String,
+    requestID: String
+  ) throws -> URLRequest {
     let encoded = String(decoding: try JSONEncoder().encode(key), as: UTF8.self)
     return try anonymousEAPIRequest(
       path: qrCheckEndpoint,
-      body: #""key":\#(encoded),"type":3"#
+      body: #""key":\#(encoded),"type":3"#,
+      osVersion: osVersion,
+      buildVersion: buildVersion,
+      requestID: requestID
     )
   }
 
@@ -155,7 +184,7 @@ extension NeteaseSession {
     guard (200..<300).contains(response.statusCode) else {
       throw NeteaseServiceError(source: .http, statusCode: response.statusCode)
     }
-    let code = try JSONDecoder().decode(ServiceCode.self, from: data).code
+    let code = try JSONDecoder().decode(ServiceCodePayload.self, from: data).code
     switch code {
     case 800: return .expired
     case 801: return .waiting
@@ -179,7 +208,7 @@ extension NeteaseSession {
   ) async throws {
     let request = try Self.captchaRequest(phone: phone, countryCode: countryCode)
     let (data, response) = try await urlSession.data(for: request)
-    try Self.classifyWriteAcknowledgement(
+    try Self.requireSuccess(
       data: data,
       response: try Self.requireHTTPResponse(response)
     )
@@ -257,7 +286,7 @@ extension NeteaseSession {
     data: Data,
     response: HTTPURLResponse
   ) throws -> NeteaseCredential {
-    try classifyWriteAcknowledgement(data: data, response: response)
+    try requireSuccess(data: data, response: response)
     guard let credential = credential(fromSetCookie: response) else {
       throw NeteaseAuthError.noSessionInResponse
     }
@@ -280,7 +309,7 @@ extension NeteaseSession {
       requestID: Self.requestID(timestamp: timestamp)
     )
     let (data, response) = try await urlSession.data(for: request)
-    try Self.classifyWriteAcknowledgement(
+    try Self.requireSuccess(
       data: data,
       response: try Self.requireHTTPResponse(response)
     )
@@ -304,7 +333,7 @@ extension NeteaseSession {
     )
     let (data, response) = try await urlSession.data(for: request)
     let httpResponse = try Self.requireHTTPResponse(response)
-    try Self.classifyWriteAcknowledgement(data: data, response: httpResponse)
+    try Self.requireSuccess(data: data, response: httpResponse)
     guard let refreshed = Self.credential(fromSetCookie: httpResponse) else {
       throw NeteaseAuthError.noSessionInResponse
     }
@@ -392,7 +421,7 @@ extension NeteaseSession {
       credential: credential
     )
     let (data, response) = try await urlSession.data(for: request)
-    try Self.classifyWriteAcknowledgement(
+    try Self.requireSuccess(
       data: data,
       response: try Self.requireHTTPResponse(response)
     )
@@ -409,7 +438,7 @@ extension NeteaseSession {
       credential: credential
     )
     let (data, response) = try await urlSession.data(for: request)
-    try Self.classifyWriteAcknowledgement(
+    try Self.requireSuccess(
       data: data,
       response: try Self.requireHTTPResponse(response)
     )
@@ -539,7 +568,7 @@ extension NeteaseSession {
   ) async throws {
     let request = try Self.cloudDeleteRequest(songID: songID, credential: credential)
     let (data, response) = try await urlSession.data(for: request)
-    try Self.classifyWriteAcknowledgement(
+    try Self.requireSuccess(
       data: data,
       response: try Self.requireHTTPResponse(response)
     )
@@ -634,7 +663,7 @@ extension NeteaseSession {
       requestID: Self.requestID(timestamp: timestamp)
     )
     let (data, response) = try await urlSession.data(for: request)
-    try Self.classifyWriteAcknowledgement(
+    try Self.requireSuccess(
       data: data,
       response: try Self.requireHTTPResponse(response)
     )
@@ -659,36 +688,23 @@ extension NeteaseSession {
 
   // MARK: - Shared plumbing
 
-  /// The `code == 200` gate every list endpoint shares. An HTTP failure has no
-  /// service code to read, so it is classified first.
-  static func requireSuccess(
-    data: Data,
-    response: HTTPURLResponse
-  ) throws {
-    guard (200..<300).contains(response.statusCode) else {
-      throw NeteaseServiceError(source: .http, statusCode: response.statusCode)
-    }
-    let code = try JSONDecoder().decode(ServiceCode.self, from: data).code
-    guard code == 200 else {
-      throw NeteaseServiceError(source: .service, statusCode: code)
-    }
-  }
-
   /// The sign-in endpoints run before there is a credential, so the eapi
   /// header carries the platform identity and nothing else. No anonymous
   /// device token is invented to fill the gap.
   private static func anonymousEAPIRequest(
     path: String,
-    body: String
+    body: String,
+    osVersion: String,
+    buildVersion: String,
+    requestID: String
   ) throws -> URLRequest {
-    let timestamp = Date().timeIntervalSince1970
     let fields: [(String, String)] = [
       ("osver", osVersion),
       ("os", "osx"),
       ("appver", "0.1"),
-      ("buildver", String(Int(timestamp))),
+      ("buildver", buildVersion),
       ("channel", "github"),
-      ("requestId", requestID(timestamp: timestamp)),
+      ("requestId", requestID),
     ]
     return try eapiFormRequest(
       path: path,
@@ -727,7 +743,7 @@ extension NeteaseSession {
     url explicitURL: URL? = nil
   ) throws -> URLRequest {
     guard let url = explicitURL ?? eapiURL(path) else {
-      throw NeteaseAuthError.invalidResponse
+      throw NeteaseTransportError.invalidURL
     }
     var request = URLRequest(url: url)
     request.httpMethod = "POST"
@@ -817,10 +833,6 @@ extension Character {
   fileprivate var isASCIIDigit: Bool { isASCII && isNumber }
 }
 
-private struct ServiceCode: Decodable {
-  let code: Int
-}
-
 private struct QRKeyPayload: Decodable {
   let code: Int
   let unikey: String?
@@ -828,22 +840,13 @@ private struct QRKeyPayload: Decodable {
   private enum CodingKeys: String, CodingKey {
     case code
     case unikey
-    case data
   }
 
-  private struct Inner: Decodable {
-    let unikey: String?
-  }
-
-  /// The module wraps the service body in `data` before returning it, but the
-  /// service itself answers at the top level. Both spellings are read so the
-  /// key is found either way.
+  /// The service answers with `unikey` at the top level.
   init(from decoder: any Decoder) throws {
     let container = try decoder.container(keyedBy: CodingKeys.self)
     code = try container.decode(Int.self, forKey: .code)
-    unikey =
-      try container.decodeIfPresent(String.self, forKey: .unikey)
-      ?? container.decodeIfPresent(Inner.self, forKey: .data)?.unikey
+    unikey = try container.decodeIfPresent(String.self, forKey: .unikey)
   }
 }
 

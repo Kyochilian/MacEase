@@ -34,6 +34,7 @@ struct MacEaseApp: App {
   @State private var scrobble: ScrobbleCoordinator
   @State private var arbiter: OperationArbiter
   @State private var settings: AppSettings
+  @State private var nativeNotifications: NativeNotificationCoordinator
   @State private var updater: AppUpdater
   @State private var artwork: ArtworkLoader
   /// Temporary, evictable HTTP ranges. The player owns the active pin; the
@@ -69,6 +70,14 @@ struct MacEaseApp: App {
     let updater = AppUpdater()
     let artwork = ArtworkLoader(
       diskCapacityBytes: Int(settings.imageCacheLimitBytes)
+    )
+    let nativeNotifications = NativeNotificationCoordinator(
+      settings: settings,
+      center: SystemNativeNotificationCenter(),
+      activity: MacApplicationActivity(),
+      cachedArtwork: { [weak artwork] url in
+        artwork?.cachedNotificationArtwork(for: url)
+      }
     )
     let audioCache = Self.openAudioRangeCache(
       limitBytes: settings.audioCacheLimitBytes
@@ -119,7 +128,9 @@ struct MacEaseApp: App {
       vault: vault,
       arbiter: arbiter
     )
-    playback.onLifecycleEvent = { [weak scrobble, weak login] event in
+    playback.onLifecycleEvent = {
+      [weak scrobble, weak login, weak nativeNotifications] event in
+      nativeNotifications?.handle(event)
       guard let login else { return }
       scrobble?.handle(event, session: login)
     }
@@ -172,9 +183,15 @@ struct MacEaseApp: App {
     if let downloads {
       playback.attach(downloads: downloads)
       downloads.attach(playback: playback)
+      downloads.onTerminalEvent = { [weak nativeNotifications] event in
+        nativeNotifications?.handle(event)
+      }
     }
     playback.onExplicitStop = {
       queuePersistence?.clearQueueAfterExplicitStop()
+    }
+    playback.onQueueEdited = {
+      Task { await queuePersistence?.save() }
     }
     library.onPersistablePlaylistsChanged = { accountID, playlists in
       await queuePersistence?.savePlaylists(playlists, accountID: accountID)
@@ -183,7 +200,8 @@ struct MacEaseApp: App {
     // of them, so the session owner clears everything, not just the reporter.
     login.onIdentityChanged = {
       [weak playback, weak library, weak discovery, weak collections, weak lyrics,
-        weak catalog, weak radio, weak downloads, weak scrobble, weak nowPlaying] in
+        weak catalog, weak radio, weak downloads, weak scrobble, weak nowPlaying,
+        weak nativeNotifications] in
       Self.clearSessionScopedState(
         playback: playback,
         scrobble: scrobble,
@@ -194,7 +212,8 @@ struct MacEaseApp: App {
         catalog: catalog,
         radio: radio,
         lyrics: lyrics,
-        nowPlaying: nowPlaying
+        nowPlaying: nowPlaying,
+        nativeNotifications: nativeNotifications
       )
     }
     // Every path that establishes or drops an account arrives here, so QR,
@@ -202,10 +221,12 @@ struct MacEaseApp: App {
     // the same single launch-scoped Discover prefetch. None of them carries a
     // copy of this decision, so none of them can be left out of it.
     login.onValidatedAccountChanged = {
-      [weak login, weak library, weak discovery, weak downloads] account in
+      [weak login, weak library, weak discovery, weak downloads,
+        weak nativeNotifications] account in
       // Binding and cancellation are synchronous with the identity commit;
       // an old CDN task cannot wait for a later SwiftUI scheduling turn.
       downloads?.bind(accountID: account?.userID)
+      nativeNotifications?.bind(accountID: account?.userID)
       Task { @MainActor in
         guard let account else {
           await queuePersistence?.deactivate()
@@ -237,6 +258,7 @@ struct MacEaseApp: App {
     _scrobble = State(initialValue: scrobble)
     _arbiter = State(initialValue: arbiter)
     _settings = State(initialValue: settings)
+    _nativeNotifications = State(initialValue: nativeNotifications)
     _updater = State(initialValue: updater)
     _artwork = State(initialValue: artwork)
     _audioRanges = State(initialValue: audioCache.pipeline)
@@ -253,12 +275,17 @@ struct MacEaseApp: App {
     )
     appDelegate.configure(
       router: router,
+      refreshNotificationAuthorization: { [weak nativeNotifications] in
+        await nativeNotifications?.refreshAuthorizationStatus()
+      },
       prepareForTermination: {
+        nativeNotifications.reset()
         playback.prepareForSessionMutation()
         await scrobble.settle()
         nowPlaying.clear()
       }
     )
+    Task { await nativeNotifications.refreshAuthorizationStatus() }
   }
 
   /// Everything an identity change has to discard, in one place.
@@ -271,7 +298,7 @@ struct MacEaseApp: App {
   @MainActor
   static func clearSessionScopedState(
     playback: PlaybackController?,
-    scrobble: ScrobbleCoordinator? = nil,
+    scrobble: ScrobbleCoordinator?,
     downloads: DownloadCoordinator?,
     library: PlaylistLibraryCoordinator?,
     discovery: DiscoveryCoordinator?,
@@ -279,7 +306,8 @@ struct MacEaseApp: App {
     catalog: CatalogCoordinator?,
     radio: RadioCoordinator?,
     lyrics: LyricsCoordinator?,
-    nowPlaying: NowPlayingCoordinator?
+    nowPlaying: NowPlayingCoordinator?,
+    nativeNotifications: NativeNotificationCoordinator?
   ) {
     playback?.stopForSessionChange()
     scrobble?.reset()
@@ -293,6 +321,7 @@ struct MacEaseApp: App {
     // The system surface must not keep advertising a track that belonged to a
     // session that no longer exists.
     nowPlaying?.clear()
+    nativeNotifications?.reset()
   }
 
   static func openStorage(
@@ -486,6 +515,7 @@ struct MacEaseApp: App {
           }
           SettingsView(
             settings: settings,
+            nativeNotifications: nativeNotifications,
             updater: updater,
             artwork: artwork,
             audioRanges: audioRanges,
@@ -498,11 +528,11 @@ struct MacEaseApp: App {
         UnresolvedOutcomeBanner(arbiter: arbiter)
         PlaybackBarView(
           session: session,
-          library: library,
-          discovery: discovery,
           playback: playback,
           arbiter: arbiter,
-          downloads: downloads
+          downloads: downloads,
+          mediaRouter: mediaRouter,
+          artwork: artwork
         )
       }
       .frame(minWidth: 760, minHeight: 600)
@@ -621,741 +651,8 @@ struct MacEaseApp: App {
   }
 }
 
-private struct SessionView: View {
-  @Bindable var session: LoginCoordinator
-  let arbiter: OperationArbiter
-  /// Non-nil when local storage is not doing its job, so a queue that is not
-  /// being saved never looks like one that is.
-  let storageStatus: String?
-  @State private var showsWebLogin = false
-
-  var body: some View {
-    VStack(spacing: 0) {
-      HStack(spacing: 10) {
-        Text("MacEase")
-          .font(.headline)
-
-        Label(sessionPresenceTitle, systemImage: sessionPresenceIcon)
-          .foregroundStyle(
-            session.storedSessionPresence == .stored ? .green : .secondary
-          )
-
-        Spacer()
-
-        Button("Validate Session", systemImage: "checkmark.shield") {
-          mutateSession(session.validateSession)
-        }
-        Button("Refresh Token · 1 request", systemImage: "arrow.triangle.2.circlepath") {
-          mutateSession(session.refreshSession)
-        }
-        .help("Exchanges the stored session for a fresh one")
-        Button("Sign Out · up to 2 requests", systemImage: "rectangle.portrait.and.arrow.right") {
-          mutateSession(session.signOutEverywhere)
-        }
-        .help("Revokes the session on NetEase, then clears it here")
-      }
-      .padding(12)
-      .disabled(arbiter.isBusy)
-
-      Divider()
-
-      NativeSignInView(
-        session: session,
-        arbiter: arbiter,
-        mutate: mutateSession
-      )
-
-      Divider()
-
-      DisclosureGroup("Other ways to sign in", isExpanded: $showsWebLogin) {
-        VStack(spacing: 0) {
-          HStack(spacing: 8) {
-            Button("Open Login Page", systemImage: "safari") {
-              session.loadLoginPage()
-            }
-            Button("Save Session From Page", systemImage: "key.fill") {
-              mutateSession(session.saveSession)
-            }
-            Button("Clear Session", systemImage: "trash") {
-              mutateSession(session.clearSession)
-            }
-            .help("Clears locally only; Sign Out also revokes on NetEase")
-            Spacer()
-          }
-          .padding(.vertical, 8)
-          .disabled(arbiter.isBusy)
-
-          LoginWebView(webView: session.webView)
-            .frame(minHeight: 320)
-
-          HStack(spacing: 8) {
-            SecureField("Cookie header", text: $session.manualCookieHeader)
-            Button("Import Session", systemImage: "square.and.arrow.down") {
-              mutateSession(session.importSession)
-            }
-            .disabled(arbiter.isBusy)
-          }
-          .padding(.vertical, 8)
-        }
-      }
-      .padding(.horizontal, 12)
-
-      Divider()
-
-      Text(session.status)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(12)
-
-      if let storageStatus {
-        Label(storageStatus, systemImage: "externaldrive.badge.exclamationmark")
-          .font(.caption)
-          .foregroundStyle(.secondary)
-          .frame(maxWidth: .infinity, alignment: .leading)
-          .padding(.horizontal, 12)
-          .padding(.bottom, 12)
-      }
-    }
-  }
-
-  private var sessionPresenceTitle: String {
-    switch session.storedSessionPresence {
-    case .unknown: "Session status unknown"
-    case .absent: "Not signed in"
-    case .stored: "Session stored"
-    }
-  }
-
-  private var sessionPresenceIcon: String {
-    switch session.storedSessionPresence {
-    case .unknown: "questionmark.circle"
-    case .absent: "person.crop.circle"
-    case .stored: "checkmark.circle.fill"
-    }
-  }
-
-  /// A session mutation only starts when the arbiter is free, so it can no
-  /// longer cancel a write that has already reached the server. What happens
-  /// to per-account local data follows from the account the operation left in
-  /// effect, which `LoginCoordinator` reports once for every path — including
-  /// a QR authorisation, which arrives long after this call has returned.
-  private func mutateSession(
-    _ operation: @escaping @MainActor () async -> SessionMutationResult
-  ) {
-    Task { _ = await operation() }
-  }
-}
-
-private struct PlaylistLibraryView: View {
-  let session: LoginCoordinator
-  let library: PlaylistLibraryCoordinator
-  let discovery: DiscoveryCoordinator
-  let playback: PlaybackController
-  let arbiter: OperationArbiter
-  let artwork: ArtworkLoader
-  let downloads: DownloadCoordinator?
-  @State private var newPlaylistName = ""
-  @State private var newPlaylistIsPrivate = false
-  @State private var submittedPlaylistName: String?
-  @State private var renameText = ""
-  @State private var playlistPendingDeletion: UserPlaylist?
-  @State private var playlistPendingPublication: UserPlaylist?
-
-  private var requestInFlight: Bool { library.isLoading || arbiter.isBusy }
-
-  var body: some View {
-    VStack(spacing: 0) {
-      toolbar
-      createRow
-
-      Divider()
-
-      if library.playlists.isEmpty && !library.isLoading {
-        Text(library.status)
-          .foregroundStyle(.secondary)
-          .frame(maxWidth: .infinity, maxHeight: .infinity)
-      } else {
-        HSplitView {
-          playlistList
-          detailPane
-        }
-      }
-
-      Divider()
-
-      HStack {
-        if library.isLoading {
-          ProgressView()
-            .controlSize(.small)
-        }
-        Text(library.status)
-          .foregroundStyle(.secondary)
-        Spacer()
-      }
-      .padding(12)
-    }
-    .onChange(of: library.selectedPlaylist?.id) {
-      renameText = library.selectedPlaylist?.name ?? ""
-    }
-    .onChange(of: library.lastCreateReceipt?.id) {
-      guard let receipt = library.lastCreateReceipt, receipt.succeeded,
-        let submitted = submittedPlaylistName
-      else { return }
-      // Only clear what this action submitted: a late completion must not
-      // wipe a name the user has since typed.
-      if newPlaylistName == submitted {
-        newPlaylistName = ""
-      }
-      submittedPlaylistName = nil
-    }
-    .confirmationDialog(
-      playlistPendingDeletion.map { "Delete \($0.name)?" } ?? "Delete playlist?",
-      isPresented: Binding(
-        get: { playlistPendingDeletion != nil },
-        set: { if !$0 { playlistPendingDeletion = nil } }
-      ),
-      titleVisibility: .visible
-    ) {
-      Button("Delete · 1 request", role: .destructive) {
-        if let playlist = playlistPendingDeletion {
-          library.deletePlaylist(playlist, session: session)
-        }
-        playlistPendingDeletion = nil
-      }
-      Button("Cancel", role: .cancel) { playlistPendingDeletion = nil }
-    } message: {
-      Text("This permanently deletes the playlist from your NetEase account.")
-    }
-    .confirmationDialog(
-      playlistPendingPublication.map { "Make \($0.name) public?" }
-        ?? "Make playlist public?",
-      isPresented: Binding(
-        get: { playlistPendingPublication != nil },
-        set: { if !$0 { playlistPendingPublication = nil } }
-      ),
-      titleVisibility: .visible
-    ) {
-      Button("Make Public · 1 request", role: .destructive) {
-        if let playlist = playlistPendingPublication {
-          library.publishPlaylist(playlist, session: session)
-        }
-        playlistPendingPublication = nil
-      }
-      Button("Cancel", role: .cancel) { playlistPendingPublication = nil }
-    } message: {
-      Text(
-        "This permanently makes the playlist public. MacEase cannot make it private again."
-      )
-    }
-  }
-
-  @ViewBuilder private var toolbar: some View {
-    HStack {
-      Text("Your Playlists")
-        .font(.headline)
-      Spacer()
-      Button("Load Playlists · 1 request", systemImage: "arrow.clockwise") {
-        library.load(reset: true, session: session)
-      }
-      .disabled(session.account == nil || requestInFlight)
-      Button("Load Liked IDs · 1 request", systemImage: "heart") {
-        library.loadLikedIDs(session: session)
-      }
-      .disabled(session.account == nil || requestInFlight)
-      .help("Marks loaded track rows that are in your liked songs")
-      if library.canLoadMore {
-        Button("Load More · 1 request", systemImage: "plus") {
-          library.load(reset: false, session: session)
-        }
-        .disabled(requestInFlight)
-      } else if library.playlistsNeedReload {
-        // The page cursor no longer names the same server position, so
-        // continuing from it could skip or repeat rows.
-        Label("Reload to page further", systemImage: "exclamationmark.circle")
-          .font(.caption)
-          .foregroundStyle(.secondary)
-          .help("A write changed your playlists; Load Playlists starts over")
-      }
-    }
-    .padding(12)
-  }
-
-  @ViewBuilder private var createRow: some View {
-    HStack {
-      TextField("New playlist name", text: $newPlaylistName)
-        .frame(maxWidth: 240)
-      // Privacy is set when the playlist is created. That is the only
-      // direction NetEase is known to accept, so it is the only one offered.
-      Toggle("Private", isOn: $newPlaylistIsPrivate)
-        .toggleStyle(.checkbox)
-        .help("Creates the playlist private; only you can see it")
-      Button("Create · 1 request", systemImage: "plus.rectangle.on.folder") {
-        submittedPlaylistName = newPlaylistName
-        library.createPlaylist(
-          named: newPlaylistName,
-          isPrivate: newPlaylistIsPrivate,
-          session: session
-        )
-      }
-      .disabled(
-        session.account == nil || requestInFlight
-          || newPlaylistName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-      )
-      Spacer()
-    }
-    .padding(.horizontal, 12)
-    .padding(.bottom, 12)
-  }
-
-  @ViewBuilder private var playlistList: some View {
-    List(
-      library.playlists,
-      id: \.id,
-      selection: Binding(
-        get: { library.selectedPlaylist?.id },
-        set: { id in
-          guard let playlist = library.playlists.first(where: { $0.id == id })
-          else { return }
-          library.loadTracks(for: playlist, session: session)
-        }
-      )
-    ) { playlist in
-      // Selection opens the playlist, so the row is not itself a button and
-      // the trailing control is not nested inside one.
-      HStack {
-        VStack(alignment: .leading, spacing: 3) {
-          Text(playlist.name)
-          Text(
-            "\(playlist.trackCount) tracks · "
-              + (playlist.owned ? "Created" : "Saved")
-          )
-          .font(.caption)
-          .foregroundStyle(.secondary)
-        }
-        Spacer()
-        if playlist.owned {
-          Button {
-            playlistPendingDeletion = playlist
-          } label: {
-            Image(systemName: "trash")
-          }
-          .buttonStyle(.borderless)
-          .disabled(requestInFlight)
-          .help("Delete playlist · 1 request")
-          .accessibilityLabel("Delete \(playlist.name)")
-        } else {
-          Button {
-            library.setSubscribed(
-              false,
-              playlistID: playlist.id,
-              playlistName: playlist.name,
-              session: session
-            )
-          } label: {
-            Image(systemName: "minus.circle")
-          }
-          .buttonStyle(.borderless)
-          .disabled(requestInFlight)
-          .help("Unsubscribe from this saved playlist · 1 request")
-          .accessibilityLabel("Unsubscribe from \(playlist.name)")
-        }
-      }
-      .padding(.vertical, 3)
-      .tag(playlist.id)
-    }
-    .frame(minWidth: 340)
-  }
-
-  @ViewBuilder private var detailPane: some View {
-    VStack(spacing: 0) {
-      if let playlist = library.selectedPlaylist {
-        detailHeader(playlist)
-
-        Divider()
-
-        if library.tracks.isEmpty {
-          Text(library.status)
-            .foregroundStyle(.secondary)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else {
-          List(library.tracks, id: \.id) { track in
-            trackRow(track)
-          }
-        }
-      } else {
-        Text(
-          "Choose a playlist. The first batch uses one playlist-detail request "
-            + "and, for a nonempty playlist, one song-detail request."
-        )
-        .foregroundStyle(.secondary)
-        .multilineTextAlignment(.center)
-        .padding(24)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-      }
-    }
-    .frame(minWidth: 340)
-  }
-
-  @ViewBuilder private func detailHeader(_ playlist: UserPlaylist) -> some View {
-    HStack {
-      VStack(alignment: .leading, spacing: 3) {
-        Text(playlist.name)
-          .font(.headline)
-        Text("\(playlist.trackCount) tracks")
-          .font(.caption)
-          .foregroundStyle(.secondary)
-      }
-      Spacer()
-      if playlist.owned {
-        TextField("Rename", text: $renameText)
-          .frame(maxWidth: 160)
-        Button("Rename · 1 request") {
-          library.renameSelectedPlaylist(to: renameText, session: session)
-        }
-        .disabled(
-          requestInFlight
-            || renameText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        )
-        .help("Changes only the name; description and tags are untouched")
-        if playlist.isPrivate == true {
-          Button("Make Public · 1 request") {
-            playlistPendingPublication = playlist
-          }
-          .disabled(requestInFlight)
-          .help("Permanently publishes this private playlist")
-        }
-      }
-      if library.canLoadMoreTracks {
-        Button("Load More Tracks · 1 request", systemImage: "plus") {
-          library.loadMoreTracks(session: session)
-        }
-        .disabled(requestInFlight)
-      } else if library.tracksNeedReload {
-        Label("Reload to page further", systemImage: "exclamationmark.circle")
-          .font(.caption)
-          .foregroundStyle(.secondary)
-          .help("A track was added; open the playlist again to page further")
-      }
-    }
-    .padding(12)
-  }
-
-  @ViewBuilder private func trackRow(_ track: Track) -> some View {
-    HStack {
-      TrackRowLabel(track: track, loader: artwork)
-      Spacer()
-      LikeButton(
-        track: track,
-        library: library,
-        session: session,
-        disabled: requestInFlight
-      )
-      AddToPlaylistMenu(
-        track: track,
-        library: library,
-        session: session,
-        disabled: requestInFlight
-      )
-      DownloadTrackButton(
-        track: track,
-        quality: playback.quality,
-        downloads: downloads,
-        session: session,
-        disabled: requestInFlight
-      )
-      if library.selectedPlaylist?.owned == true {
-        Button {
-          // Named by id: a list that changed cannot make this land on a
-          // different row.
-          library.removeSelectedPlaylistTrack(id: track.id, session: session)
-        } label: {
-          Image(systemName: "minus.circle")
-        }
-        .buttonStyle(.borderless)
-        .disabled(requestInFlight)
-        .help("Remove from this playlist · 1 request")
-        .accessibilityLabel("Remove \(track.name)")
-      }
-      PlayTrackButton(
-        track: track,
-        tracks: library.tracks,
-        context: playbackContext,
-        playback: playback,
-        session: session
-      )
-      .help("Starts the queue from this track over the loaded list")
-    }
-    .padding(.vertical, 3)
-  }
-
-  /// The open playlist is what a restored queue names, so a relaunch can say
-  /// what the user was listening to rather than just how many tracks it held.
-  private var playbackContext: PlaybackContext {
-    guard let playlist = library.selectedPlaylist else {
-      return .dailyRecommendations
-    }
-    return .playlist(id: playlist.id, name: playlist.name)
-  }
-}
-
-private struct PlayRecordsView: View {
-  let session: LoginCoordinator
-  let library: PlaylistLibraryCoordinator
-  @Bindable var discovery: DiscoveryCoordinator
-  let playback: PlaybackController
-  let scrobble: ScrobbleCoordinator
-  let arbiter: OperationArbiter
-  let artwork: ArtworkLoader
-
-  private var requestInFlight: Bool { discovery.isLoading || arbiter.isBusy }
-
-  var body: some View {
-    VStack(spacing: 0) {
-      HStack {
-        Text("Listening Rankings")
-          .font(.headline)
-        Text(scrobble.status)
-          .font(.caption)
-          .foregroundStyle(.secondary)
-        Spacer()
-        Picker("Scope", selection: $discovery.recordScope) {
-          Text("All Time").tag(PlayRecordScope.allTime)
-          Text("Last Week").tag(PlayRecordScope.lastWeek)
-        }
-        .fixedSize()
-        .disabled(requestInFlight)
-        Button("Load · 1 request", systemImage: "arrow.clockwise") {
-          discovery.loadRecords(session: session)
-        }
-        .disabled(session.account == nil || requestInFlight)
-      }
-      .padding(12)
-
-      Divider()
-
-      if discovery.records.isEmpty {
-        Text(discovery.status)
-          .foregroundStyle(.secondary)
-          .frame(maxWidth: .infinity, maxHeight: .infinity)
-      } else {
-        List(Array(discovery.records.enumerated()), id: \.element.track.id) {
-          rank, entry in
-          HStack {
-            Text("\(rank + 1)")
-              .font(.caption.monospacedDigit())
-              .foregroundStyle(.secondary)
-              .frame(width: 28, alignment: .trailing)
-            TrackRowLabel(track: entry.track, loader: artwork)
-            Spacer()
-            Text("\(entry.playCount) plays")
-              .font(.caption.monospacedDigit())
-              .foregroundStyle(.secondary)
-            PlayTrackButton(
-              track: entry.track,
-              tracks: discovery.records.map(\.track),
-              context: .listeningRankings,
-              playback: playback,
-              session: session
-            )
-          }
-          .padding(.vertical, 3)
-        }
-      }
-    }
-  }
-}
-
-private struct PlaybackBarView: View {
-  let session: LoginCoordinator
-  let library: PlaylistLibraryCoordinator
-  let discovery: DiscoveryCoordinator
-  @Bindable var playback: PlaybackController
-  let arbiter: OperationArbiter
-  let downloads: DownloadCoordinator?
-  @State private var scrubPosition: Double?
-
-  private var requestInFlight: Bool { arbiter.isBusy }
-
-  var body: some View {
-    VStack(spacing: 0) {
-      HStack(spacing: 10) {
-        Image(systemName: "music.note")
-          .foregroundStyle(.secondary)
-        VStack(alignment: .leading, spacing: 2) {
-          HStack(spacing: 6) {
-            Text(playback.trackName ?? "Nothing playing")
-            if let position = playback.queuePosition {
-              Text(position)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            }
-          }
-          Text(playback.status)
-            .font(.caption)
-            .foregroundStyle(.secondary)
-            .lineLimit(1)
-        }
-        Spacer()
-        if playback.phase == .playing || playback.phase == .paused {
-          Text(timeString(scrubPosition ?? playback.positionSeconds))
-            .font(.caption.monospacedDigit())
-            .foregroundStyle(.secondary)
-          if let duration = playback.durationSeconds {
-            Slider(
-              value: Binding(
-                get: { min(scrubPosition ?? playback.positionSeconds, duration) },
-                set: { scrubPosition = $0 }
-              ),
-              in: 0...duration
-            ) { editing in
-              if !editing {
-                if let scrubPosition {
-                  playback.seek(to: scrubPosition)
-                }
-                scrubPosition = nil
-              }
-            }
-            .frame(width: 180)
-            .help("Seek (local, no request)")
-            Text(timeString(duration))
-              .font(.caption.monospacedDigit())
-              .foregroundStyle(.secondary)
-          }
-        }
-        if let track = playback.currentTrack {
-          DownloadTrackButton(
-            track: track,
-            quality: playback.quality,
-            downloads: downloads,
-            session: session,
-            disabled: requestInFlight
-          )
-        }
-        SystemRoutePicker()
-          .frame(width: 28, height: 28)
-          .help("Choose an AirPlay or system audio route")
-        Picker("Quality", selection: $playback.quality) {
-          ForEach(PlaybackQuality.allCases, id: \.self) { quality in
-            Text(quality.rawValue).tag(quality)
-          }
-        }
-        .fixedSize()
-        .help("Applies to the next explicit Play")
-        .disabled(arbiter.isBusy)
-        if playback.canPlayAgain {
-          Button(
-            playback.retryResumesPlayback
-              ? "Play Again" : "Restore Paused",
-            systemImage: "arrow.counterclockwise"
-          ) {
-            playback.playAgain(session: session)
-          }
-          .disabled(session.account == nil)
-          .help("Uses a matching download or resolves a fresh song URL")
-        }
-        if playback.isActive {
-          Button("Stop", systemImage: "stop.fill") {
-            playback.stop()
-          }
-        }
-      }
-      .padding(12)
-
-      Divider()
-
-      HStack(spacing: 10) {
-        Button("Previous", systemImage: "backward.end.fill") {
-          playback.playPrevious(session: session)
-        }
-        .disabled(!playback.canPlayPrevious(session: session))
-        if playback.phase == .paused {
-          Button("Resume", systemImage: "play.fill") {
-            playback.resume()
-          }
-        } else {
-          Button("Pause", systemImage: "pause.fill") {
-            playback.pause()
-          }
-          .disabled(playback.phase != .playing)
-        }
-        Button("Next", systemImage: "forward.end.fill") {
-          playback.playNext(session: session)
-        }
-        .disabled(!playback.canPlayNext(session: session))
-
-        Picker("Mode", selection: $playback.playbackMode) {
-          ForEach(PlaybackMode.allCases, id: \.self) { mode in
-            Text(mode.label).tag(mode)
-          }
-        }
-        .fixedSize()
-        .help(
-          "Order after a track ends naturally; matching downloads play locally, "
-            + "otherwise confirmed unavailability uses bounded downward quality recovery"
-        )
-
-        Spacer()
-
-        Button {
-          playback.isMuted.toggle()
-        } label: {
-          Image(
-            systemName: playback.isMuted
-              ? "speaker.slash.fill" : "speaker.wave.2.fill"
-          )
-        }
-        .buttonStyle(.borderless)
-        .help("Mute (local, no request)")
-        Slider(value: $playback.volume, in: 0...1)
-          .frame(width: 100)
-          .help("Volume (local, no request)")
-
-        Menu {
-          ForEach([15, 30, 45, 60, 90], id: \.self) { minutes in
-            Button("\(minutes) min") {
-              playback.setSleepTimer(minutes: minutes)
-            }
-          }
-          Button("Off") {
-            playback.setSleepTimer(minutes: 0)
-          }
-          Divider()
-          Toggle("Stop immediately at deadline", isOn: $playback.sleepStopsImmediately)
-        } label: {
-          Label(sleepLabel, systemImage: "moon.zzz")
-        }
-        .fixedSize()
-        .help("Local timer; by default it lets the current track finish")
-      }
-      .padding(12)
-    }
-    // A drag session can outlive the slider when the track ends mid-drag;
-    // stale scrub state would freeze the next track's displayed position.
-    .onChange(of: playback.phase) {
-      if playback.phase != .playing && playback.phase != .paused {
-        scrubPosition = nil
-      }
-    }
-  }
-
-  private var sleepLabel: String {
-    switch playback.sleepTimer {
-    case .off:
-      "Sleep Timer"
-    case .armed(let deadline):
-      "Sleep at " + deadline.formatted(date: .omitted, time: .shortened)
-    case .finishingTrack:
-      "Sleep after this track"
-    }
-  }
-
-  private func timeString(_ seconds: Double) -> String {
-    let total = Int(seconds.rounded(.down))
-    return String(format: "%d:%02d", total / 60, total % 60)
-  }
-}
-
 extension PlaybackMode {
-  fileprivate var label: String {
+  var label: String {
     switch self {
     case .sequential: "Sequential"
     case .repeatAll: "Repeat All"
@@ -1393,7 +690,7 @@ private struct UnresolvedOutcomeBanner: View {
   }
 }
 
-private struct LoginWebView: NSViewRepresentable {
+struct LoginWebView: NSViewRepresentable {
   let webView: WKWebView
 
   func makeNSView(context: Context) -> WKWebView {

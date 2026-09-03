@@ -7,6 +7,7 @@ import SwiftUI
 /// one explicit network action to the app's single Sparkle controller.
 struct SettingsView: View {
   @Bindable var settings: AppSettings
+  @Bindable var nativeNotifications: NativeNotificationCoordinator
   @Bindable var updater: AppUpdater
   let artwork: ArtworkLoader
   let audioRanges: AudioRangePipeline?
@@ -48,6 +49,50 @@ struct SettingsView: View {
         Text(updater.status)
           .font(.caption)
           .foregroundStyle(.secondary)
+      }
+
+      Section("Notifications") {
+        Toggle(
+          "Native notifications",
+          isOn: Binding(
+            get: { nativeNotifications.isEnabled },
+            set: { enabled in
+              Task { await nativeNotifications.setEnabled(enabled) }
+            }
+          )
+        )
+        Toggle(
+          "Now Playing",
+          isOn: Binding(
+            get: { nativeNotifications.playbackIsEnabled },
+            set: { nativeNotifications.setPlaybackEnabled($0) }
+          )
+        )
+        .disabled(!nativeNotifications.isEnabled)
+        Toggle(
+          "Download results",
+          isOn: Binding(
+            get: { nativeNotifications.downloadsAreEnabled },
+            set: { nativeNotifications.setDownloadsEnabled($0) }
+          )
+        )
+        .disabled(!nativeNotifications.isEnabled)
+        LabeledContent(
+          "System permission",
+          value: nativeNotifications.authorizationStatus.description
+        )
+        if nativeNotifications.authorizationStatus == .denied {
+          Text(
+            "Notifications are denied. Open System Settings, choose "
+              + "Notifications, then select MacEase to change access."
+          )
+          .font(.caption)
+          .foregroundStyle(.secondary)
+        } else {
+          Text(nativeNotifications.status)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
       }
 
       Section("About") {
@@ -161,7 +206,10 @@ struct SettingsView: View {
       }
     }
     .formStyle(.grouped)
-    .task { await refresh() }
+    .task {
+      await refresh()
+      await nativeNotifications.refreshAuthorizationStatus()
+    }
     .onChange(of: settings.imageCacheLimitBytes) {
       artwork.setDiskCapacity(Int(settings.imageCacheLimitBytes))
       Task { await refresh() }

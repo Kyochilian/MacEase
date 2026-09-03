@@ -66,3 +66,71 @@ extension SessionGuardedCoordinator {
     return true
   }
 }
+
+/// The common claim state used by coordinators that have one active operation
+/// lane. Keeping the token and validated account together prevents a caller
+/// from starting work with only half of the preflight completed.
+@MainActor
+package struct SessionOperationClaim {
+  package let token: OperationToken
+  package let account: NeteaseAccount
+}
+
+/// Claims one read or write for a single-operation coordinator. The caller
+/// supplies its local busy flag and token storage; all account/arbiter checks
+/// stay in this shared boundary.
+@MainActor
+package func claimSessionOperation(
+  _ name: String,
+  effect: OperationEffect,
+  session: any SessionProviding,
+  arbiter: OperationArbiter,
+  isLoading: Bool,
+  noAccountStatus: String,
+  status: inout String,
+  operationToken: inout OperationToken?
+) -> SessionOperationClaim? {
+  guard !isLoading, let token = arbiter.begin(name: name, effect: effect) else {
+    return nil
+  }
+  guard let account = session.account else {
+    arbiter.end(token, outcome: .failed)
+    status = noAccountStatus
+    return nil
+  }
+  operationToken = token
+  return SessionOperationClaim(token: token, account: account)
+}
+
+@MainActor
+@discardableResult
+package func releaseSessionOperation(
+  _ token: OperationToken,
+  currentToken: inout OperationToken?,
+  arbiter: OperationArbiter,
+  outcome: OperationOutcome
+) -> OperationOutcome? {
+  if currentToken == token { currentToken = nil }
+  return arbiter.end(token, outcome: outcome)
+}
+
+@MainActor
+package func finishSessionOperation(
+  generation expectedGeneration: Int,
+  currentGeneration: Int,
+  isLoading: inout Bool,
+  task: inout Task<Void, Never>?
+) {
+  guard expectedGeneration == currentGeneration else { return }
+  isLoading = false
+  task = nil
+}
+
+extension NeteaseServiceError {
+  /// An application response or a non-5xx HTTP response proves a write did
+  /// not run. A 5xx may have arrived after the server applied it.
+  package var provesWriteDidNotRun: Bool {
+    guard source == .http else { return true }
+    return !(500...599).contains(statusCode)
+  }
+}

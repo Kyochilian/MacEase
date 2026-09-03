@@ -30,29 +30,44 @@ package final class ArtworkLoader {
 
   private let urlSession: URLSession
   private let urlCache: URLCache
+  private let decoder: @MainActor (Data) async -> NSImage?
   private let decoded = NSCache<NSURL, NSImage>()
-  private var inFlight: [URL: Task<Data?, Never>] = [:]
+  private final class InFlightTask {
+    let task: Task<Data?, Never>
+
+    init(_ task: Task<Data?, Never>) { self.task = task }
+  }
+
+  private var inFlight: [URL: InFlightTask] = [:]
 
   package init(
     diskCapacityBytes: Int,
-    directory: URL? = ArtworkLoader.defaultCacheDirectory()
+    directory: URL? = ArtworkLoader.defaultCacheDirectory(),
+    urlSession: URLSession? = nil,
+    decoder: @escaping @MainActor (Data) async -> NSImage? = { NSImage(data: $0) }
   ) {
     let cache = URLCache(
       memoryCapacity: Self.memoryCapacityBytes,
       diskCapacity: max(0, diskCapacityBytes),
       directory: directory
     )
-    let configuration = URLSessionConfiguration.ephemeral
-    configuration.urlCache = cache
-    configuration.requestCachePolicy = .returnCacheDataElseLoad
-    // Artwork carries no credential and must never send one.
-    configuration.httpCookieStorage = nil
-    configuration.httpShouldSetCookies = false
-    configuration.timeoutIntervalForRequest = 20
-    configuration.timeoutIntervalForResource = 60
-    configuration.waitsForConnectivity = false
-    urlCache = cache
-    urlSession = URLSession(configuration: configuration)
+    if let urlSession {
+      self.urlSession = urlSession
+      self.urlCache = urlSession.configuration.urlCache ?? cache
+    } else {
+      let configuration = URLSessionConfiguration.ephemeral
+      configuration.urlCache = cache
+      configuration.requestCachePolicy = .returnCacheDataElseLoad
+      // Artwork carries no credential and must never send one.
+      configuration.httpCookieStorage = nil
+      configuration.httpShouldSetCookies = false
+      configuration.timeoutIntervalForRequest = 20
+      configuration.timeoutIntervalForResource = 60
+      configuration.waitsForConnectivity = false
+      self.urlCache = cache
+      self.urlSession = URLSession(configuration: configuration)
+    }
+    self.decoder = decoder
     decoded.countLimit = 512
   }
 
@@ -69,7 +84,9 @@ package final class ArtworkLoader {
   /// placeholder. It is not reported as an app failure, because the user did
   /// not ask for a cover — they asked for a list, and they have it.
   package func image(for url: URL) async -> NSImage? {
-    guard let host = url.host, NeteaseResourceHost.isApproved(host) else {
+    guard url.scheme?.lowercased() == "https", let host = url.host,
+      NeteaseResourceHost.isApproved(host)
+    else {
       return nil
     }
     if let cached = decoded.object(forKey: url as NSURL) {
@@ -80,7 +97,7 @@ package final class ArtworkLoader {
     // happens below, on the main actor, and the cache check is repeated there
     // — every waiter resumes in turn, so the first decodes and the rest find
     // the result already cached.
-    let task = inFlight[url] ?? {
+    let entry = inFlight[url] ?? {
       let task = Task<Data?, Never> { [urlSession] in
         var request = URLRequest(url: url)
         request.httpShouldHandleCookies = false
@@ -91,18 +108,46 @@ package final class ArtworkLoader {
         else { return nil }
         return data
       }
-      inFlight[url] = task
-      return task
+      let entry = InFlightTask(task)
+      inFlight[url] = entry
+      return entry
     }()
 
-    let data = await task.value
-    inFlight[url] = nil
+    let data = await entry.task.value
+    defer {
+      if inFlight[url] === entry { inFlight[url] = nil }
+    }
     if let cached = decoded.object(forKey: url as NSURL) {
       return cached
     }
-    guard let data, let image = NSImage(data: data) else { return nil }
+    guard let data, let image = await decoder(data) else { return nil }
     decoded.setObject(image, forKey: url as NSURL)
     return image
+  }
+
+  /// Returns only bytes already present in this loader's URLCache. Native
+  /// notifications use it to prepare an optional temporary attachment without
+  /// creating a second cover request or a second permanent image cache.
+  package func cachedNotificationArtwork(
+    for url: URL
+  ) -> NativeNotificationArtwork? {
+    guard url.scheme?.lowercased() == "https", let host = url.host,
+      NeteaseResourceHost.isApproved(host)
+    else {
+      return nil
+    }
+    var request = URLRequest(url: url)
+    request.httpShouldHandleCookies = false
+    guard let response = urlCache.cachedResponse(for: request),
+      !response.data.isEmpty,
+      response.data.count <= 10 * 1024 * 1024,
+      let mimeType = response.response.mimeType?.lowercased(),
+      let filenameExtension = Self.imageExtension(for: mimeType)
+    else { return nil }
+    return NativeNotificationArtwork(
+      data: response.data,
+      filenameExtension: filenameExtension
+    )
   }
 
   /// What the settings page shows. `URLCache` reports what it has actually
@@ -126,5 +171,18 @@ package final class ArtworkLoader {
       urlCache.removeAllCachedResponses()
     }
     urlCache.diskCapacity = bytes
+  }
+
+  private static func imageExtension(for mimeType: String) -> String? {
+    switch mimeType {
+    case "image/jpeg": "jpg"
+    case "image/png": "png"
+    case "image/gif": "gif"
+    case "image/webp": "webp"
+    case "image/heic": "heic"
+    case "image/heif": "heif"
+    case "image/avif": "avif"
+    default: nil
+    }
   }
 }

@@ -21,13 +21,12 @@ package struct PlaybackLifecycleInstance: Equatable, Sendable {
     self.context = context
   }
 
-  /// The locked feedback contract only proves `source=list`. A real playlist
-  /// id is preserved; every other context uses the protocol's zero fallback
-  /// rather than pretending an album, search or FM queue is a playlist.
-  package var scrobbleContext: ScrobbleContext {
+  /// The endpoint only accepts a real playlist source. Other playback
+  /// contexts must not be represented as a made-up playlist id.
+  package var scrobbleContext: ScrobbleContext? {
     switch context {
-    case .playlist(let id, _): ScrobbleContext(source: "list", sourceID: id)
-    default: ScrobbleContext(source: "list", sourceID: 0)
+    case .playlist(let id, _): ScrobbleContext(sourceID: id)
+    default: nil
     }
   }
 }

@@ -1,15 +1,13 @@
 import Foundation
 
-/// The source fields accepted by `/api/feedback/weblog`.
+/// The playlist source accepted by `/api/feedback/weblog`.
 ///
-/// `source` is kept as data rather than interpolated into JSON so even an
-/// unexpected future service spelling cannot break the enclosing log record.
+/// Checked against `api-enhanced@a7e8d48` (`module/scrobble.js`): the endpoint
+/// always sends `source: "list"`; only the real playlist id is caller data.
 package struct ScrobbleContext: Equatable, Sendable {
-  package let source: String
   package let sourceID: Int64
 
-  package init(source: String, sourceID: Int64) {
-    self.source = source
+  package init(sourceID: Int64) {
     self.sourceID = sourceID
   }
 }
@@ -118,7 +116,7 @@ extension NeteaseSession {
             time: max(0, playedSeconds),
             type: "song",
             wifi: 0,
-            source: context.source,
+            source: "list",
             mainsite: "1",
             mainsiteWeb: "1",
             content: "id=\(context.sourceID)"
@@ -146,16 +144,12 @@ extension NeteaseSession {
     guard (200..<300).contains(response.statusCode) else {
       throw NeteaseServiceError(source: .http, statusCode: response.statusCode)
     }
-    guard let code = try? JSONDecoder().decode(ScrobbleServiceCode.self, from: data).code
+    guard let code = try? JSONDecoder().decode(ServiceCodePayload.self, from: data).code
     else { throw NeteaseFeedbackError.invalidResponse }
     guard code == 200 else {
       throw NeteaseServiceError(source: .service, statusCode: code)
     }
   }
-}
-
-private struct ScrobbleServiceCode: Decodable {
-  let code: Int
 }
 
 private struct ScrobbleStartLog: Encodable {

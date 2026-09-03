@@ -240,8 +240,41 @@ private final class EventBox {
     context: .album(id: 88, name: "album")
   )
 
-  #expect(playlist.scrobbleContext == ScrobbleContext(source: "list", sourceID: 77))
-  #expect(album.scrobbleContext == ScrobbleContext(source: "list", sourceID: 0))
+  #expect(playlist.scrobbleContext == ScrobbleContext(sourceID: 77))
+  #expect(album.scrobbleContext == nil)
+}
+
+@Test @MainActor func nonPlaylistPlaybackSendsNoScrobbleRequests() async {
+  let credential = makeCredential()
+  let transport = FakeTransport()
+  let vault = FakeVault(stored: credential)
+  let arbiter = OperationArbiter()
+  let session = FakeSession(credential: credential)
+  let coordinator = ScrobbleCoordinator(
+    transport: transport,
+    vault: vault,
+    arbiter: arbiter
+  )
+  let track = makeTracks([101])[0]
+  let album = PlaybackLifecycleInstance(
+    accountID: testAccount.userID,
+    track: track,
+    context: .album(id: 88, name: "album")
+  )
+  let fm = PlaybackLifecycleInstance(
+    accountID: testAccount.userID,
+    track: track,
+    context: .personalFM
+  )
+
+  for instance in [album, fm] {
+    coordinator.handle(.started(instance), session: session)
+    coordinator.handle(.finished(instance, playedSeconds: 12), session: session)
+  }
+  await coordinator.settleForTesting()
+
+  #expect(await transport.recordedCalls().isEmpty)
+  #expect(arbiter.unresolvedOutcomes.isEmpty)
 }
 
 @Test @MainActor func scrobbleRequiresAConfirmedStartBeforeFinish() async {
@@ -258,7 +291,7 @@ private final class EventBox {
   let instance = PlaybackLifecycleInstance(
     accountID: testAccount.userID,
     track: makeTracks([101])[0],
-    context: .dailyRecommendations
+    context: .playlist(id: 77, name: "list")
   )
   await transport.setWriteResult(.failure(URLError(.networkConnectionLost)))
 
@@ -267,7 +300,7 @@ private final class EventBox {
   await coordinator.settleForTesting()
 
   #expect(await transport.recordedCalls() == [
-    .scrobbleStart(101, ScrobbleContext(source: "list", sourceID: 0))
+    .scrobbleStart(101, ScrobbleContext(sourceID: 77))
   ])
   #expect(arbiter.unresolvedOutcomes.count == 1)
   #expect(coordinator.status.contains("not sent"))
@@ -295,8 +328,8 @@ private final class EventBox {
   await coordinator.settleForTesting()
 
   #expect(await transport.recordedCalls() == [
-    .scrobbleStart(101, ScrobbleContext(source: "list", sourceID: 77)),
-    .scrobbleFinish(101, ScrobbleContext(source: "list", sourceID: 77), 12),
+    .scrobbleStart(101, ScrobbleContext(sourceID: 77)),
+    .scrobbleFinish(101, ScrobbleContext(sourceID: 77), 12),
   ])
   #expect(arbiter.active == nil)
   #expect(coordinator.status.contains("12s"))
@@ -317,7 +350,7 @@ private final class EventBox {
   let instance = PlaybackLifecycleInstance(
     accountID: testAccount.userID,
     track: makeTracks([101])[0],
-    context: .dailyRecommendations
+    context: .playlist(id: 77, name: "list")
   )
 
   coordinator.handle(.started(instance), session: session)
@@ -356,7 +389,7 @@ private final class EventBox {
   playback.play(
     tracks: makeTracks([101, 202]),
     startIndex: 0,
-    context: .dailyRecommendations,
+    context: .playlist(id: 77, name: "list"),
     session: session
   )
   await playback.settleForTesting()
@@ -375,9 +408,9 @@ private final class EventBox {
     }
   }
   #expect(feedback == [
-    .scrobbleStart(101, ScrobbleContext(source: "list", sourceID: 0)),
-    .scrobbleFinish(101, ScrobbleContext(source: "list", sourceID: 0), 8),
-    .scrobbleStart(202, ScrobbleContext(source: "list", sourceID: 0)),
+    .scrobbleStart(101, ScrobbleContext(sourceID: 77)),
+    .scrobbleFinish(101, ScrobbleContext(sourceID: 77), 8),
+    .scrobbleStart(202, ScrobbleContext(sourceID: 77)),
   ])
   #expect(arbiter.active == nil)
   #expect(arbiter.activeReadCount == 0)
@@ -399,7 +432,7 @@ private final class EventBox {
   let old = PlaybackLifecycleInstance(
     accountID: testAccount.userID,
     track: makeTracks([101])[0],
-    context: .dailyRecommendations
+    context: .playlist(id: 77, name: "list")
   )
   coordinator.handle(.started(old), session: session)
   while await transport.gate.arrivalCount() == 0 { await Task.yield() }
@@ -414,7 +447,7 @@ private final class EventBox {
   await coordinator.settleForTesting()
 
   #expect(await transport.recordedCalls() == [
-    .scrobbleStart(101, ScrobbleContext(source: "list", sourceID: 0))
+    .scrobbleStart(101, ScrobbleContext(sourceID: 77))
   ])
   #expect(!coordinator.status.contains("confirmed: 9s"))
 }
@@ -462,7 +495,7 @@ private final class EventBox {
   playback.play(
     tracks: makeTracks([101]),
     startIndex: 0,
-    context: .dailyRecommendations,
+    context: .playlist(id: 77, name: "list"),
     session: session
   )
   await playback.settleForTesting()
@@ -478,8 +511,8 @@ private final class EventBox {
     }
   }
   #expect(feedbackCalls == [
-    .scrobbleStart(101, ScrobbleContext(source: "list", sourceID: 0)),
-    .scrobbleFinish(101, ScrobbleContext(source: "list", sourceID: 0), 7),
+    .scrobbleStart(101, ScrobbleContext(sourceID: 77)),
+    .scrobbleFinish(101, ScrobbleContext(sourceID: 77), 7),
   ])
   #expect(arbiter.active == nil)
 }

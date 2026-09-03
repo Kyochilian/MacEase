@@ -98,6 +98,12 @@ package final class ScrobbleCoordinator: SessionGuardedCoordinator {
     generation: Int,
     session: any SessionProviding
   ) async {
+    guard let context = instance.scrobbleContext else {
+      if self.generation == generation {
+        status = "Listening start not sent: playback has no playlist source"
+      }
+      return
+    }
     let outcome = await write(
       name: "Scrobble start",
       instance: instance,
@@ -106,7 +112,7 @@ package final class ScrobbleCoordinator: SessionGuardedCoordinator {
     ) { credential in
       try await self.transport.scrobbleStart(
         songID: instance.track.id,
-        context: instance.scrobbleContext,
+        context: context,
         credential: credential
       )
     }
@@ -127,6 +133,12 @@ package final class ScrobbleCoordinator: SessionGuardedCoordinator {
     generation: Int,
     session: any SessionProviding
   ) async {
+    guard let context = instance.scrobbleContext else {
+      if self.generation == generation {
+        status = "Listening finish not sent: playback has no playlist source"
+      }
+      return
+    }
     guard confirmedStarts.remove(instance.id) != nil else {
       if self.generation == generation {
         status = "Listening finish not sent because start was not confirmed"
@@ -142,7 +154,7 @@ package final class ScrobbleCoordinator: SessionGuardedCoordinator {
     ) { credential in
       try await self.transport.scrobbleFinish(
         songID: instance.track.id,
-        context: instance.scrobbleContext,
+        context: context,
         playedSeconds: seconds,
         credential: credential
       )

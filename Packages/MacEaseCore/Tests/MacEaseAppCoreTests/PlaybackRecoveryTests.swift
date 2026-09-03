@@ -669,6 +669,42 @@ private struct PlaybackRig {
   #expect(rig.playback.phase == .failed)
 }
 
+@Test @MainActor func playNextCannotExtendAnAcceptedRecoveryChain() async throws {
+  let rig = PlaybackRig()
+  rig.playback.quality = .standard
+  await rig.transport.setSongURL(
+    .success(.unavailable(itemCode: 404, fee: nil))
+  )
+  await rig.transport.gate.close()
+  rig.playback.play(
+    tracks: makeTracks([101]),
+    startIndex: 0,
+    context: .dailyRecommendations,
+    session: rig.session
+  )
+  while await rig.transport.gate.arrivalCount() == 0 { await Task.yield() }
+  let snapshot = try #require(rig.playback.queueSnapshot)
+
+  #expect(
+    rig.playback.queueNext(
+      makeTracks([202])[0],
+      context: .dailyRecommendations,
+      accountID: snapshot.accountID,
+      revision: snapshot.revision,
+      session: rig.session
+    )
+  )
+  await rig.transport.gate.open()
+  await rig.playback.settleForTesting()
+
+  #expect(await rig.transport.recordedCalls() == [
+    .resolveSongURL(101, .standard)
+  ])
+  #expect(rig.playback.persistedQueue()?.tracks.map(\.id) == [101, 202])
+  #expect(rig.playback.currentTrack?.id == 101)
+  #expect(rig.playback.phase == .failed)
+}
+
 @Test @MainActor func runtimeExpiredURLRecoversWithoutASecondLifecycleStart() async {
   let clock = LifecycleClockForRecovery()
   let transport = FakeTransport()

@@ -359,6 +359,65 @@ private let okResponse = HTTPURLResponse(
   #expect(onlyMetadata == .none)
 }
 
+@Test func instrumentalMarkerGetsADedicatedDocumentAndKeepsCredits() throws {
+  let lyrics = try NeteaseSession.classifyLyrics(
+    data: Data((
+      #"{"code":200,"lrc":{"lyric":"[00:00.00]作词：无\n[00:01.00]纯音乐，请欣赏"},"#
+        + #""lyricUser":{"nickname":" lyric contributor "},"#
+        + #""transUser":{"nickname":"translator"}}"#
+    ).utf8),
+    response: okResponse
+  )
+
+  #expect(lyrics.isInstrumental)
+  #expect(lyrics.lines.isEmpty)
+  #expect(lyrics.attribution?.contributor == "lyric contributor")
+  #expect(lyrics.attribution?.translationContributor == "translator")
+  #expect(!lyrics.isEmpty)
+}
+
+@Test func ordinaryLyricsExposeAContributorWithoutChangingTheirLines() throws {
+  let lyrics = try NeteaseSession.classifyLyrics(
+    data: Data((
+      #"{"code":200,"lrc":{"lyric":"[00:01.00]Line"},"#
+        + #""lyricUser":{"nickname":"Alice"}}"#
+    ).utf8),
+    response: okResponse
+  )
+
+  #expect(lyrics.lines == [LyricLine(timeSeconds: 1, text: "Line")])
+  #expect(lyrics.attribution?.contributor == "Alice")
+  #expect(!lyrics.isInstrumental)
+}
+
+@Test func missingOrMalformedContributorMetadataDoesNotBreakLyrics() throws {
+  let missing = try NeteaseSession.classifyLyrics(
+    data: Data(#"{"code":200,"lrc":{"lyric":"[00:01.00]Line"}}"#.utf8),
+    response: okResponse
+  )
+  let malformed = try NeteaseSession.classifyLyrics(
+    data: Data(
+      #"{"code":200,"lrc":{"lyric":"[00:01.00]Line"},"lyricUser":7,"transUser":{"nickname":false}}"#.utf8
+    ),
+    response: okResponse
+  )
+
+  #expect(missing == .lines([LyricLine(timeSeconds: 1, text: "Line")]))
+  #expect(malformed == missing)
+}
+
+@Test func instrumentalMarkerIsBoundedToSmallMetadataOnlyDocuments() {
+  let ordinary = (0..<10).map { "[00:\(String(format: "%02d", $0)).00]Line \($0)" }
+  let lyrics = LyricsParser.parse(
+    lrc: (ordinary + ["[00:11.00]纯音乐，请欣赏"]).joined(separator: "\n"),
+    translation: nil,
+    romanisation: nil
+  )
+
+  #expect(!lyrics.isInstrumental)
+  #expect(lyrics.lines.count == 11)
+}
+
 @Test func lyricsDistinguishServiceAndHTTPErrors() throws {
   #expect(throws: NeteaseServiceError(source: .service, statusCode: 301)) {
     try NeteaseSession.classifyLyrics(

@@ -262,8 +262,6 @@ package protocol NeteaseTransporting: Sendable {
   ) async throws -> CatalogPage<Album>
 
   func topArtists(
-    limit: Int,
-    offset: Int,
     credential: NeteaseCredential
   ) async throws -> CatalogPage<Artist>
 }

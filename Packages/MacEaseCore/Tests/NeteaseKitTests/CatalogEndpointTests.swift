@@ -715,8 +715,6 @@ private func expectEAPI(
 /// list here.
 @Test func topArtistsReadTheNestedListContainer() throws {
   let request = try NeteaseSession.topArtistsRequest(
-    limit: 50,
-    offset: 50,
     credential: catalogCredential,
     secretKey: "0123456789abcdef"
   )
@@ -724,7 +722,7 @@ private func expectEAPI(
     request,
     url: "https://music.163.com/weapi/toplist/artist",
     json:
-      #"{"type":1,"limit":50,"offset":50,"total":true,"csrf_token":"csrf-test"}"#
+      #"{"type":1,"limit":100,"offset":0,"total":true,"csrf_token":"csrf-test"}"#
   )
 
   let page = try NeteaseSession.classifyTopArtists(
@@ -732,11 +730,10 @@ private func expectEAPI(
       #"{"code":200,"list":{"artists":[{"id":1,"name":"A","albumSize":1,"#
         + #""musicSize":2}]}}"#
       ).utf8),
-    response: okResponse,
-    limit: 1
+    response: okResponse
   )
   #expect(page.items.map(\.id) == [1])
-  #expect(page.more)
+  #expect(!page.more)
 }
 
 // MARK: - Failure classification
@@ -789,8 +786,7 @@ private func expectEAPI(
   #expect(throws: (any Error).self) {
     try NeteaseSession.classifyTopArtists(
       data: Data(#"{"code":200,"list":[]}"#.utf8),
-      response: okResponse,
-      limit: 50
+      response: okResponse
     )
   }
   #expect(throws: (any Error).self) {

@@ -50,14 +50,22 @@ struct LyricsView: View {
   @ViewBuilder private func body(for content: LyricsCoordinator.Content) -> some View {
     switch content {
     case .document(let document):
-      TimelineView(
-        .animation(
-          minimumInterval: 1.0 / 30.0,
-          paused: playback.phase != .playing || !settings.usesVerbatimLyrics
-            || document.lines.allSatisfy(\.words.isEmpty)
+      if document.isInstrumental {
+        ContentUnavailableView(
+          "Instrumental",
+          systemImage: "music.quarternote.3",
+          description: Text("Enjoy the music.")
         )
-      ) { _ in
-        scroller(document, at: playback.presentationPositionSeconds)
+      } else {
+        TimelineView(
+          .animation(
+            minimumInterval: 1.0 / 30.0,
+            paused: playback.phase != .playing || !settings.usesVerbatimLyrics
+              || document.lines.allSatisfy(\.words.isEmpty)
+          )
+        ) { _ in
+          scroller(document, at: playback.presentationPositionSeconds)
+        }
       }
     case .loading:
       ProgressView()
@@ -80,6 +88,18 @@ struct LyricsView: View {
           Text(artists)
             .font(.caption)
             .foregroundStyle(.secondary)
+        }
+        if case .document(let document) = lyrics.content {
+          if let contributor = document.attribution?.contributor {
+            Text("Lyrics by \(contributor)")
+              .font(.caption2)
+              .foregroundStyle(.tertiary)
+          }
+          if let contributor = document.attribution?.translationContributor {
+            Text("Translation by \(contributor)")
+              .font(.caption2)
+              .foregroundStyle(.tertiary)
+          }
         }
       }
       Spacer()

@@ -98,6 +98,42 @@ private struct SystemRig {
   #expect(await rig.transport.callCount() == 0)
 }
 
+@Test @MainActor func machinePauseDuringResolutionPreventsOutputFromStarting() async {
+  let sleeping = SystemRig()
+  await sleeping.transport.setSongURL(.success(makeResolvedAsset(songID: 101)))
+  await sleeping.transport.gate.close()
+  sleeping.playback.play(
+    tracks: makeTracks([101]),
+    startIndex: 0,
+    context: .dailyRecommendations,
+    session: sleeping.session
+  )
+  while await sleeping.transport.gate.arrivalCount() == 0 { await Task.yield() }
+  sleeping.playback.handle(system: .willSleep)
+  await sleeping.transport.gate.open()
+  await sleeping.playback.settleForTesting()
+
+  #expect(sleeping.playback.phase == .paused)
+  #expect(!sleeping.output.isPlaying)
+
+  let unplugged = SystemRig()
+  await unplugged.transport.setSongURL(.success(makeResolvedAsset(songID: 101)))
+  await unplugged.transport.gate.close()
+  unplugged.playback.play(
+    tracks: makeTracks([101]),
+    startIndex: 0,
+    context: .dailyRecommendations,
+    session: unplugged.session
+  )
+  while await unplugged.transport.gate.arrivalCount() == 0 { await Task.yield() }
+  unplugged.playback.handle(system: .audioOutputDeviceLost)
+  await unplugged.transport.gate.open()
+  await unplugged.playback.settleForTesting()
+
+  #expect(unplugged.playback.phase == .paused)
+  #expect(!unplugged.output.isPlaying)
+}
+
 // MARK: - Audio output device
 
 /// Unplugging headphones must not continue out loud on the built-in speakers.

@@ -299,7 +299,7 @@ extension NeteaseSession {
   ) async throws {
     let request = try Self.fmTrashRequest(songID: songID, credential: credential)
     let (data, response) = try await urlSession.data(for: request)
-    try Self.classifyWriteAcknowledgement(
+    try Self.requireSuccess(
       data: data,
       response: try Self.requireHTTPResponse(response)
     )
@@ -857,20 +857,13 @@ extension NeteaseSession {
   }
 
   package func topArtists(
-    limit: Int = 50,
-    offset: Int = 0,
     credential: NeteaseCredential
   ) async throws -> CatalogPage<Artist> {
-    let request = try Self.topArtistsRequest(
-      limit: limit,
-      offset: offset,
-      credential: credential
-    )
+    let request = try Self.topArtistsRequest(credential: credential)
     let (data, response) = try await urlSession.data(for: request)
     return try Self.classifyTopArtists(
       data: data,
-      response: try Self.requireHTTPResponse(response),
-      limit: limit
+      response: try Self.requireHTTPResponse(response)
     )
   }
 
@@ -945,13 +938,11 @@ extension NeteaseSession {
   /// `type` selects which artist chart; 1 is the one the authority defaults
   /// to. The rows arrive nested under `list`.
   package static func topArtistsRequest(
-    limit: Int,
-    offset: Int,
     credential: NeteaseCredential,
     secretKey: String? = nil
   ) throws -> URLRequest {
     let json =
-      #"{"type":1,"limit":\#(limit),"offset":\#(offset),"total":true,"#
+      #"{"type":1,"limit":100,"offset":0,"total":true,"#
       + #""csrf_token":\#(try csrfJSONValue(credential))}"#
     return weapiRequest(
       url: topArtistsURL,
@@ -962,13 +953,12 @@ extension NeteaseSession {
 
   package static func classifyTopArtists(
     data: Data,
-    response: HTTPURLResponse,
-    limit: Int
+    response: HTTPURLResponse
   ) throws -> CatalogPage<Artist> {
     try requireSuccess(data: data, response: response)
     let artists = try JSONDecoder().decode(TopArtistsPayload.self, from: data)
       .list.artists.map(\.artist)
-    return CatalogPage(items: artists, more: artists.count >= limit)
+    return CatalogPage(items: artists, more: false)
   }
 
   // MARK: - Shared plumbing

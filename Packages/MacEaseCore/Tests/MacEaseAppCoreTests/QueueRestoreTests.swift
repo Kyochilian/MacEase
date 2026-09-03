@@ -75,6 +75,19 @@ private func stored(
   #expect(rig.playback.status.contains("Evening"))
 }
 
+@Test @MainActor func restoringAnOlderQueueRemovesDuplicateSongIdentities() {
+  let rig = RestoreRig()
+
+  rig.playback.restore(
+    stored(ids: [101, 202, 101, 303, 202], currentIndex: 2)
+  )
+
+  #expect(rig.playback.persistedQueue()?.tracks.map(\.id) == [202, 101, 303])
+  #expect(rig.playback.queue?.currentIndex == 1)
+  #expect(rig.playback.currentTrack?.id == 101)
+  #expect(rig.playback.queueSnapshot?.upcoming.map(\.id) == [303])
+}
+
 /// The restore leaves a retry entry point, so continuing is the same single
 /// resolve as any other play, and it lands at the stored position.
 @Test @MainActor func continuingARestoredQueueResolvesOnceAndSeeks() async {

@@ -244,6 +244,28 @@ private func seedDownload(
   #expect(await rig.files.hasExpectedSize(first))
 }
 
+@Test @MainActor func aSuccessfulUserDownloadPublishesOneTerminalEvent() async throws {
+  let rig = try DownloadRig()
+  defer { rig.cleanup() }
+  await rig.activate()
+  let track = makeTracks([202])[0]
+  await rig.program(songID: track.id)
+  var events: [DownloadTerminalEvent] = []
+  rig.coordinator.onTerminalEvent = { events.append($0) }
+
+  rig.coordinator.startDownload(
+    track: track,
+    quality: .standard,
+    session: rig.session
+  )
+  await rig.coordinator.settleDownloadForTesting()
+
+  #expect(events.count == 1)
+  #expect(events.first?.accountID == testAccount.userID)
+  #expect(events.first?.track == track)
+  #expect(events.first?.outcome == .succeeded)
+}
+
 /// The resolve read is deliberately gone while the CDN gate is closed. A
 /// long transfer therefore cannot prevent a playlist write or sign-out from
 /// claiming the arbiter.
@@ -274,6 +296,8 @@ private func seedDownload(
   defer { rig.cleanup() }
   await rig.activate()
   let track = makeTracks([4])[0]
+  var events: [DownloadTerminalEvent] = []
+  rig.coordinator.onTerminalEvent = { events.append($0) }
   await rig.program(songID: track.id)
   await rig.fetcher.gate.close()
   rig.coordinator.startDownload(
@@ -289,6 +313,7 @@ private func seedDownload(
 
   #expect(try await rig.store.downloads(accountID: testAccount.userID).downloads.isEmpty)
   #expect(rig.coordinator.downloads.isEmpty)
+  #expect(events.isEmpty)
 }
 
 @Test @MainActor func failedTransferLeavesNoCompletedRecord() async throws {
@@ -296,6 +321,8 @@ private func seedDownload(
   defer { rig.cleanup() }
   await rig.activate()
   let track = makeTracks([5])[0]
+  var events: [DownloadTerminalEvent] = []
+  rig.coordinator.onTerminalEvent = { events.append($0) }
   await rig.program(songID: track.id)
 
   rig.coordinator.startDownload(
@@ -308,6 +335,8 @@ private func seedDownload(
   #expect(try await rig.store.downloads(accountID: testAccount.userID).downloads.isEmpty)
   #expect(rig.coordinator.downloads.isEmpty)
   #expect(rig.coordinator.lastFailure != nil)
+  #expect(events.count == 1)
+  #expect(events.first?.outcome == .failed(.connection))
 }
 
 @Test @MainActor func aFailedDownloadRetriesOnlyAfterAnotherUserTrigger() async throws {
@@ -403,6 +432,8 @@ private func seedDownload(
   defer { rig.cleanup() }
   await rig.activate()
   let track = makeTracks([7])[0]
+  var events: [DownloadTerminalEvent] = []
+  rig.coordinator.onTerminalEvent = { events.append($0) }
   await rig.program(songID: track.id)
   rig.coordinator.startDownload(
     track: track,
@@ -426,6 +457,7 @@ private func seedDownload(
   #expect(rig.coordinator.progress == nil)
   #expect(rig.coordinator.lastFailure == nil)
   #expect(rig.coordinator.status == "Loaded downloads")
+  #expect(events.isEmpty)
 }
 
 @Test @MainActor func aCompleteRangeCacheIsPromotedWithoutAnotherFetch() async throws {
@@ -752,6 +784,48 @@ private func seedDownload(
   #expect(rig.output.preparedResources.map(\.songID).last == 51)
   #expect(await rig.transport.recordedCalls().isEmpty)
   #expect(arbiter.end(blocker, outcome: .applied) == .applied)
+}
+
+@Test @MainActor func removingTheCurrentQueueEntryStillStartsALocalSuccessor() async throws {
+  let rig = try DownloadRig()
+  defer { rig.cleanup() }
+  let tracks = makeTracks([60, 61])
+  for track in tracks {
+    _ = try await seedDownload(
+      store: rig.store,
+      files: rig.files,
+      accountID: testAccount.userID,
+      track: track
+    )
+  }
+  await rig.activate()
+  rig.playback.play(
+    tracks: tracks,
+    startIndex: 0,
+    context: .downloads,
+    session: rig.session
+  )
+  await rig.playback.settleForTesting()
+  let snapshot = try #require(rig.playback.queueSnapshot)
+
+  #expect(
+    rig.playback.removeQueueEntry(
+      songID: 60,
+      accountID: snapshot.accountID,
+      revision: snapshot.revision,
+      session: rig.session
+    )
+  )
+  await rig.playback.settleForTesting()
+
+  #expect(rig.playback.currentTrack?.id == 61)
+  #expect(rig.output.preparedResources.map(\.songID) == [60, 61])
+  #expect(await rig.transport.recordedCalls().isEmpty)
+  #expect(rig.coordinator.downloads.map(\.track.id).sorted() == [60, 61])
+  #expect(
+    try await rig.store.downloads(accountID: testAccount.userID).downloads
+      .map(\.track.id).sorted() == [60, 61]
+  )
 }
 
 @Test @MainActor func automaticAdvanceUsesALocalTrackDuringAnUnrelatedWrite() async throws {
@@ -1193,7 +1267,5 @@ private func seedDownload(
   #expect(rig.playback.queueContext == .downloads)
   #expect(rig.playback.currentTrack?.id == 50)
   #expect(rig.output.teardownCount == teardownBeforeSuccess)
-  #expect(
-    rig.arbiter.unresolvedOutcomes.map(\.kind) == [.appliedRemotelyOnly]
-  )
+  #expect(rig.arbiter.unresolvedOutcomes.isEmpty)
 }

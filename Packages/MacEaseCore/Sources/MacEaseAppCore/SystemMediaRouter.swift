@@ -7,6 +7,9 @@ package enum AppPlaybackCommand: Equatable, Sendable {
   case next
   case setMode(PlaybackMode)
   case toggleLiked
+  case playQueueEntry(songID: Int64, accountID: Int64, revision: UInt64)
+  case removeQueueEntry(songID: Int64, accountID: Int64, revision: UInt64)
+  case clearUpcoming(accountID: Int64, revision: UInt64)
 }
 
 /// Connects the system media surface to the objects that actually own
@@ -44,6 +47,10 @@ package struct SystemMediaRouter {
       playback.currentTrack
       .map { library?.liked.state(of: $0.id) ?? .unknown } ?? .unknown
     return playback.snapshot(liked: liked)
+  }
+
+  package var playbackMode: PlaybackMode {
+    playback?.playbackMode ?? .sequential
   }
 
   /// Dispatches an approved command and reports whether its owner accepted it.
@@ -88,11 +95,20 @@ package struct SystemMediaRouter {
       guard let session else { return false }
       return playback.canPlayNext(session: session)
     case .setMode:
-      return true
+      return playback.canSetPlaybackMode
     case .toggleLiked:
       guard let session, let library else { return false }
       return playback.currentTrack != nil && snapshot.liked != .unknown
         && library.canSetLiked(session: session)
+    case .playQueueEntry(_, let accountID, let revision),
+      .removeQueueEntry(_, let accountID, let revision),
+      .clearUpcoming(let accountID, let revision):
+      guard let session else { return false }
+      return playback.canEditQueue(
+        accountID: accountID,
+        revision: revision,
+        session: session
+      )
     }
   }
 
@@ -110,11 +126,33 @@ package struct SystemMediaRouter {
     case .next:
       return perform(SystemMediaCommand.next)
     case .setMode(let mode):
-      playback.playbackMode = mode
-      return true
+      return playback.setPlaybackMode(mode)
     case .toggleLiked:
       let liked = snapshot().liked
       return perform(.setLiked(liked != .liked))
+    case .playQueueEntry(let songID, let accountID, let revision):
+      guard let session else { return false }
+      return playback.playQueueEntry(
+        songID: songID,
+        accountID: accountID,
+        revision: revision,
+        session: session
+      )
+    case .removeQueueEntry(let songID, let accountID, let revision):
+      guard let session else { return false }
+      return playback.removeQueueEntry(
+        songID: songID,
+        accountID: accountID,
+        revision: revision,
+        session: session
+      )
+    case .clearUpcoming(let accountID, let revision):
+      guard let session else { return false }
+      return playback.clearUpcoming(
+        accountID: accountID,
+        revision: revision,
+        session: session
+      )
     }
   }
 }

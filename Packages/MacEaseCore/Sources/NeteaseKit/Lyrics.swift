@@ -69,18 +69,50 @@ package struct LyricLine: Equatable, Sendable, Codable {
 /// "No lyrics" is a real answer from the catalogue and is not an error: an
 /// instrumental has nothing to show, and reporting that as a failure would put
 /// a retry button in front of a user for whom nothing can change.
+package struct LyricAttribution: Equatable, Sendable {
+  package let contributor: String?
+  package let translationContributor: String?
+
+  package init(contributor: String?, translationContributor: String?) {
+    self.contributor = contributor
+    self.translationContributor = translationContributor
+  }
+}
+
 package enum Lyrics: Equatable, Sendable {
   case none
+  case instrumental(LyricAttribution)
   case lines([LyricLine])
+  case attributedLines([LyricLine], LyricAttribution)
 
   package var lines: [LyricLine] {
     switch self {
-    case .none: []
-    case .lines(let lines): lines
+    case .none, .instrumental: []
+    case .lines(let lines), .attributedLines(let lines, _): lines
     }
   }
 
-  package var isEmpty: Bool { lines.isEmpty }
+  package var isEmpty: Bool {
+    switch self {
+    case .none: true
+    case .instrumental: false
+    case .lines(let lines), .attributedLines(let lines, _): lines.isEmpty
+    }
+  }
+
+  package var isInstrumental: Bool {
+    if case .instrumental = self { return true }
+    return false
+  }
+
+  package var attribution: LyricAttribution? {
+    switch self {
+    case .instrumental(let attribution), .attributedLines(_, let attribution):
+      attribution
+    case .none, .lines:
+      nil
+    }
+  }
 
   /// The index of the line that should be highlighted at `seconds`, or nil
   /// before the first line starts.
@@ -123,14 +155,30 @@ package enum LyricsParser {
     translation: String?,
     yrcTranslation: String? = nil,
     romanisation: String?,
-    yrcRomanisation: String? = nil
+    yrcRomanisation: String? = nil,
+    contributor: String? = nil,
+    translationContributor: String? = nil
   ) -> Lyrics {
     let lrcDocument = parseDocument(lrc)
-    let lrcLines = lrcDocument.lines.map {
+    var lrcLines = lrcDocument.lines.map {
       LyricLine(
         timeSeconds: $0.timeSeconds - lrcDocument.offsetSeconds,
         text: $0.text
       )
+    }
+    let attribution = LyricAttribution(
+      contributor: displayName(contributor),
+      translationContributor: displayName(translationContributor)
+    )
+    let marksInstrumental = lrcLines.count <= 10
+      && lrcLines.contains { $0.text.contains("纯音乐，请欣赏") }
+    if marksInstrumental {
+      lrcLines.removeAll {
+        $0.text.contains("纯音乐，请欣赏") || isSongwritingCredit($0.text)
+      }
+      guard !lrcLines.isEmpty else { return .instrumental(attribution) }
+    } else {
+      lrcLines.removeAll { isEmptySongwritingCredit($0.text) }
     }
 
     // One malformed YRC timing can make every later word highlight wrong. A
@@ -160,7 +208,37 @@ package enum LyricsParser {
         lines[index].romanisation = JapaneseRomanisation.transcribe(lines[index].text)
       }
     }
-    return .lines(lines)
+    guard attribution.contributor != nil
+      || attribution.translationContributor != nil
+    else { return .lines(lines) }
+    return .attributedLines(lines, attribution)
+  }
+
+  private static func displayName(_ value: String?) -> String? {
+    guard let value else { return nil }
+    let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    let singleLine = String(
+      trimmed.unicodeScalars.filter {
+        !CharacterSet.controlCharacters.contains($0)
+          && !CharacterSet.newlines.contains($0)
+      }
+    )
+    guard !singleLine.isEmpty else { return nil }
+    return String(singleLine.prefix(100))
+  }
+
+  private static func isSongwritingCredit(_ value: String) -> Bool {
+    let compact = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    return compact.hasPrefix("作词:") || compact.hasPrefix("作词：")
+      || compact.hasPrefix("作曲:") || compact.hasPrefix("作曲：")
+  }
+
+  private static func isEmptySongwritingCredit(_ value: String) -> Bool {
+    let compact = value
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+      .replacingOccurrences(of: " ", with: "")
+    return compact == "作词:无" || compact == "作词：无"
+      || compact == "作曲:无" || compact == "作曲：无"
   }
 
   private struct Document {

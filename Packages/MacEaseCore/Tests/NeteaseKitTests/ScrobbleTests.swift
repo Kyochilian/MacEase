@@ -7,7 +7,7 @@ private let scrobbleCredential = testCredential(
   musicU: "music-u-scrobble-secret",
   csrf: "csrf-scrobble-secret"
 )
-private let scrobbleContext = ScrobbleContext(source: "list", sourceID: 24_381_616)
+private let scrobbleContext = ScrobbleContext(sourceID: 24_381_616)
 private let scrobbleHeader =
   #"{"osver":"15.5","os":"osx","appver":"0.1","buildver":"1722945678","#
   + #""__csrf":"csrf-scrobble-secret","channel":"github","#
@@ -59,8 +59,8 @@ private func expectedScrobbleBody(logs: String) throws -> String {
   #expect(String(decoding: request.httpBody!, as: UTF8.self) == expectedBody)
 }
 
-@Test func scrobbleSourceIsJSONEscapedBeforeEncryption() throws {
-  let context = ScrobbleContext(source: "quoted \"list\"\\\n", sourceID: 7)
+@Test func scrobbleSourceIsFixedToTheProtocolValue() throws {
+  let context = ScrobbleContext(sourceID: 7)
   let request = try NeteaseSession.scrobbleRequest(
     .finish(songID: 9, context: context, playedSeconds: 12),
     credential: scrobbleCredential,
@@ -69,7 +69,7 @@ private func expectedScrobbleBody(logs: String) throws -> String {
     requestID: "1722945678123_0042"
   )
   let logs =
-    #"[{"action":"play","json":{"content":"id=7","download":0,"end":"playend","id":9,"mainsite":"1","mainsiteWeb":"1","source":"quoted \"list\"\\\n","sourceId":7,"time":12,"type":"song","wifi":0}}]"#
+    #"[{"action":"play","json":{"content":"id=7","download":0,"end":"playend","id":9,"mainsite":"1","mainsiteWeb":"1","source":"list","sourceId":7,"time":12,"type":"song","wifi":0}}]"#
   let expectedBody = try expectedScrobbleBody(logs: logs)
 
   #expect(String(decoding: request.httpBody!, as: UTF8.self) == expectedBody)

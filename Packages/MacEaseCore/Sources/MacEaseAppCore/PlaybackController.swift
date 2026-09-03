@@ -2,6 +2,18 @@ import Foundation
 import NeteaseKit
 import Observation
 
+/// Read-only queue data for UI and command routing. It is rebuilt from the
+/// controller's one queue; no view owns or mutates a parallel track array.
+package struct PlaybackQueueSnapshot: Equatable, Sendable {
+  package let accountID: Int64
+  package let revision: UInt64
+  package let current: Track
+  package let upcoming: [Track]
+  package let mode: PlaybackMode
+  package let context: PlaybackContext
+  package let allowsEditing: Bool
+}
+
 /// Explicit queue playback. A queue starts only from a user action. Confirmed
 /// unavailable resources recover through a fixed downward quality list and a
 /// bounded set of queue entries; ordinary transport failures stop with Play
@@ -29,34 +41,43 @@ package final class PlaybackController {
     case remote(OperationToken)
   }
 
+  package enum StopReason {
+    case explicit
+    case sessionChange
+    case deletedDownload
+    case emptiedQueue(status: String, clearPersistedQueue: Bool)
+    case sleepTimer(status: String)
+  }
+
   private static let volumeDefaultsKey = "playback.volume"
 
   @ObservationIgnored private let transport: any NeteaseTransporting
   @ObservationIgnored private let vault: any CredentialStoring
-  @ObservationIgnored private let arbiter: OperationArbiter
+  @ObservationIgnored package let arbiter: OperationArbiter
   @ObservationIgnored private var operationToken: OperationToken?
   @ObservationIgnored private var gate = PlaybackIntentGate()
-  @ObservationIgnored private var rng = SystemRandomNumberGenerator()
+  @ObservationIgnored package var rng = SystemRandomNumberGenerator()
   @ObservationIgnored private var playTask: Task<Void, Never>?
   @ObservationIgnored private let output: any AudioOutput
   @ObservationIgnored private var hasLoadedItem = false
   /// The retry entry point for the track being attempted. Created before the
   /// resolve request, cleared only by a terminal failure or a new intent.
-  @ObservationIgnored private var attempt: PlaybackAttempt?
+  @ObservationIgnored package var attempt: PlaybackAttempt?
   @ObservationIgnored private var currentAssetSummary: String?
-  @ObservationIgnored private let monotonicNow: @MainActor () -> TimeInterval
-  @ObservationIgnored private var playbackAccountID: Int64?
-  @ObservationIgnored private var lifecycle: ActiveLifecycle?
-  private var sessionMutationPending = false
+  @ObservationIgnored package let monotonicNow: @MainActor () -> TimeInterval
+  @ObservationIgnored package var playbackAccountID: Int64?
+  @ObservationIgnored package var queueAccountID: Int64?
+  @ObservationIgnored package var lifecycle: ActiveLifecycle?
+  package var sessionMutationPending = false
   @ObservationIgnored private var activeToken: PlaybackIntentGate.Token?
-  @ObservationIgnored private var queueTracks: [Track] = []
+  @ObservationIgnored package var queueTracks: [Track] = []
   /// Where the queue came from. A restored queue that says only "these forty
   /// tracks" cannot tell the user what they were listening to.
   @ObservationIgnored package private(set) var queueContext: PlaybackContext?
   @ObservationIgnored private weak var attachedSession: (any SessionProviding)?
   @ObservationIgnored private weak var offlineDownloads: DownloadCoordinator?
-  @ObservationIgnored private var sleepTask: Task<Void, Never>?
-  @ObservationIgnored private var sleepGeneration = 0
+  @ObservationIgnored package var sleepTask: Task<Void, Never>?
+  @ObservationIgnored package var sleepGeneration = 0
   /// Monotonic identity of the latest accepted playback intent. Queue
   /// progression does not bump it; explicit Play/Next/Previous/Play Again,
   /// Stop and terminal teardown do.
@@ -68,6 +89,9 @@ package final class PlaybackController {
   /// Wired by the composition root. Only the user-facing `stop()` invokes it;
   /// session cleanup uses `stopForSessionChange()` and preserves the row.
   @ObservationIgnored package var onExplicitStop: (@MainActor () -> Void)?
+  /// Queue edits need an immediate persistence pass rather than waiting for
+  /// the slow playback-position tick.
+  @ObservationIgnored package var onQueueEdited: (@MainActor () -> Void)?
   /// One narrow notification for the owner of server-generated queues. The
   /// revision tells it whether an in-flight response still belongs to the
   /// accepted intent; unchanged revisions are ordinary queue progression.
@@ -78,13 +102,6 @@ package final class PlaybackController {
   @ObservationIgnored package var onLifecycleEvent:
     (@MainActor (PlaybackLifecycleEvent) -> Void)?
 
-  private struct ActiveLifecycle {
-    let instance: PlaybackLifecycleInstance
-    var accumulatedSeconds: TimeInterval = 0
-    var playingSince: TimeInterval?
-    var durationSeconds: Double?
-  }
-
   /// Why the machine, rather than the user, stopped playback.
   package enum MachinePause: Equatable, Sendable {
     case systemSleep
@@ -92,8 +109,9 @@ package final class PlaybackController {
   }
 
   package private(set) var phase: Phase = .idle
-  package private(set) var queue: PlaybackQueue?
-  package private(set) var sleepTimer: SleepTimerState = .off
+  package var queue: PlaybackQueue?
+  package var queueRevision: UInt64 = 0
+  package var sleepTimer: SleepTimerState = .off
   package private(set) var trackName: String?
   package private(set) var positionSeconds: Double = 0
   /// A read-through position for animation-rate UI such as YRC highlighting.
@@ -124,7 +142,12 @@ package final class PlaybackController {
   package var sleepStopsImmediately = false
 
   package var playbackMode: PlaybackMode = .sequential {
-    didSet { queue?.setMode(playbackMode, using: &rng) }
+    didSet {
+      guard playbackMode != oldValue else { return }
+      let oldQueue = queue
+      queue?.setMode(playbackMode, using: &rng)
+      if queue != oldQueue { queueWasEdited() }
+    }
   }
 
   package var volume: Float = 1 {
@@ -168,6 +191,21 @@ package final class PlaybackController {
       return nil
     }
     return queueTracks[index]
+  }
+
+  package var queueSnapshot: PlaybackQueueSnapshot? {
+    guard let queue, let context = queueContext, let accountID = queueAccountID,
+      queueTracks.indices.contains(queue.currentIndex)
+    else { return nil }
+    return PlaybackQueueSnapshot(
+      accountID: accountID,
+      revision: queueRevision,
+      current: queueTracks[queue.currentIndex],
+      upcoming: queue.upcomingIndices.map { queueTracks[$0] },
+      mode: queue.mode,
+      context: context,
+      allowsEditing: Self.allowsUserQueueEditing(context)
+    )
   }
 
   /// The read-only projection a system media surface consumes. Derived on
@@ -276,6 +314,16 @@ package final class PlaybackController {
   }
 
   private func pauseForMachine(_ reason: MachinePause, status newStatus: String) {
+    if phase == .resolving {
+      // Resolution has not handed an item to AudioOutput yet. Record the
+      // machine interruption on the attempt instead of touching an output
+      // that cannot be paused; startPlayback will honour this desired state.
+      guard attempt != nil else { return }
+      attempt?.desiredState = .paused
+      machinePausedReason = reason
+      status = newStatus
+      return
+    }
     guard phase == .playing, pause() else { return }
     machinePausedReason = reason
     status = newStatus
@@ -302,45 +350,53 @@ package final class PlaybackController {
       : "Network unavailable"
   }
 
+  @discardableResult
   package func play(
     tracks: [Track],
     startIndex: Int,
     context: PlaybackContext,
     session: any SessionProviding
-  ) {
+  ) -> Bool {
     guard let account = session.account else {
       status = "Validate the session before playback"
-      return
+      return false
     }
+    guard let normalized = Self.uniqueQueue(tracks, selectedIndex: startIndex) else {
+      return false
+    }
+    let queueTracks = normalized.tracks
+    let queueStartIndex = normalized.currentIndex
     guard
       let queue = PlaybackQueue(
-        count: tracks.count,
-        startIndex: startIndex,
+        count: queueTracks.count,
+        startIndex: queueStartIndex,
         mode: playbackMode,
         using: &rng
-    )
-    else { return }
-    guard tracks.indices.contains(startIndex) else { return }
+      )
+    else { return false }
     acceptExplicitPlaybackIntent()
     let requestedQuality = quality
     guard let source = entrySource(
-      songID: tracks[startIndex].id,
+      songID: queueTracks[queueStartIndex].id,
       requestedQuality: requestedQuality,
       account: account
-    ) else { return }
+    ) else { return false }
 
-    queueTracks = tracks
+    self.queueTracks = queueTracks
     queueContext = context
+    queueAccountID = account.userID
     self.queue = queue
+    queueWasReplaced()
     clearPendingSleepStop()
     startEntry(
-      at: startIndex,
+      at: queueStartIndex,
       account: account,
       session: session,
       auto: false,
       requestedQuality: requestedQuality,
       source: source
     )
+    return true
   }
 
   /// Starts the saved quality represented by this row. It does not read the
@@ -371,7 +427,9 @@ package final class PlaybackController {
     ) else { return }
     queueTracks = [download.track]
     queueContext = .downloads
+    queueAccountID = account.userID
     self.queue = queue
+    queueWasReplaced()
     clearPendingSleepStop()
     startEntry(
       at: 0,
@@ -410,29 +468,37 @@ package final class PlaybackController {
   /// and has not asked for audio. It rebuilds the queue and leaves a retry
   /// entry point, so continuing costs the same single resolve that any other
   /// explicit play does, and lands at the position that was stored.
-  package func restore(_ persisted: PersistedQueue) {
+  package func restore(_ persisted: PersistedQueue, accountID: Int64? = nil) {
     guard !isActive, !persisted.tracks.isEmpty else { return }
     guard
+      let normalized = Self.uniqueQueue(
+        persisted.tracks,
+        selectedIndex: persisted.currentIndex
+      )
+    else { return }
+    guard
       let queue = PlaybackQueue(
-        count: persisted.tracks.count,
-        startIndex: persisted.currentIndex,
+        count: normalized.tracks.count,
+        startIndex: normalized.currentIndex,
         mode: persisted.mode,
         using: &rng
       )
     else { return }
 
-    queueTracks = persisted.tracks
+    queueTracks = normalized.tracks
     queueContext = persisted.context
+    queueAccountID = accountID ?? attachedSession?.account?.userID
     self.queue = queue
     playbackMode = persisted.mode
+    queueWasReplaced()
     quality = persisted.quality
-    let track = persisted.tracks[persisted.currentIndex]
+    let track = normalized.tracks[normalized.currentIndex]
     trackName = track.name
     attempt = PlaybackAttempt(
       songID: track.id,
       quality: persisted.quality,
-      queueIndex: persisted.currentIndex,
-      queueEntryCount: persisted.tracks.count,
+      queueIndex: normalized.currentIndex,
+      queueEntryCount: normalized.tracks.count,
       resumePosition: persisted.positionSeconds,
       desiredState: persisted.wasPlaying ? .playing : .paused
     )
@@ -441,18 +507,6 @@ package final class PlaybackController {
       "Restored \(persisted.context.label); "
       + (persisted.wasPlaying ? "Resume" : "Restore Paused")
       + " continues from \(Int(persisted.positionSeconds))s"
-  }
-
-  /// Returns whether the step was accepted. A caller that reports success to
-  /// the system — the media keys do — must not assume it was.
-  @discardableResult
-  package func playNext(session: any SessionProviding) -> Bool {
-    step(to: queue?.nextIndex(), session: session)
-  }
-
-  @discardableResult
-  package func playPrevious(session: any SessionProviding) -> Bool {
-    step(to: queue?.previousIndex(), session: session)
   }
 
   package func playAgain(session: any SessionProviding) {
@@ -543,14 +597,13 @@ package final class PlaybackController {
   }
 
   package func stop() {
-    stopPlayback()
-    onExplicitStop?()
+    stop(reason: .explicit)
   }
 
   /// Removes session-scoped playback without interpreting the identity change
   /// as the user discarding their saved queue.
   package func stopForSessionChange() {
-    stopPlayback()
+    stop(reason: .sessionChange)
   }
 
   /// Ends the current listening instance while the old credential is still
@@ -591,19 +644,17 @@ package final class PlaybackController {
   /// down. This is not interpreted as the user's Stop button, so it does not
   /// erase the account's persisted queue.
   package func stopForDeletedDownload() {
-    stopPlayback()
-    status = "Playback stopped because its downloaded file was deleted"
+    stop(reason: .deletedDownload)
   }
 
   /// A server-generated queue removed its last entry, so there is nothing left
   /// to play. Also not the user's Stop button: the account's saved queue is
   /// left where it is.
   package func stopForEmptiedQueue(status newStatus: String) {
-    stopPlayback()
-    status = newStatus
+    stop(reason: .emptiedQueue(status: newStatus, clearPersistedQueue: false))
   }
 
-  private func stopPlayback() {
+  package func stop(reason: StopReason) {
     finishLifecycle()
     advanceIntentRevision()
     gate.cancel()
@@ -619,52 +670,31 @@ package final class PlaybackController {
     queue = nil
     queueTracks = []
     queueContext = nil
+    queueAccountID = nil
+    queueWasReplaced()
     clearPendingSleepStop()
     releasePlayback()
     phase = .idle
     trackName = nil
     movePosition(to: 0)
-    status = "Playback stopped"
+    switch reason {
+    case .explicit:
+      status = "Playback stopped"
+      onExplicitStop?()
+    case .sessionChange:
+      status = "Playback stopped"
+    case .deletedDownload:
+      status = "Playback stopped because its downloaded file was deleted"
+    case .emptiedQueue(let newStatus, let clearPersistedQueue):
+      status = newStatus
+      if clearPersistedQueue { onExplicitStop?() }
+    case .sleepTimer(let newStatus):
+      status = newStatus
+    }
     notifyPlaybackChanged()
   }
 
-  /// A local timer; it never issues requests. Zero minutes cancels it,
-  /// including a pending stop-after-track.
-  package func setSleepTimer(minutes: Int) {
-    sleepGeneration += 1
-    sleepTask?.cancel()
-    sleepTask = nil
-    guard minutes > 0 else {
-      sleepTimer = .off
-      return
-    }
-    let seconds = TimeInterval(minutes * 60)
-    sleepTimer = .armed(Date().addingTimeInterval(seconds))
-    let generation = sleepGeneration
-    sleepTask = Task { [weak self] in
-      try? await Task.sleep(for: .seconds(seconds))
-      guard !Task.isCancelled else { return }
-      self?.fireSleepTimer(generation: generation)
-    }
-  }
-
-  private func fireSleepTimer(generation: Int) {
-    guard generation == sleepGeneration, case .armed = sleepTimer else { return }
-    sleepTask = nil
-    guard isActive else {
-      sleepTimer = .off
-      return
-    }
-    if sleepStopsImmediately {
-      sleepTimer = .off
-      stop()
-      status = "Sleep timer stopped playback"
-    } else {
-      sleepTimer = .finishingTrack
-    }
-  }
-
-  private func step(to target: Int?, session: any SessionProviding) -> Bool {
+  package func step(to target: Int?, session: any SessionProviding) -> Bool {
     guard let account = session.account else {
       status = "Validate the session before playback"
       return false
@@ -724,7 +754,9 @@ package final class PlaybackController {
     let track = queueTracks[index]
     finishLifecycle()
     let token = beginIntent()
+    let previousIndex = queue?.currentIndex
     _ = queue?.moveTo(index)
+    if previousIndex != queue?.currentIndex { queueDidAdvance() }
     // Created before the request leaves, so a resolve that never answers
     // still has a Play Again entry point.
     attempt = retry ?? PlaybackAttempt(
@@ -783,8 +815,18 @@ package final class PlaybackController {
     var seen = Set(queueTracks.map(\.id))
     let fresh = tracks.filter { seen.insert($0.id).inserted }
     guard !fresh.isEmpty else { return 0 }
+    let oldCount = queueTracks.count
     queueTracks += fresh
     queue?.append(fresh.count, using: &rng)
+    if let queue {
+      remapAttempt(
+        currentIndex: queue.currentIndex,
+        entryCount: queue.count
+      ) { oldIndex in
+        oldIndex < oldCount ? oldIndex : nil
+      }
+    }
+    queueWasEdited()
     return fresh.count
   }
 
@@ -811,12 +853,35 @@ package final class PlaybackController {
     session: any SessionProviding,
     emptyStatus: String
   ) -> Bool {
-    guard queueContext == context, let heldQueue = queue,
+    guard queueContext == context, queue != nil,
       let removedIndex = queueTracks.firstIndex(where: { $0.id == songID })
     else { return false }
 
+    return removeQueueEntry(
+      at: removedIndex,
+      session: session,
+      emptyStatus: emptyStatus,
+      clearPersistedQueueWhenEmpty: false
+    )
+  }
+
+  package func removeQueueEntry(
+    at removedIndex: Int,
+    session: any SessionProviding,
+    emptyStatus: String,
+    clearPersistedQueueWhenEmpty: Bool
+  ) -> Bool {
+    guard let heldQueue = queue, queueTracks.indices.contains(removedIndex) else {
+      return false
+    }
+
     if heldQueue.count == 1 {
-      stopForEmptiedQueue(status: emptyStatus)
+      stop(
+        reason: .emptiedQueue(
+          status: emptyStatus,
+          clearPersistedQueue: clearPersistedQueueWhenEmpty
+        )
+      )
       return true
     }
 
@@ -827,33 +892,36 @@ package final class PlaybackController {
     let removedCurrent = heldQueue.currentIndex == removedIndex
 
     if !removedCurrent {
+      remapAttempt(
+        currentIndex: updatedQueue.currentIndex,
+        entryCount: updatedQueue.count
+      ) { oldIndex in
+        guard oldIndex != removedIndex else { return nil }
+        return oldIndex > removedIndex ? oldIndex - 1 : oldIndex
+      }
       queueTracks = remaining
       queue = updatedQueue
-      if var retry = attempt {
-        if retry.queueIndex > removedIndex {
-          retry.queueIndex -= 1
-          attempt = retry
-        } else if retry.queueIndex == removedIndex {
-          // Internal state should name the current row. If it does not, retire
-          // the stale retry instead of letting it point at a different song.
-          attempt = nil
-        }
-      }
+      queueWasEdited()
       return true
     }
 
     guard let account = session.account else { return false }
     let successorIndex = updatedQueue.currentIndex
     let requestedQuality = quality
-    acceptExplicitPlaybackIntent()
     let source = entrySource(
       songID: remaining[successorIndex].id,
       requestedQuality: requestedQuality,
       account: account
     )
+    // A user queue edit must either enter the ordinary local-first path or do
+    // nothing. Personal FM's server-confirmed trash keeps its older retryable
+    // fallback because its write still owns the arbiter at this exact point.
+    if source == nil, clearPersistedQueueWhenEmpty { return false }
+    acceptExplicitPlaybackIntent()
 
     queueTracks = remaining
     queue = updatedQueue
+    queueWasEdited()
     if let source {
       startEntry(
         at: successorIndex,
@@ -926,6 +994,15 @@ package final class PlaybackController {
     // slot. There is no suspension between release and the new claim, so this
     // cannot turn `canStart()` into a false promise about the read ceiling.
     if let operationToken {
+      // A feedback write may occupy the exclusive slot while this read is in
+      // flight. Releasing our read first would cancel the only task that can
+      // finish the current entry, then leave the replacement unable to claim
+      // a slot. Keep the current resolve alive until the exclusive operation
+      // is gone instead.
+      guard arbiter.active == nil else {
+        status = "Playback is busy; try again"
+        return nil
+      }
       playTask?.cancel()
       playTask = nil
       releaseResolution(operationToken, outcome: .cancelled)
@@ -1029,7 +1106,6 @@ package final class PlaybackController {
           attempt: attempt
         )
 
-        arbiter.markRequestSent(operation)
         let resolution = try await transport.resolveSongURL(
           songID: currentSongID,
           quality: currentQuality,
@@ -1045,7 +1121,6 @@ package final class PlaybackController {
           )
         else { return }
 
-        arbiter.markSettling(operation)
         outcome = .applied
         switch resolution {
         case .unavailable(let itemCode, let fee):
@@ -1260,6 +1335,7 @@ package final class PlaybackController {
     finishLifecycle()
     releasePlayback()
     guard queue?.moveTo(target) == true else { return false }
+    queueDidAdvance()
     attempt = nextAttempt
     trackName = queueTracks[target].name
     playbackAccountID = account.userID
@@ -1345,6 +1421,10 @@ package final class PlaybackController {
     unplayableStatus: String,
     token: PlaybackIntentGate.Token
   ) async throws -> Bool {
+    // A cancelled local task may not have reached AudioOutput before its
+    // replacement intent starts. Reject it before it can tear down or observe
+    // the replacement player's resource.
+    try checkCurrent(token)
     observeOutput(token: token)
     if case .local = resource.location, let accountID = resource.accountID {
       activeOfflineDownloadID = OfflineDownloadID(
@@ -1499,8 +1579,9 @@ package final class PlaybackController {
     guard gate.accepts(token) else { return }
     if sleepTimer == .finishingTrack {
       gate.cancel()
-      stop()
-      status = "Sleep timer stopped after the current track"
+      stop(
+        reason: .sleepTimer(status: "Sleep timer stopped after the current track")
+      )
       return
     }
     guard let queue else {
@@ -1686,6 +1767,8 @@ package final class PlaybackController {
     queue = nil
     queueTracks = []
     queueContext = nil
+    queueAccountID = nil
+    queueWasReplaced()
     clearPendingSleepStop()
     releasePlayback()
     phase = .idle
@@ -1693,12 +1776,6 @@ package final class PlaybackController {
     movePosition(to: 0)
     self.status = status
     notifyPlaybackChanged()
-  }
-
-  private func clearPendingSleepStop() {
-    if sleepTimer == .finishingTrack {
-      sleepTimer = .off
-    }
   }
 
   /// Starts a new user intent. It deliberately does not touch `attempt`: the
@@ -1732,7 +1809,7 @@ package final class PlaybackController {
   /// slot. That ordering lets the owner of an obsolete radio read cancel it
   /// synchronously, so the newer Play/Next/Previous/Play Again can use the
   /// slot even when the read ceiling is one.
-  private func acceptExplicitPlaybackIntent() {
+  package func acceptExplicitPlaybackIntent() {
     advanceIntentRevision()
     notifyPlaybackChanged()
   }
@@ -1767,62 +1844,6 @@ package final class PlaybackController {
 
   private func currentPosition() -> Double {
     output.currentPositionSeconds ?? attempt?.resumePosition ?? 0
-  }
-
-  private func outputStartedPlaying() {
-    let now = monotonicNow()
-    if lifecycle == nil {
-      guard
-        let track = currentTrack,
-        let context = queueContext,
-        let accountID = playbackAccountID
-      else { return }
-      let instance = PlaybackLifecycleInstance(
-        accountID: accountID,
-        track: track,
-        context: context
-      )
-      lifecycle = ActiveLifecycle(
-        instance: instance,
-        playingSince: now,
-        durationSeconds: durationSeconds
-      )
-      onLifecycleEvent?(.started(instance))
-      return
-    }
-    guard var lifecycle, lifecycle.playingSince == nil else { return }
-    lifecycle.playingSince = now
-    if lifecycle.durationSeconds == nil {
-      lifecycle.durationSeconds = durationSeconds
-    }
-    self.lifecycle = lifecycle
-  }
-
-  private func pauseLifecycleClock() {
-    guard var lifecycle, let started = lifecycle.playingSince else { return }
-    let elapsed = monotonicNow() - started
-    if elapsed.isFinite {
-      lifecycle.accumulatedSeconds += max(0, elapsed)
-    }
-    lifecycle.playingSince = nil
-    self.lifecycle = lifecycle
-  }
-
-  private func finishLifecycle() {
-    pauseLifecycleClock()
-    guard let lifecycle else { return }
-    self.lifecycle = nil
-    let played = lifecycle.accumulatedSeconds.isFinite
-      ? max(0, lifecycle.accumulatedSeconds) : 0
-    let duration = lifecycle.durationSeconds.flatMap {
-      $0.isFinite && $0 >= 0 ? $0 : nil
-    }
-    let bounded = duration.map { min(played, $0) } ?? played
-    let wholeSeconds = bounded >= TimeInterval(Int.max)
-      ? Int.max : Int(bounded.rounded(.down))
-    onLifecycleEvent?(
-      .finished(lifecycle.instance, playedSeconds: wholeSeconds)
-    )
   }
 
   private func checkCurrent(_ token: PlaybackIntentGate.Token) throws {

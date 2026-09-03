@@ -240,6 +240,7 @@ package final class RadioCoordinator: SessionGuardedCoordinator {
         // targeted. The server result is recorded, but local playback is left
         // exactly as the newer intent established it.
         guard self.isPlayingFM else {
+          outcome = .applied
           self.status =
             "Removed \(track.name) on the server; the local queue had changed"
           return
@@ -247,6 +248,7 @@ package final class RadioCoordinator: SessionGuardedCoordinator {
         guard playback.queuedTracks(context: .personalFM).contains(where: {
           $0.id == track.id
         }) else {
+          outcome = .applied
           self.status =
             "Removed \(track.name) on the server; the local queue had changed"
           return
@@ -270,7 +272,7 @@ package final class RadioCoordinator: SessionGuardedCoordinator {
         if Task.isCancelled {
           outcome = .cancelled
         } else if let service = error as? NeteaseServiceError,
-          Self.provesTheWriteDidNotRun(service)
+          service.provesWriteDidNotRun
         {
           outcome = .failed
         } else if self.arbiter.abandoningLosesTheOutcome(token) {
@@ -409,9 +411,7 @@ package final class RadioCoordinator: SessionGuardedCoordinator {
           ),
           self.acceptsRead(serial: serial, intentRevision: intentRevision)
         else { return }
-        self.arbiter.markRequestSent(token)
         let value = try await fetch(credential)
-        self.arbiter.markSettling(token)
         guard
           self.acceptsRead(serial: serial, intentRevision: intentRevision),
           try await self.sessionRemainsCurrent(
@@ -516,11 +516,6 @@ package final class RadioCoordinator: SessionGuardedCoordinator {
   ) {
     if writeToken == token { writeToken = nil }
     arbiter.end(token, outcome: outcome)
-  }
-
-  private static func provesTheWriteDidNotRun(_ error: NeteaseServiceError) -> Bool {
-    guard error.source == .http else { return true }
-    return !(500...599).contains(error.statusCode)
   }
 
   private static func deduplicated(_ tracks: [Track]) -> [Track] {

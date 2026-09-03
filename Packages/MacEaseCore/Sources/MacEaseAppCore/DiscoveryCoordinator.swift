@@ -112,10 +112,19 @@ package final class DiscoveryCoordinator: SessionGuardedCoordinator {
     loadTask = Task {
       var outcome = OperationOutcome.applied
       defer {
-        release(claim.token, outcome: outcome)
-        finish(generation: currentGeneration)
+        releaseSessionOperation(
+          claim.token,
+          currentToken: &self.operationToken,
+          arbiter: self.arbiter,
+          outcome: outcome
+        )
+        finishSessionOperation(
+          generation: currentGeneration,
+          currentGeneration: self.generation,
+          isLoading: &self.isLoading,
+          task: &self.loadTask
+        )
       }
-      arbiter.markRequestSent(claim.token)
       for step in [runDailySongs, runDailyPlaylists, runPersonalized, runToplists] {
         guard await step(account, currentGeneration, session) else {
           outcome = .failed
@@ -424,7 +433,8 @@ package final class DiscoveryCoordinator: SessionGuardedCoordinator {
     loadTask?.cancel()
     loadTask = nil
     if let operationToken {
-      release(operationToken, outcome: .cancelled)
+      self.operationToken = nil
+      arbiter.end(operationToken, outcome: .cancelled)
     }
     // `hasPrefetched` is deliberately not cleared. Discarding the data an
     // identity was allowed to see and restoring the launch-scoped prefetch
@@ -437,23 +447,22 @@ package final class DiscoveryCoordinator: SessionGuardedCoordinator {
     status = "Validate the session, then load each section explicitly"
   }
 
-  private struct Claim {
-    let token: OperationToken
-    let account: NeteaseAccount
-  }
-
   /// Claims the validated account while no write/session mutation is active;
   /// `isLoading` prevents duplicate work inside this coordinator.
-  private func claim(_ name: String, session: any SessionProviding) -> Claim? {
-    guard !isLoading else { return nil }
-    guard let token = arbiter.begin(name: name, effect: .read) else { return nil }
-    guard let account = session.account else {
-      arbiter.end(token, outcome: .failed)
-      status = "Validate the session before loading"
-      return nil
-    }
-    operationToken = token
-    return Claim(token: token, account: account)
+  private func claim(
+    _ name: String,
+    session: any SessionProviding
+  ) -> SessionOperationClaim? {
+    claimSessionOperation(
+      name,
+      effect: .read,
+      session: session,
+      arbiter: arbiter,
+      isLoading: isLoading,
+      noAccountStatus: "Validate the session before loading",
+      status: &status,
+      operationToken: &operationToken
+    )
   }
 
   private func load(
@@ -471,10 +480,19 @@ package final class DiscoveryCoordinator: SessionGuardedCoordinator {
     loadTask = Task {
       var outcome = OperationOutcome.failed
       defer {
-        release(claim.token, outcome: outcome)
-        finish(generation: currentGeneration)
+        releaseSessionOperation(
+          claim.token,
+          currentToken: &self.operationToken,
+          arbiter: self.arbiter,
+          outcome: outcome
+        )
+        finishSessionOperation(
+          generation: currentGeneration,
+          currentGeneration: self.generation,
+          isLoading: &self.isLoading,
+          task: &self.loadTask
+        )
       }
-      arbiter.markRequestSent(claim.token)
       outcome = await run(account, currentGeneration, session) ? .applied : .failed
     }
   }
@@ -599,17 +617,6 @@ package final class DiscoveryCoordinator: SessionGuardedCoordinator {
     // A superseded section must not report itself as a network problem.
     guard failure.isReportable else { return }
     status = failure.statusText(operation: operation)
-  }
-
-  private func finish(generation: Int) {
-    guard self.generation == generation else { return }
-    isLoading = false
-    loadTask = nil
-  }
-
-  private func release(_ token: OperationToken, outcome: OperationOutcome) {
-    if operationToken == token { operationToken = nil }
-    arbiter.end(token, outcome: outcome)
   }
 
   private func clearAll() {

@@ -111,18 +111,22 @@ validate_signed_entitlements() {
     die "could not read the signed entitlements"
   fi
   local failure=
-  [[ $(plutil -extract 'com\.apple\.security\.app-sandbox' raw "$extracted") == true ]] \
-    || failure="the signed app is not sandboxed"
-  [[ $(plutil -extract 'com\.apple\.security\.network\.client' raw "$extracted") == true ]] \
-    || failure="the signed app lacks outgoing network access"
-  [[ $(plutil -extract \
+  if [[ $(plutil -extract 'com\.apple\.security\.app-sandbox' raw "$extracted") != true ]]; then
+    failure="${failure}${failure:+; }the signed app is not sandboxed"
+  fi
+  if [[ $(plutil -extract 'com\.apple\.security\.network\.client' raw "$extracted") != true ]]; then
+    failure="${failure}${failure:+; }the signed app lacks outgoing network access"
+  fi
+  if [[ $(plutil -extract \
     'com\.apple\.security\.temporary-exception\.mach-lookup\.global-name.0' raw \
-    "$extracted") == com.macease.app-spks ]] \
-    || failure="the signed app lacks Sparkle's status mach lookup"
-  [[ $(plutil -extract \
+    "$extracted") != com.macease.app-spks ]]; then
+    failure="${failure}${failure:+; }the signed app lacks Sparkle's status mach lookup"
+  fi
+  if [[ $(plutil -extract \
     'com\.apple\.security\.temporary-exception\.mach-lookup\.global-name.1' raw \
-    "$extracted") == com.macease.app-spki ]] \
-    || failure="the signed app lacks Sparkle's installer mach lookup"
+    "$extracted") != com.macease.app-spki ]]; then
+    failure="${failure}${failure:+; }the signed app lacks Sparkle's installer mach lookup"
+  fi
   rm -f -- "$extracted"
   [[ -z "$failure" ]] || die "$failure"
 }
@@ -337,7 +341,13 @@ notarize_archive() {
   [[ -n "$profile" ]] || die "MACEASE_NOTARY_PROFILE is required"
   validate_release_archive "$archive" false "$MACEASE_SPARKLE_FEED_URL" \
     "$MACEASE_SPARKLE_PUBLIC_KEY" "$MACEASE_TEAM_ID"
-  xcrun notarytool submit "$archive" --keychain-profile "$profile"
+  local result
+  if ! result=$(xcrun notarytool submit "$archive" --keychain-profile "$profile" --wait 2>&1); then
+    print -u2 -r -- "$result"
+    return 1
+  fi
+  print -r -- "$result"
+  [[ "$result" == *Accepted* ]] || die "notarization did not report Accepted"
 }
 
 wait_for_notarization() {
@@ -359,6 +369,7 @@ staple_app() {
     "$app" "$MACEASE_SPARKLE_FEED_URL" "$MACEASE_SPARKLE_PUBLIC_KEY"
   xcrun stapler staple "$app"
   xcrun stapler validate "$app"
+  spctl --assess --type execute "$app"
 }
 
 generate_appcast() {

@@ -91,6 +91,21 @@ package struct PlaybackAttempt: Equatable, Sendable {
     result.recovery = recovery
     return result
   }
+
+  /// Queue edits keep this retry attached to the same song while translating
+  /// every index already visited by bounded recovery into the edited queue.
+  package mutating func remapQueue(
+    currentIndex: Int,
+    entryCount: Int,
+    using transform: (Int) -> Int?
+  ) {
+    queueIndex = currentIndex
+    recovery.remapQueue(
+      currentIndex: currentIndex,
+      entryCount: entryCount,
+      using: transform
+    )
+  }
 }
 
 package struct PlaybackRecoveryState: Equatable, Sendable {
@@ -141,6 +156,23 @@ package struct PlaybackRecoveryState: Equatable, Sendable {
     currentQuality = requestedQuality
     skippedEntries += 1
     return true
+  }
+
+  mutating func remapQueue(
+    currentIndex: Int,
+    entryCount: Int,
+    using transform: (Int) -> Int?
+  ) {
+    let acceptedRemainingVisits = remainingQueueVisits
+    visitedQueueIndices = Set(visitedQueueIndices.compactMap(transform))
+    visitedQueueIndices.insert(currentIndex)
+    // A queue edit can remove choices from an accepted recovery chain, but an
+    // inserted Play Next row or a late radio continuation cannot expand the
+    // chain's original bound.
+    remainingQueueVisits = min(
+      acceptedRemainingVisits,
+      max(0, entryCount - visitedQueueIndices.count)
+    )
   }
 }
 

@@ -112,6 +112,39 @@ private func appendLittleEndian<T: FixedWidthInteger>(
   withUnsafeBytes(of: &value) { data.append(contentsOf: $0) }
 }
 
+@Test func eofProbeFinishesWithoutRequestingAByte() throws {
+  let range = try AudioAssetResourceLoader.requestedRange(
+    requestedOffset: 100,
+    currentOffset: 100,
+    requestedLength: 1,
+    requestsAllDataToEnd: false,
+    byteCount: 100
+  )
+
+  #expect(range == nil)
+  #expect(throws: AudioRangeError.rangeOutOfBounds) {
+    try AudioAssetResourceLoader.requestedRange(
+      requestedOffset: 101,
+      currentOffset: 101,
+      requestedLength: 1,
+      requestsAllDataToEnd: false,
+      byteCount: 100
+    )
+  }
+}
+
+@Test func zeroLengthRangeFinishesWithoutRequestingAByte() throws {
+  let range = try AudioAssetResourceLoader.requestedRange(
+    requestedOffset: 40,
+    currentOffset: 40,
+    requestedLength: 0,
+    requestsAllDataToEnd: false,
+    byteCount: 100
+  )
+
+  #expect(range == nil)
+}
+
 @Test @MainActor func avPlayerLoadsThroughTheValidatedRangeDelegate() async throws {
   let directory = FileManager.default.temporaryDirectory
     .appendingPathComponent("MacEase-output-\(UUID().uuidString)", isDirectory: true)

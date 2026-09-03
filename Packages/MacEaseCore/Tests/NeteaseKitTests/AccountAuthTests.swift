@@ -23,8 +23,12 @@ private func response(setCookie: String) -> HTTPURLResponse {
 
 // MARK: - QR sign-in
 
-@Test func qrKeyRequestUsesTheAnonymousEAPIEnvelope() throws {
-  let request = try NeteaseSession.qrKeyRequest()
+@Test func qrKeyRequestUsesTheLockedAnonymousEAPIEnvelope() throws {
+  let request = try NeteaseSession.qrKeyRequest(
+    osVersion: "15.5",
+    buildVersion: "1722945678",
+    requestID: "1722945678123_0042"
+  )
 
   #expect(
     request.url?.absoluteString
@@ -39,31 +43,33 @@ private func response(setCookie: String) -> HTTPURLResponse {
   #expect(!cookie.contains("MUSIC_A"))
   #expect(cookie.contains("os=osx"))
   #expect(cookie.contains("channel=github"))
+  let params = try NeteaseCrypto.eapi(
+    path: "/api/login/qrcode/unikey",
+    json:
+      #"{"type":3,"e_r":false,"header":{"osver":"15.5","os":"osx","appver":"0.1","buildver":"1722945678","channel":"github","requestId":"1722945678123_0042"}}"#
+  )
+  #expect(String(decoding: request.httpBody!, as: UTF8.self) == "params=\(params)")
 }
 
 @Test func qrCheckRequestCarriesTheKeyAndTheClientType() throws {
-  let request = try NeteaseSession.qrCheckRequest(key: "abc-123")
+  let request = try NeteaseSession.qrCheckRequest(
+    key: "abc-123",
+    osVersion: "15.5",
+    buildVersion: "1722945678",
+    requestID: "1722945678123_0042"
+  )
 
   #expect(
     request.url?.absoluteString
       == "https://interfacepc.music.163.com/eapi/login/qrcode/client/login"
   )
   let body = String(decoding: request.httpBody ?? Data(), as: UTF8.self)
-  #expect(body.hasPrefix("params="))
-}
-
-@Test func qrKeyDecodesEitherResponseShape() throws {
-  let flat = try NeteaseSession.classifyQRKey(
-    data: Data(#"{"code":200,"unikey":"K1"}"#.utf8),
-    response: okResponse
+  let params = try NeteaseCrypto.eapi(
+    path: "/api/login/qrcode/client/login",
+    json:
+      #"{"key":"abc-123","type":3,"e_r":false,"header":{"osver":"15.5","os":"osx","appver":"0.1","buildver":"1722945678","channel":"github","requestId":"1722945678123_0042"}}"#
   )
-  let wrapped = try NeteaseSession.classifyQRKey(
-    data: Data(#"{"code":200,"data":{"unikey":"K1"}}"#.utf8),
-    response: okResponse
-  )
-
-  #expect(flat == "K1")
-  #expect(wrapped == "K1")
+  #expect(body == "params=\(params)")
 }
 
 @Test func qrKeyRejectsAnEmptyKey() throws {

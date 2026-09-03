@@ -148,6 +148,7 @@ public enum NeteaseTransportError: Error, Equatable, Sendable {
   /// The task completed with a response that is not HTTP, so there is no
   /// status line to classify. Never a reason to terminate the process.
   case nonHTTPResponse
+  case invalidURL
 }
 
 public struct AudioURLProbeResult: Equatable, Sendable {
@@ -520,7 +521,7 @@ public actor NeteaseSession {
     )
     let (data, response) = try await urlSession.data(for: request)
     let httpResponse = try Self.requireHTTPResponse(response)
-    try Self.classifyWriteAcknowledgement(
+    try Self.requireSuccess(
       data: data,
       response: httpResponse
     )
@@ -536,7 +537,7 @@ public actor NeteaseSession {
     )
     let (data, response) = try await urlSession.data(for: request)
     let httpResponse = try Self.requireHTTPResponse(response)
-    try Self.classifyWriteAcknowledgement(
+    try Self.requireSuccess(
       data: data,
       response: httpResponse
     )
@@ -560,7 +561,7 @@ public actor NeteaseSession {
     )
     let (data, response) = try await urlSession.data(for: request)
     let httpResponse = try Self.requireHTTPResponse(response)
-    try Self.classifyWriteAcknowledgement(
+    try Self.requireSuccess(
       data: data,
       response: httpResponse
     )
@@ -582,7 +583,7 @@ public actor NeteaseSession {
     )
     let (data, response) = try await urlSession.data(for: request)
     let httpResponse = try Self.requireHTTPResponse(response)
-    try Self.classifyWriteAcknowledgement(
+    try Self.requireSuccess(
       data: data,
       response: httpResponse
     )
@@ -605,7 +606,7 @@ public actor NeteaseSession {
     )
     let (data, response) = try await urlSession.data(for: request)
     let httpResponse = try Self.requireHTTPResponse(response)
-    try Self.classifyWriteAcknowledgement(
+    try Self.requireSuccess(
       data: data,
       response: httpResponse
     )
@@ -691,14 +692,7 @@ public actor NeteaseSession {
     data: Data,
     response: HTTPURLResponse
   ) throws -> AccountSessionState {
-    guard (200..<300).contains(response.statusCode) else {
-      throw NeteaseServiceError(source: .http, statusCode: response.statusCode)
-    }
-
-    let code = try JSONDecoder().decode(ServiceCodePayload.self, from: data).code
-    guard code == 200 else {
-      throw NeteaseServiceError(source: .service, statusCode: code)
-    }
+    try requireSuccess(data: data, response: response)
     let payload = try JSONDecoder().decode(AccountStatusPayload.self, from: data)
     guard let profile = payload.profile else {
       return .signedOut
@@ -731,14 +725,7 @@ public actor NeteaseSession {
     response: HTTPURLResponse,
     userID: Int64
   ) throws -> UserPlaylistPage {
-    guard (200..<300).contains(response.statusCode) else {
-      throw NeteaseServiceError(source: .http, statusCode: response.statusCode)
-    }
-
-    let code = try JSONDecoder().decode(ServiceCodePayload.self, from: data).code
-    guard code == 200 else {
-      throw NeteaseServiceError(source: .service, statusCode: code)
-    }
+    try requireSuccess(data: data, response: response)
     let payload = try JSONDecoder().decode(UserPlaylistsPayload.self, from: data)
     return UserPlaylistPage(
       playlists: payload.playlist.map { item in
@@ -776,10 +763,11 @@ public actor NeteaseSession {
     let header = try eapiHeaderJSON(headerFields)
     let json =
       #"{"id":\#(playlistID),"n":100000,"s":8,"e_r":false,"header":\#(header)}"#
-    return try eapiRequest(
-      endpoint: playlistDetailEndpoint,
+    return try eapiFormRequest(
+      path: playlistDetailEndpoint.path,
       json: json,
-      headerFields: headerFields
+      headerFields: headerFields,
+      url: playlistDetailEndpoint.url
     )
   }
 
@@ -788,14 +776,7 @@ public actor NeteaseSession {
     response: HTTPURLResponse,
     playlistID: Int64
   ) throws -> PlaylistDetail {
-    guard (200..<300).contains(response.statusCode) else {
-      throw NeteaseServiceError(source: .http, statusCode: response.statusCode)
-    }
-
-    let code = try JSONDecoder().decode(ServiceCodePayload.self, from: data).code
-    guard code == 200 else {
-      throw NeteaseServiceError(source: .service, statusCode: code)
-    }
+    try requireSuccess(data: data, response: response)
     let playlist = try JSONDecoder().decode(PlaylistDetailPayload.self, from: data).playlist
     guard playlist.id == playlistID else {
       throw NeteaseCatalogError.invalidResponse
@@ -825,14 +806,7 @@ public actor NeteaseSession {
     response: HTTPURLResponse,
     songIDs: [Int64]
   ) throws -> [Track] {
-    guard (200..<300).contains(response.statusCode) else {
-      throw NeteaseServiceError(source: .http, statusCode: response.statusCode)
-    }
-
-    let code = try JSONDecoder().decode(ServiceCodePayload.self, from: data).code
-    guard code == 200 else {
-      throw NeteaseServiceError(source: .service, statusCode: code)
-    }
+    try requireSuccess(data: data, response: response)
     let songs = try JSONDecoder().decode(SongDetailsPayload.self, from: data).songs
     var tracksByID: [Int64: Track] = [:]
     for song in songs {
@@ -858,14 +832,7 @@ public actor NeteaseSession {
     data: Data,
     response: HTTPURLResponse
   ) throws -> [Int64] {
-    guard (200..<300).contains(response.statusCode) else {
-      throw NeteaseServiceError(source: .http, statusCode: response.statusCode)
-    }
-
-    let code = try JSONDecoder().decode(ServiceCodePayload.self, from: data).code
-    guard code == 200 else {
-      throw NeteaseServiceError(source: .service, statusCode: code)
-    }
+    try requireSuccess(data: data, response: response)
     return try JSONDecoder().decode(LikedSongIDsPayload.self, from: data).ids
   }
 
@@ -888,14 +855,7 @@ public actor NeteaseSession {
     response: HTTPURLResponse,
     scope: PlayRecordScope
   ) throws -> [PlayRecordEntry] {
-    guard (200..<300).contains(response.statusCode) else {
-      throw NeteaseServiceError(source: .http, statusCode: response.statusCode)
-    }
-
-    let code = try JSONDecoder().decode(ServiceCodePayload.self, from: data).code
-    guard code == 200 else {
-      throw NeteaseServiceError(source: .service, statusCode: code)
-    }
+    try requireSuccess(data: data, response: response)
     let payload = try JSONDecoder().decode(PlayRecordsPayload.self, from: data)
     let items: [PlayRecordsPayload.Item]? =
       switch scope {
@@ -926,14 +886,7 @@ public actor NeteaseSession {
     data: Data,
     response: HTTPURLResponse
   ) throws -> [Track] {
-    guard (200..<300).contains(response.statusCode) else {
-      throw NeteaseServiceError(source: .http, statusCode: response.statusCode)
-    }
-
-    let code = try JSONDecoder().decode(ServiceCodePayload.self, from: data).code
-    guard code == 200 else {
-      throw NeteaseServiceError(source: .service, statusCode: code)
-    }
+    try requireSuccess(data: data, response: response)
     let songs = try JSONDecoder().decode(DailyRecommendedSongsPayload.self, from: data)
       .data.dailySongs
     return songs.map { $0.track }
@@ -955,14 +908,7 @@ public actor NeteaseSession {
     data: Data,
     response: HTTPURLResponse
   ) throws -> [DiscoveredPlaylist] {
-    guard (200..<300).contains(response.statusCode) else {
-      throw NeteaseServiceError(source: .http, statusCode: response.statusCode)
-    }
-
-    let code = try JSONDecoder().decode(ServiceCodePayload.self, from: data).code
-    guard code == 200 else {
-      throw NeteaseServiceError(source: .service, statusCode: code)
-    }
+    try requireSuccess(data: data, response: response)
     return try JSONDecoder().decode(DailyRecommendedPlaylistsPayload.self, from: data)
       .recommend.map(\.playlist)
   }
@@ -983,14 +929,7 @@ public actor NeteaseSession {
     data: Data,
     response: HTTPURLResponse
   ) throws -> [DiscoveredPlaylist] {
-    guard (200..<300).contains(response.statusCode) else {
-      throw NeteaseServiceError(source: .http, statusCode: response.statusCode)
-    }
-
-    let code = try JSONDecoder().decode(ServiceCodePayload.self, from: data).code
-    guard code == 200 else {
-      throw NeteaseServiceError(source: .service, statusCode: code)
-    }
+    try requireSuccess(data: data, response: response)
     return try JSONDecoder().decode(PersonalizedPlaylistsPayload.self, from: data)
       .result.map(\.playlist)
   }
@@ -1009,10 +948,11 @@ public actor NeteaseSession {
     )
     let header = try eapiHeaderJSON(headerFields)
     let json = #"{"e_r":false,"header":\#(header)}"#
-    return try eapiRequest(
-      endpoint: toplistsEndpoint,
+    return try eapiFormRequest(
+      path: toplistsEndpoint.path,
       json: json,
-      headerFields: headerFields
+      headerFields: headerFields,
+      url: toplistsEndpoint.url
     )
   }
 
@@ -1020,14 +960,7 @@ public actor NeteaseSession {
     data: Data,
     response: HTTPURLResponse
   ) throws -> [DiscoveredPlaylist] {
-    guard (200..<300).contains(response.statusCode) else {
-      throw NeteaseServiceError(source: .http, statusCode: response.statusCode)
-    }
-
-    let code = try JSONDecoder().decode(ServiceCodePayload.self, from: data).code
-    guard code == 200 else {
-      throw NeteaseServiceError(source: .service, statusCode: code)
-    }
+    try requireSuccess(data: data, response: response)
     return try JSONDecoder().decode(ToplistsPayload.self, from: data)
       .list.map(\.playlist)
   }
@@ -1051,14 +984,7 @@ public actor NeteaseSession {
     data: Data,
     response: HTTPURLResponse
   ) throws -> [Track] {
-    guard (200..<300).contains(response.statusCode) else {
-      throw NeteaseServiceError(source: .http, statusCode: response.statusCode)
-    }
-
-    let code = try JSONDecoder().decode(ServiceCodePayload.self, from: data).code
-    guard code == 200 else {
-      throw NeteaseServiceError(source: .service, statusCode: code)
-    }
+    try requireSuccess(data: data, response: response)
     return try JSONDecoder().decode(SimilarSongsPayload.self, from: data)
       .songs.map { $0.track }
   }
@@ -1083,7 +1009,7 @@ public actor NeteaseSession {
     data: Data,
     response: HTTPURLResponse
   ) throws {
-    try classifyWriteAcknowledgement(data: data, response: response)
+    try requireSuccess(data: data, response: response)
   }
 
   /// `privacy` is `"10"` for a private playlist and `"0"` for an ordinary one,
@@ -1152,10 +1078,11 @@ public actor NeteaseSession {
     let json =
       #"{"op":"\#(edit.rawValue)","pid":\#(playlistID),"trackIds":\#(encodedList),"#
       + #""imme":"true","e_r":false,"header":\#(header)}"#
-    return try eapiRequest(
-      endpoint: manipulateTracksEndpoint,
+    return try eapiFormRequest(
+      path: manipulateTracksEndpoint.path,
       json: json,
-      headerFields: headerFields
+      headerFields: headerFields,
+      url: manipulateTracksEndpoint.url
     )
   }
 
@@ -1183,10 +1110,11 @@ public actor NeteaseSession {
     let encodedInner = String(decoding: try JSONEncoder().encode(inner), as: UTF8.self)
     let json =
       #"{"/api/playlist/update/name":\#(encodedInner),"e_r":false,"header":\#(header)}"#
-    return try eapiRequest(
-      endpoint: batchEndpoint,
+    return try eapiFormRequest(
+      path: batchEndpoint.path,
       json: json,
-      headerFields: headerFields
+      headerFields: headerFields,
+      url: batchEndpoint.url
     )
   }
 
@@ -1206,10 +1134,12 @@ public actor NeteaseSession {
     )
     let header = try eapiHeaderJSON(headerFields)
     let json = #"{"id":\#(playlistID),"e_r":false,"header":\#(header)}"#
-    return try eapiRequest(
-      endpoint: subscribed ? subscribePlaylistEndpoint : unsubscribePlaylistEndpoint,
+    let endpoint = subscribed ? subscribePlaylistEndpoint : unsubscribePlaylistEndpoint
+    return try eapiFormRequest(
+      path: endpoint.path,
       json: json,
-      headerFields: headerFields
+      headerFields: headerFields,
+      url: endpoint.url
     )
   }
 
@@ -1217,20 +1147,6 @@ public actor NeteaseSession {
   /// field MacEase uses. Anything else is reported and stops; in particular the
   /// reference implementation's automatic resend on 512 is deliberately not
   /// copied, since automatic retries are forbidden.
-  package static func classifyWriteAcknowledgement(
-    data: Data,
-    response: HTTPURLResponse
-  ) throws {
-    guard (200..<300).contains(response.statusCode) else {
-      throw NeteaseServiceError(source: .http, statusCode: response.statusCode)
-    }
-
-    let code = try JSONDecoder().decode(ServiceCodePayload.self, from: data).code
-    guard code == 200 else {
-      throw NeteaseServiceError(source: .service, statusCode: code)
-    }
-  }
-
   package static func classifyAudioProbe(
     response: HTTPURLResponse
   ) -> AudioURLProbeResult {
@@ -1264,10 +1180,11 @@ public actor NeteaseSession {
     let header = try eapiHeaderJSON(headerFields)
     let json =
       #"{"ids":"[\#(songID)]","level":"\#(quality.rawValue)","encodeType":"flac","e_r":false,"header":\#(header)}"#
-    return try eapiRequest(
-      endpoint: songURLEndpoint,
+    return try eapiFormRequest(
+      path: songURLEndpoint.path,
       json: json,
-      headerFields: headerFields
+      headerFields: headerFields,
+      url: songURLEndpoint.url
     )
   }
 
@@ -1344,10 +1261,11 @@ public actor NeteaseSession {
     let json =
       #"{"id":"\#(songID)","cp":false,"tv":0,"lv":0,"rv":0,"kv":0,"yv":0,"#
       + #""ytv":0,"yrv":0,"e_r":false,"header":\#(header)}"#
-    return try eapiRequest(
-      endpoint: lyricsEndpoint,
+    return try eapiFormRequest(
+      path: lyricsEndpoint.path,
       json: json,
-      headerFields: headerFields
+      headerFields: headerFields,
+      url: lyricsEndpoint.url
     )
   }
 
@@ -1382,7 +1300,9 @@ public actor NeteaseSession {
       translation: payload.tlyric?.lyric,
       yrcTranslation: payload.ytlrc?.lyric,
       romanisation: payload.romalrc?.lyric,
-      yrcRomanisation: payload.yromalrc?.lyric
+      yrcRomanisation: payload.yromalrc?.lyric,
+      contributor: payload.lyricUser?.nickname,
+      translationContributor: payload.transUser?.nickname
     )
   }
 
@@ -1577,27 +1497,19 @@ public actor NeteaseSession {
       }).joined(separator: ",") + "}"
   }
 
-  private static func eapiRequest(
-    endpoint: EndpointDescriptor,
-    json: String,
-    headerFields: [(String, String)]
-  ) throws -> URLRequest {
-    var request = URLRequest(url: endpoint.url)
-    request.httpMethod = "POST"
-    request.httpBody = FormURLEncoder.encode([
-      ("params", try NeteaseCrypto.eapi(path: endpoint.path, json: json))
-    ])
-    request.httpShouldHandleCookies = false
-    request.setValue(
-      "application/x-www-form-urlencoded",
-      forHTTPHeaderField: "Content-Type"
-    )
-    request.setValue("MacEasePhase0/0.1 (macOS 15)", forHTTPHeaderField: "User-Agent")
-    request.setValue(
-      headerFields.map { "\($0.0)=\($0.1)" }.joined(separator: "; "),
-      forHTTPHeaderField: "Cookie"
-    )
-    return request
+  /// The shared `code == 200` gate for authenticated and catalogue responses.
+  /// HTTP failures are classified before decoding a service code.
+  static func requireSuccess(
+    data: Data,
+    response: HTTPURLResponse
+  ) throws {
+    guard (200..<300).contains(response.statusCode) else {
+      throw NeteaseServiceError(source: .http, statusCode: response.statusCode)
+    }
+    let code = try JSONDecoder().decode(ServiceCodePayload.self, from: data).code
+    guard code == 200 else {
+      throw NeteaseServiceError(source: .service, statusCode: code)
+    }
   }
 
   static func weapiParameters(
@@ -1702,7 +1614,7 @@ private struct AccountStatusParameters: Encodable {
   }
 }
 
-private struct ServiceCodePayload: Decodable {
+struct ServiceCodePayload: Decodable {
   let code: Int
 }
 
@@ -1854,8 +1766,26 @@ private struct LyricsPayload: Decodable {
   let ytlrc: LyricsContent?
   let romalrc: LyricsContent?
   let yromalrc: LyricsContent?
+  let lyricUser: LyricContributor?
+  let transUser: LyricContributor?
   let nolyric: Bool?
   let uncollected: Bool?
+}
+
+/// Credits are decorative metadata. A malformed optional object must not make
+/// otherwise valid timed lyrics fail to decode.
+private struct LyricContributor: Decodable {
+  let nickname: String?
+
+  private enum CodingKeys: String, CodingKey { case nickname }
+
+  init(from decoder: any Decoder) throws {
+    guard let container = try? decoder.container(keyedBy: CodingKeys.self) else {
+      nickname = nil
+      return
+    }
+    nickname = try? container.decode(String.self, forKey: .nickname)
+  }
 }
 
 private struct SongURLPayload: Decodable {
