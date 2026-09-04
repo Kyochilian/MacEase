@@ -137,7 +137,7 @@ actor FakeTransport: NeteaseTransporting {
     case trashFMSong(Int64)
     case heartbeatQueue(songID: Int64, playlistID: Int64, startMusicID: Int64)
     case similarArtists(Int64)
-    case search(String, SearchScope, offset: Int)
+    case search(String, SearchScope, limit: Int, offset: Int)
     case searchSuggestions(String)
     case defaultSearchKeyword
     case albumDetail(Int64)
@@ -454,6 +454,9 @@ actor FakeTransport: NeteaseTransporting {
   var similarArtistsResult: Result<[Artist], any Error> = .success([])
   var searchPages: [SearchPage] = []
   var searchError: (any Error)?
+  var searchResponsesByScope: [
+    SearchScope: [Result<SearchPage, NeteaseServiceError>]
+  ] = [:]
   var suggestionsResult: Result<[SearchSuggestion], any Error> = .success([])
   var defaultKeywordResult: Result<String?, any Error> = .success(nil)
   var albumDetailResult: Result<AlbumDetail, any Error>?
@@ -482,6 +485,11 @@ actor FakeTransport: NeteaseTransporting {
   }
   func setSearchPages(_ value: [SearchPage]) { searchPages = value }
   func setSearchError(_ value: (any Error)?) { searchError = value }
+  func setSearchResponsesByScope(
+    _ value: [SearchScope: [Result<SearchPage, NeteaseServiceError>]]
+  ) {
+    searchResponsesByScope = value
+  }
   func setSuggestions(_ value: Result<[SearchSuggestion], any Error>) {
     suggestionsResult = value
   }
@@ -589,7 +597,12 @@ actor FakeTransport: NeteaseTransporting {
     offset: Int,
     credential: NeteaseCredential
   ) async throws -> SearchPage {
-    try await record(.search(keywords, scope, offset: offset)) {
+    try await record(.search(keywords, scope, limit: limit, offset: offset)) {
+      if var responses = searchResponsesByScope[scope], !responses.isEmpty {
+        let response = responses.removeFirst()
+        searchResponsesByScope[scope] = responses
+        return response.mapError { $0 as any Error }
+      }
       if let searchError { return .failure(searchError) }
       guard !searchPages.isEmpty else {
         return .failure(Unprogrammed(call: "search"))

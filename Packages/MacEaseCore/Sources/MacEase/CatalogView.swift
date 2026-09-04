@@ -3,7 +3,8 @@ import MacEaseSession
 import NeteaseKit
 import SwiftUI
 
-/// Searching the whole catalogue, in the four kinds MacEase can open.
+/// Searching the whole catalogue, either as four concurrent bounded groups or
+/// in one pageable category.
 ///
 /// Suggestions appear after a short pause in typing and only ever fill the
 /// field; the search itself always waits for the user to submit it. Paging
@@ -32,10 +33,11 @@ struct SearchView: View {
     VStack(spacing: 0) {
       HStack {
         Picker("Kind", selection: $catalog.scope) {
-          Text("Songs").tag(SearchScope.songs)
-          Text("Albums").tag(SearchScope.albums)
-          Text("Artists").tag(SearchScope.artists)
-          Text("Playlists").tag(SearchScope.playlists)
+          Text("All").tag(CatalogSearchScope.all)
+          Text("Songs").tag(CatalogSearchScope.songs)
+          Text("Artists").tag(CatalogSearchScope.artists)
+          Text("Albums").tag(CatalogSearchScope.albums)
+          Text("Playlists").tag(CatalogSearchScope.playlists)
         }
         .pickerStyle(.segmented)
         .fixedSize()
@@ -46,10 +48,15 @@ struct SearchView: View {
           .onSubmit {
             if !searchDisabled { catalog.runSearch(session: session) }
           }
-        Button("Search · 1 request", systemImage: "magnifyingglass") {
+        Button(searchButtonTitle, systemImage: "magnifyingglass") {
           catalog.runSearch(session: session)
         }
         .disabled(searchDisabled)
+        .help(
+          catalog.scope == .all
+            ? "Searches songs, artists, albums, and playlists with 4 concurrent requests"
+            : "Searches the selected category with 1 request"
+        )
         Button("Suggested Search · 1 request", systemImage: "sparkle") {
           catalog.loadDefaultKeyword(session: session)
         }
@@ -95,6 +102,10 @@ struct SearchView: View {
     catalog.defaultKeyword.map { "Search · try \($0)" } ?? "Search"
   }
 
+  private var searchButtonTitle: String {
+    catalog.scope == .all ? "Search · 4 requests" : "Search · 1 request"
+  }
+
   @ViewBuilder private var suggestions: some View {
     ScrollView(.horizontal) {
       HStack(spacing: 8) {
@@ -120,82 +131,150 @@ struct SearchView: View {
   }
 
   @ViewBuilder private var results: some View {
+    if catalog.scope == .all {
+      combinedResults
+    } else {
+      scopedResults
+    }
+  }
+
+  @ViewBuilder private var scopedResults: some View {
     switch catalog.results {
     case .songs(let songs):
       list(songs, empty: "Search for a song") { track in
-        HStack {
-          TrackRowLabel(track: track, loader: artwork)
-          Spacer()
-          LikeButton(
-            track: track,
-            library: library,
-            session: session,
-            disabled: requestInFlight
-          )
-          AddToPlaylistMenu(
-            track: track,
-            library: library,
-            session: session,
-            disabled: requestInFlight
-          )
-          PlayTrackButton(
-            track: track,
-            tracks: songs,
-            context: .searchResults(keywords: catalog.resultsKeywords ?? ""),
-            playback: playback,
-            session: session
-          )
-        }
+        songRow(track, tracks: songs)
       }
     case .albums(let albums):
       list(albums, empty: "Search for an album") { album in
-        HStack {
-          AlbumRowLabel(album: album, loader: artwork)
-          Spacer()
-          Button("Open · 2 requests", systemImage: "opticaldisc") {
-            openAlbum(album.id)
-          }
-          .buttonStyle(.borderless)
-          .disabled(session.account == nil || arbiter.isBusy)
-        }
+        albumRow(album)
       }
     case .artists(let artists):
       list(artists, empty: "Search for an artist") { artist in
-        HStack {
-          ArtistRowLabel(artist: artist, loader: artwork)
-          Spacer()
-          Button("Open · 2 requests", systemImage: "music.microphone") {
-            openArtist(artist.id)
-          }
-          .buttonStyle(.borderless)
-          .disabled(session.account == nil || arbiter.isBusy)
-        }
+        artistRow(artist)
       }
     case .playlists(let playlists):
       list(playlists, empty: "Search for a playlist") { playlist in
-        HStack {
-          PlaylistRowLabel(playlist: playlist, loader: artwork)
-          Spacer()
-          Button("Open · up to 2 requests", systemImage: "music.note.list") {
-            openPlaylist(playlist)
-          }
-          .buttonStyle(.borderless)
-          .disabled(session.account == nil || arbiter.isBusy)
-          Button {
-            library.setSubscribed(
-              true,
-              playlistID: playlist.id,
-              playlistName: playlist.name,
-              session: session
-            )
-          } label: {
-            Image(systemName: "plus.circle")
-          }
-          .buttonStyle(.borderless)
-          .disabled(session.account == nil || arbiter.isBusy)
-          .help("Subscribe to this playlist · 1 request")
+        playlistRow(playlist)
+      }
+    }
+  }
+
+  @ViewBuilder private var combinedResults: some View {
+    let combined = catalog.combinedResults
+    if combined.isEmpty {
+      VStack(spacing: 8) {
+        Text(catalog.isSearching ? catalog.status : "Search across all categories")
+          .foregroundStyle(.secondary)
+        if combined.isIncomplete {
+          Label("Results are incomplete", systemImage: "exclamationmark.triangle")
+            .foregroundStyle(.orange)
         }
       }
+      .frame(maxWidth: .infinity, maxHeight: .infinity)
+    } else {
+      List {
+        if combined.isIncomplete {
+          Section {
+            Label("Results are incomplete", systemImage: "exclamationmark.triangle")
+              .foregroundStyle(.orange)
+          }
+        }
+        if !combined.songs.isEmpty {
+          Section("Songs") {
+            ForEach(combined.songs) { songRow($0, tracks: combined.songs) }
+          }
+        }
+        if !combined.artists.isEmpty {
+          Section("Artists") {
+            ForEach(combined.artists) { artistRow($0) }
+          }
+        }
+        if !combined.albums.isEmpty {
+          Section("Albums") {
+            ForEach(combined.albums) { albumRow($0) }
+          }
+        }
+        if !combined.playlists.isEmpty {
+          Section("Playlists") {
+            ForEach(combined.playlists) { playlistRow($0) }
+          }
+        }
+      }
+    }
+  }
+
+  private func songRow(_ track: Track, tracks: [Track]) -> some View {
+    HStack {
+      TrackRowLabel(track: track, loader: artwork)
+      Spacer()
+      LikeButton(
+        track: track,
+        library: library,
+        session: session,
+        disabled: requestInFlight
+      )
+      AddToPlaylistMenu(
+        track: track,
+        library: library,
+        session: session,
+        disabled: requestInFlight
+      )
+      PlayTrackButton(
+        track: track,
+        tracks: tracks,
+        context: .searchResults(keywords: catalog.resultsKeywords ?? ""),
+        playback: playback,
+        session: session
+      )
+    }
+  }
+
+  private func albumRow(_ album: Album) -> some View {
+    HStack {
+      AlbumRowLabel(album: album, loader: artwork)
+      Spacer()
+      Button("Open · 2 requests", systemImage: "opticaldisc") {
+        openAlbum(album.id)
+      }
+      .buttonStyle(.borderless)
+      .disabled(session.account == nil || arbiter.isBusy)
+    }
+  }
+
+  private func artistRow(_ artist: Artist) -> some View {
+    HStack {
+      ArtistRowLabel(artist: artist, loader: artwork)
+      Spacer()
+      Button("Open · 2 requests", systemImage: "music.microphone") {
+        openArtist(artist.id)
+      }
+      .buttonStyle(.borderless)
+      .disabled(session.account == nil || arbiter.isBusy)
+    }
+  }
+
+  private func playlistRow(_ playlist: DiscoveredPlaylist) -> some View {
+    HStack {
+      PlaylistRowLabel(playlist: playlist, loader: artwork)
+      Spacer()
+      Button("Open · up to 2 requests", systemImage: "music.note.list") {
+        openPlaylist(playlist)
+      }
+      .buttonStyle(.borderless)
+      .disabled(session.account == nil || arbiter.isBusy)
+      Button {
+        library.setSubscribed(
+          true,
+          playlistID: playlist.id,
+          playlistName: playlist.name,
+          session: session
+        )
+      } label: {
+        Image(systemName: "plus.circle")
+      }
+      .buttonStyle(.borderless)
+      .disabled(session.account == nil || arbiter.isBusy)
+      .help("Subscribe to this playlist · 1 request")
     }
   }
 

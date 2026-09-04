@@ -12,7 +12,7 @@ import NeteaseKit
 /// The cases are the ones the code actually produces. There is no `permission`
 /// case, for instance, because no evidence yet says which service codes mean
 /// that; inventing one would be a guess the UI would then present as fact.
-package enum OperationFailure: Equatable, Sendable {
+package enum OperationFailure: Error, Equatable, Sendable {
   /// A newer intent superseded this one. Not a failure, and never shown as a
   /// network problem.
   case cancelled
@@ -42,6 +42,8 @@ package enum OperationFailure: Equatable, Sendable {
     if cancelled || error is CancellationError { return .cancelled }
 
     switch error {
+    case let error as OperationFailure:
+      return error
     case let error as NeteaseServiceError:
       switch error.source {
       case .http: return .http(status: error.statusCode)

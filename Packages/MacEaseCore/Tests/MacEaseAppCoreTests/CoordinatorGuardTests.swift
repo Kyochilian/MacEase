@@ -304,7 +304,8 @@ private func makeLibrary(
   await catalog.settleForTesting()
 
   #expect(
-    await transport.recordedCalls() == [.search("canary", .songs, offset: 0)]
+    await transport.recordedCalls()
+      == [.search("canary", .songs, limit: 30, offset: 0)]
   )
   #expect(catalog.results == .songs(makeTracks([9])))
   #expect(catalog.resultsKeywords == "canary")

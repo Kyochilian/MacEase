@@ -39,7 +39,200 @@ private func songPage(_ ids: [Int64], total: Int?) -> SearchPage {
   SearchPage(items: .songs(makeTracks(ids)), totalCount: total)
 }
 
+private func albumSearchPage(_ ids: [Int64]) -> SearchPage {
+  SearchPage(items: .albums(makeAlbums(ids)), totalCount: ids.count)
+}
+
+private func artistSearchPage(_ ids: [Int64]) -> SearchPage {
+  SearchPage(items: .artists(makeArtists(ids)), totalCount: ids.count)
+}
+
+private func playlistSearchPage(_ ids: [Int64]) -> SearchPage {
+  SearchPage(items: .playlists(makeDiscovered(ids)), totalCount: ids.count)
+}
+
+private func combinedResponses(
+  songIDs: [Int64],
+  artistIDs: [Int64],
+  albumIDs: [Int64],
+  playlistIDs: [Int64]
+) -> [SearchScope: [Result<SearchPage, NeteaseServiceError>]] {
+  [
+    .songs: [.success(songPage(songIDs, total: songIDs.count))],
+    .artists: [.success(artistSearchPage(artistIDs))],
+    .albums: [.success(albumSearchPage(albumIDs))],
+    .playlists: [.success(playlistSearchPage(playlistIDs))],
+  ]
+}
+
 // MARK: - Search paging and identity
+
+@Test @MainActor func allSearchSendsExactlyFourBoundedRequests() async {
+  let rig = CatalogRig()
+  await rig.transport.setSearchResponsesByScope(
+    combinedResponses(songIDs: [1], artistIDs: [2], albumIDs: [3], playlistIDs: [4])
+  )
+
+  rig.catalog.scope = .all
+  rig.catalog.query = "canary"
+  rig.catalog.runSearch(session: rig.session)
+  await rig.settle()
+
+  let calls = await rig.transport.recordedCalls()
+  #expect(calls.count == 4)
+  #expect(calls.contains(.search("canary", .songs, limit: 12, offset: 0)))
+  #expect(calls.contains(.search("canary", .artists, limit: 10, offset: 0)))
+  #expect(calls.contains(.search("canary", .albums, limit: 10, offset: 0)))
+  #expect(calls.contains(.search("canary", .playlists, limit: 10, offset: 0)))
+  #expect(rig.catalog.combinedResults.songs.map(\.id) == [1])
+  #expect(rig.catalog.combinedResults.artists.map(\.id) == [2])
+  #expect(rig.catalog.combinedResults.albums.map(\.id) == [3])
+  #expect(rig.catalog.combinedResults.playlists.map(\.id) == [4])
+  #expect(rig.catalog.resultsHaveMore == false)
+}
+
+@Test @MainActor func editsBlanksAndDefaultPlaceholderDoNotSubmitASearch() async {
+  let rig = CatalogRig()
+  await rig.transport.setDefaultKeyword(.success("周杰伦"))
+  rig.catalog.scope = .all
+
+  rig.catalog.query = "editing"
+  rig.catalog.query = "   "
+  rig.catalog.runSearch(session: rig.session)
+  rig.catalog.query = ""
+  rig.catalog.loadDefaultKeyword(session: rig.session)
+  await rig.settle()
+  rig.catalog.runSearch(session: rig.session)
+  await rig.settle()
+
+  #expect(rig.catalog.defaultKeyword == "周杰伦")
+  #expect(await rig.transport.recordedCalls() == [.defaultSearchKeyword])
+}
+
+@Test @MainActor func lateCombinedResultsCannotReplaceANewerKeyword() async {
+  let rig = CatalogRig()
+  await rig.transport.setSearchResponsesByScope([
+    .songs: [
+      .success(songPage([1], total: 1)),
+      .success(songPage([11], total: 1)),
+    ],
+    .artists: [.success(artistSearchPage([2])), .success(artistSearchPage([12]))],
+    .albums: [.success(albumSearchPage([3])), .success(albumSearchPage([13]))],
+    .playlists: [
+      .success(playlistSearchPage([4])),
+      .success(playlistSearchPage([14])),
+    ],
+  ])
+  await rig.transport.gate.close()
+
+  rig.catalog.scope = .all
+  rig.catalog.query = "first"
+  rig.catalog.runSearch(session: rig.session)
+  while await rig.transport.gate.arrivalCount() < 4 { await Task.yield() }
+  rig.catalog.query = "second"
+  rig.catalog.runSearch(session: rig.session)
+  while await rig.transport.gate.arrivalCount() < 8 { await Task.yield() }
+
+  await rig.transport.gate.open()
+  await rig.settle()
+
+  #expect(rig.catalog.resultsKeywords == "second")
+  #expect(rig.catalog.combinedResults.songs.map(\.id) == [11])
+  #expect(rig.catalog.combinedResults.artists.map(\.id) == [12])
+  #expect(rig.catalog.combinedResults.albums.map(\.id) == [13])
+  #expect(rig.catalog.combinedResults.playlists.map(\.id) == [14])
+}
+
+@Test @MainActor func combinedResultsFromAnotherAccountAreDiscarded() async {
+  let rig = CatalogRig()
+  let credentialB = makeCredential("b")
+  await rig.transport.setSearchResponsesByScope(
+    combinedResponses(songIDs: [1], artistIDs: [2], albumIDs: [3], playlistIDs: [4])
+  )
+  await rig.transport.gate.close()
+
+  rig.catalog.scope = .all
+  rig.catalog.query = "canary"
+  rig.catalog.runSearch(session: rig.session)
+  while await rig.transport.gate.arrivalCount() < 4 { await Task.yield() }
+  await rig.vault.setStored(credentialB)
+  rig.session.account = otherAccount
+  rig.session.validatedCredential = credentialB
+  await rig.transport.gate.open()
+  await rig.settle()
+
+  #expect(rig.catalog.combinedResults.isEmpty)
+  #expect(rig.catalog.status == "Session changed; validate again")
+}
+
+@Test @MainActor func combinedSearchPublishesSuccessfulGroupsAndMarksPartialFailure() async {
+  let rig = CatalogRig()
+  await rig.transport.setSearchResponsesByScope([
+    .songs: [.success(songPage([1], total: 1))],
+    .artists: [.failure(NeteaseServiceError(source: .http, statusCode: 503))],
+    .albums: [.success(albumSearchPage([3]))],
+    .playlists: [.success(playlistSearchPage([4]))],
+  ])
+
+  rig.catalog.scope = .all
+  rig.catalog.query = "canary"
+  rig.catalog.runSearch(session: rig.session)
+  await rig.settle()
+
+  #expect(rig.catalog.combinedResults.songs.map(\.id) == [1])
+  #expect(rig.catalog.combinedResults.artists.isEmpty)
+  #expect(rig.catalog.combinedResults.albums.map(\.id) == [3])
+  #expect(rig.catalog.combinedResults.playlists.map(\.id) == [4])
+  #expect(rig.catalog.combinedResults.failedScopes == [.artists])
+  #expect(rig.catalog.status.contains("results are incomplete"))
+}
+
+@Test @MainActor func combinedSearchUsesTypedFailureWhenEveryRequestFails() async {
+  let rig = CatalogRig()
+  let failure = NeteaseServiceError(source: .service, statusCode: 503)
+  await rig.transport.setSearchResponsesByScope([
+    .songs: [.failure(failure)],
+    .artists: [.failure(failure)],
+    .albums: [.failure(failure)],
+    .playlists: [.failure(failure)],
+  ])
+
+  rig.catalog.scope = .all
+  rig.catalog.query = "canary"
+  rig.catalog.runSearch(session: rig.session)
+  await rig.settle()
+
+  #expect(rig.catalog.combinedResults.isEmpty)
+  #expect(rig.catalog.status == "NetEase refused search (service=503)")
+}
+
+@Test @MainActor func changingAwayFromAllCancelsLateCombinedResults() async {
+  let rig = CatalogRig()
+  await rig.transport.setSearchResponsesByScope([
+    .songs: [
+      .success(songPage([1], total: 1)),
+      .success(songPage([9], total: 1)),
+    ],
+    .artists: [.success(artistSearchPage([2]))],
+    .albums: [.success(albumSearchPage([3]))],
+    .playlists: [.success(playlistSearchPage([4]))],
+  ])
+  await rig.transport.gate.close()
+
+  rig.catalog.scope = .all
+  rig.catalog.query = "canary"
+  rig.catalog.runSearch(session: rig.session)
+  while await rig.transport.gate.arrivalCount() < 4 { await Task.yield() }
+  rig.catalog.scope = .songs
+  rig.catalog.runSearch(session: rig.session)
+  while await rig.transport.gate.arrivalCount() < 5 { await Task.yield() }
+
+  await rig.transport.gate.open()
+  await rig.settle()
+
+  #expect(rig.catalog.results == .songs(makeTracks([9])))
+  #expect(rig.catalog.combinedResults.isEmpty)
+}
 
 /// Load More asks for the rows after the ones actually held, so a page the
 /// service trimmed cannot make the next request skip.
@@ -62,8 +255,8 @@ private func songPage(_ ids: [Int64], total: Int?) -> SearchPage {
   #expect(rig.catalog.resultsHaveMore == false)
   #expect(
     await rig.transport.recordedCalls() == [
-      .search("canary", .songs, offset: 0),
-      .search("canary", .songs, offset: 2),
+      .search("canary", .songs, limit: 30, offset: 0),
+      .search("canary", .songs, limit: 30, offset: 2),
     ]
   )
 }
@@ -89,9 +282,9 @@ private func songPage(_ ids: [Int64], total: Int?) -> SearchPage {
   #expect(rig.catalog.results == .songs(makeTracks([1, 2, 3, 4])))
   #expect(
     await rig.transport.recordedCalls() == [
-      .search("canary", .songs, offset: 0),
-      .search("canary", .songs, offset: 2),
-      .search("canary", .songs, offset: 4),
+      .search("canary", .songs, limit: 30, offset: 0),
+      .search("canary", .songs, limit: 30, offset: 2),
+      .search("canary", .songs, limit: 30, offset: 4),
     ]
   )
 }
@@ -115,8 +308,8 @@ private func songPage(_ ids: [Int64], total: Int?) -> SearchPage {
   #expect(rig.catalog.resultsHaveMore == false)
   #expect(
     await rig.transport.recordedCalls() == [
-      .search("canary", .songs, offset: 0),
-      .search("canary", .albums, offset: 0),
+      .search("canary", .songs, limit: 30, offset: 0),
+      .search("canary", .albums, limit: 30, offset: 0),
     ]
   )
 }
@@ -351,7 +544,9 @@ private func songPage(_ ids: [Int64], total: Int?) -> SearchPage {
 
   #expect(rig.catalog.results == .songs(makeTracks([7])))
   #expect(
-    await rig.transport.recordedCalls().contains(.search("canary", .songs, offset: 0))
+    await rig.transport.recordedCalls().contains(
+      .search("canary", .songs, limit: 30, offset: 0)
+    )
   )
 }
 

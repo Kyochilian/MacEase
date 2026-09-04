@@ -2,6 +2,53 @@ import Foundation
 import NeteaseKit
 import Observation
 
+/// The choices exposed by the Search tab. `all` is composed in the app layer;
+/// the remaining cases map one-to-one to the existing NetEase search scope.
+package enum CatalogSearchScope: CaseIterable, Sendable, Hashable {
+  case all
+  case songs
+  case artists
+  case albums
+  case playlists
+
+  fileprivate var neteaseScope: SearchScope? {
+    switch self {
+    case .all: nil
+    case .songs: .songs
+    case .artists: .artists
+    case .albums: .albums
+    case .playlists: .playlists
+    }
+  }
+
+  fileprivate init(_ scope: SearchScope) {
+    switch scope {
+    case .songs: self = .songs
+    case .artists: self = .artists
+    case .albums: self = .albums
+    case .playlists: self = .playlists
+    }
+  }
+}
+
+/// The four bounded result groups produced by one explicit All search.
+package struct CombinedSearchResults: Equatable, Sendable {
+  package var songs: [Track] = []
+  package var artists: [Artist] = []
+  package var albums: [Album] = []
+  package var playlists: [DiscoveredPlaylist] = []
+  package var failedScopes: [SearchScope] = []
+
+  package init() {}
+
+  package var count: Int {
+    songs.count + artists.count + albums.count + playlists.count
+  }
+
+  package var isEmpty: Bool { count == 0 }
+  package var isIncomplete: Bool { !failedScopes.isEmpty }
+}
+
 /// Search and the pages you open from it: albums, artists, the new-release
 /// list and the artist chart.
 ///
@@ -61,7 +108,17 @@ package final class CatalogCoordinator: SessionGuardedCoordinator {
   /// must use that same value.
   private struct SearchInput: Equatable {
     let keywords: String
+    let scope: CatalogSearchScope
+  }
+
+  private enum SearchGroupResult: Sendable {
+    case success(SearchPage)
+    case failure(OperationFailure)
+  }
+
+  private struct SearchGroup: Sendable {
     let scope: SearchScope
+    let result: SearchGroupResult
   }
 
   @ObservationIgnored private let transport: any NeteaseTransporting
@@ -90,13 +147,14 @@ package final class CatalogCoordinator: SessionGuardedCoordinator {
       searchInputChanged(queryChanged: true)
     }
   }
-  package var scope: SearchScope = .songs {
+  package var scope: CatalogSearchScope = .songs {
     didSet {
       guard scope != oldValue else { return }
       searchInputChanged(queryChanged: false)
     }
   }
   package private(set) var results: SearchItems = .songs([])
+  package private(set) var combinedResults = CombinedSearchResults()
   package private(set) var resultsHaveMore = false
   /// What `results` are actually for, so a stale list is never labelled with
   /// whatever is in the field right now.
@@ -151,12 +209,16 @@ package final class CatalogCoordinator: SessionGuardedCoordinator {
 
   // MARK: - Search
 
-  /// Runs the search the user submitted (1 request). Changing the keywords or
-  /// the kind of thing being searched for starts over from offset zero.
+  /// Runs the search the user submitted. All uses four bounded requests;
+  /// individual scopes retain the existing single-request paging path.
   package func runSearch(session: any SessionProviding) {
     let keywords = Self.trimmed(query)
     guard !keywords.isEmpty else { return }
-    performSearch(keywords: keywords, scope: scope, offset: 0, session: session)
+    guard let requested = scope.neteaseScope else {
+      performCombinedSearch(keywords: keywords, session: session)
+      return
+    }
+    performSearch(keywords: keywords, scope: requested, offset: 0, session: session)
   }
 
   /// Fetches the next page of the search already on screen (1 request). The
@@ -164,7 +226,11 @@ package final class CatalogCoordinator: SessionGuardedCoordinator {
   /// deduplicated separately, so a repeated row cannot move the next request
   /// backwards.
   package func loadMoreResults(session: any SessionProviding) {
-    guard resultsHaveMore, let keywords = resultsKeywords else { return }
+    guard
+      resultsHaveMore,
+      let keywords = resultsKeywords,
+      scope.neteaseScope == results.scope
+    else { return }
     performSearch(
       keywords: keywords,
       scope: results.scope,
@@ -195,6 +261,7 @@ package final class CatalogCoordinator: SessionGuardedCoordinator {
       onStart: {
         guard isNewQuery else { return }
         self.results = .empty(requested)
+        self.combinedResults = CombinedSearchResults()
         self.resultsHaveMore = false
         self.resultsKeywords = keywords
         self.searchOffset = 0
@@ -212,7 +279,8 @@ package final class CatalogCoordinator: SessionGuardedCoordinator {
       apply: { page in
         // The field may have moved on while the request was out.
         guard
-          self.currentSearchInput == SearchInput(keywords: keywords, scope: requested),
+          self.currentSearchInput
+            == SearchInput(keywords: keywords, scope: CatalogSearchScope(requested)),
           self.resultsKeywords == keywords,
           self.results.scope == requested
         else {
@@ -228,6 +296,132 @@ package final class CatalogCoordinator: SessionGuardedCoordinator {
         return "Found \(self.results.count) results for \(keywords)"
       }
     )
+  }
+
+  private func performCombinedSearch(
+    keywords: String,
+    session: any SessionProviding
+  ) {
+    read(
+      in: search,
+      identity: "search|all|\(keywords)",
+      operation: "Search",
+      loading: "Searching songs, artists, albums, and playlists (4 requests)",
+      report: { self.status = $0 },
+      busy: { self.isSearching = $0 },
+      session: session,
+      onStart: {
+        self.results = .songs([])
+        self.combinedResults = CombinedSearchResults()
+        self.resultsHaveMore = false
+        self.resultsKeywords = keywords
+        self.searchOffset = 0
+        self.suggestions = []
+      },
+      fetch: { credential in
+        try await self.fetchCombinedSearch(keywords: keywords, credential: credential)
+      },
+      apply: { combined in
+        guard
+          self.currentSearchInput == SearchInput(keywords: keywords, scope: .all),
+          self.resultsKeywords == keywords
+        else {
+          return "Discarded results for \(keywords); the search changed"
+        }
+        self.combinedResults = combined
+        let successfulGroups = 4 - combined.failedScopes.count
+        if combined.isIncomplete {
+          return
+            "Found \(combined.count) results across \(successfulGroups) of 4 categories "
+            + "for \(keywords); results are incomplete"
+        }
+        return "Found \(combined.count) results across 4 categories for \(keywords)"
+      }
+    )
+  }
+
+  private func fetchCombinedSearch(
+    keywords: String,
+    credential: NeteaseCredential
+  ) async throws -> CombinedSearchResults {
+    async let songs = fetchSearchGroup(
+      keywords: keywords,
+      scope: .songs,
+      limit: 12,
+      credential: credential
+    )
+    async let artists = fetchSearchGroup(
+      keywords: keywords,
+      scope: .artists,
+      limit: 10,
+      credential: credential
+    )
+    async let albums = fetchSearchGroup(
+      keywords: keywords,
+      scope: .albums,
+      limit: 10,
+      credential: credential
+    )
+    async let playlists = fetchSearchGroup(
+      keywords: keywords,
+      scope: .playlists,
+      limit: 10,
+      credential: credential
+    )
+
+    let groups = await [songs, artists, albums, playlists]
+    var combined = CombinedSearchResults()
+    var firstFailure: OperationFailure?
+    var successCount = 0
+    for group in groups {
+      switch group.result {
+      case .success(let page):
+        guard page.items.scope == group.scope else {
+          combined.failedScopes.append(group.scope)
+          firstFailure = firstFailure ?? .decode
+          continue
+        }
+        successCount += 1
+        switch page.items {
+        case .songs(let rows): combined.songs = rows
+        case .artists(let rows): combined.artists = rows
+        case .albums(let rows): combined.albums = rows
+        case .playlists(let rows): combined.playlists = rows
+        }
+      case .failure(let failure):
+        combined.failedScopes.append(group.scope)
+        firstFailure = firstFailure ?? failure
+      }
+    }
+    if successCount == 0 { throw firstFailure ?? OperationFailure.transport }
+    return combined
+  }
+
+  private func fetchSearchGroup(
+    keywords: String,
+    scope: SearchScope,
+    limit: Int,
+    credential: NeteaseCredential
+  ) async -> SearchGroup {
+    do {
+      return SearchGroup(
+        scope: scope,
+        result: .success(
+          try await transport.search(
+            keywords: keywords,
+            scope: scope,
+            limit: limit,
+            offset: 0,
+            credential: credential
+          )
+        )
+      )
+    } catch {
+      return SearchGroup(
+        scope: scope,
+        result: .failure(OperationFailure.classify(error, cancelled: Task.isCancelled))
+      )
+    }
   }
 
   /// Whether another page is worth asking for. The service reports a total for
@@ -316,7 +510,8 @@ package final class CatalogCoordinator: SessionGuardedCoordinator {
     releaseLaneToken(search)
     search.cancel()
     isSearching = false
-    results = .empty(scope)
+    results = scope.neteaseScope.map(SearchItems.empty) ?? .songs([])
+    combinedResults = CombinedSearchResults()
     resultsKeywords = nil
     resultsHaveMore = false
     searchOffset = 0
@@ -663,7 +858,8 @@ package final class CatalogCoordinator: SessionGuardedCoordinator {
   }
 
   private func clearAll() {
-    results = .empty(scope)
+    results = scope.neteaseScope.map(SearchItems.empty) ?? .songs([])
+    combinedResults = CombinedSearchResults()
     resultsHaveMore = false
     resultsKeywords = nil
     searchOffset = 0
