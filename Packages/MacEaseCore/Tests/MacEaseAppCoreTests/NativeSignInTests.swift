@@ -17,18 +17,54 @@ private final class AuthRig {
   let vault: FakeVault
   let arbiter = OperationArbiter()
   let session: LoginCoordinator
+  let refreshDefaults: UserDefaults
   /// Every account the coordinator reported, in order, including nil. This is
   /// the one hook the app binds per-account local data from, so what lands
   /// here is exactly what a sign-in path is worth.
   private(set) var accountChanges: [NeteaseAccount?] = []
 
-  init(stored: NeteaseCredential? = nil) {
+  init(
+    stored: NeteaseCredential? = nil,
+    refreshDefaults: UserDefaults = makeRefreshDefaults(),
+    refreshCalendar: Calendar = .current,
+    now: @escaping @MainActor () -> Date = Date.init
+  ) {
     vault = FakeVault(stored: stored)
-    session = LoginCoordinator(transport: transport, vault: vault, arbiter: arbiter)
+    self.refreshDefaults = refreshDefaults
+    session = LoginCoordinator(
+      transport: transport,
+      vault: vault,
+      arbiter: arbiter,
+      refreshDefaults: refreshDefaults,
+      refreshCalendar: refreshCalendar,
+      now: now
+    )
     session.onValidatedAccountChanged = { [weak self] account in
       self?.accountChanges.append(account)
     }
   }
+}
+
+private func makeRefreshDefaults() -> UserDefaults {
+  let suite = "MacEaseTests.AutomaticRefresh.\(UUID().uuidString)"
+  let defaults = UserDefaults(suiteName: suite)!
+  defaults.removePersistentDomain(forName: suite)
+  return defaults
+}
+
+@MainActor
+private final class RefreshClock {
+  var now: Date
+
+  init(now: Date) {
+    self.now = now
+  }
+}
+
+private func refreshTestCalendar() -> Calendar {
+  var calendar = Calendar(identifier: .gregorian)
+  calendar.timeZone = TimeZone(secondsFromGMT: 8 * 60 * 60)!
+  return calendar
 }
 
 // MARK: - QR sign-in
@@ -293,6 +329,129 @@ private final class AuthRig {
 }
 
 // MARK: - Refresh
+
+@Test @MainActor func automaticRefreshRunsOncePerLocalDayForOneAccount() async {
+  let clock = RefreshClock(now: Date(timeIntervalSince1970: 1_800_000_000))
+  let rig = AuthRig(
+    stored: makeCredential("old"),
+    refreshCalendar: refreshTestCalendar(),
+    now: { clock.now }
+  )
+  #expect(await rig.session.validateSession() == .credentialReplaced(testAccount))
+  await rig.transport.setRefresh(.success(makeCredential("day-one")))
+
+  _ = await rig.session.refreshSessionIfNeeded()
+  _ = await rig.session.refreshSessionIfNeeded()
+  #expect(
+    await rig.transport.recordedCalls().filter { $0 == .refreshSession }.count == 1
+  )
+
+  clock.now.addTimeInterval(24 * 60 * 60)
+  await rig.transport.setRefresh(.success(makeCredential("day-two")))
+  _ = await rig.session.refreshSessionIfNeeded()
+
+  #expect(
+    await rig.transport.recordedCalls().filter { $0 == .refreshSession }.count == 2
+  )
+  #expect(rig.session.account == testAccount)
+}
+
+@Test @MainActor func automaticRefreshDatesAreIsolatedByAccount() async {
+  let defaults = makeRefreshDefaults()
+  let date = Date(timeIntervalSince1970: 1_800_000_000)
+  let calendar = refreshTestCalendar()
+  let first = AuthRig(
+    stored: makeCredential("a"),
+    refreshDefaults: defaults,
+    refreshCalendar: calendar,
+    now: { date }
+  )
+  let second = AuthRig(
+    stored: makeCredential("b"),
+    refreshDefaults: defaults,
+    refreshCalendar: calendar,
+    now: { date }
+  )
+  await second.transport.setAccountStatus(.success(.authenticated(otherAccount)))
+
+  #expect(await first.session.validateSession() == .credentialReplaced(testAccount))
+  #expect(await second.session.validateSession() == .credentialReplaced(otherAccount))
+  _ = await first.session.refreshSessionIfNeeded()
+  _ = await second.session.refreshSessionIfNeeded()
+
+  #expect(
+    await first.transport.recordedCalls().filter { $0 == .refreshSession }.count == 1
+  )
+  #expect(
+    await second.transport.recordedCalls().filter { $0 == .refreshSession }.count == 1
+  )
+  #expect(first.session.account == testAccount)
+  #expect(second.session.account == otherAccount)
+}
+
+@Test @MainActor func failedAutomaticRefreshDoesNotRetryOrSignOutThatDay() async {
+  let rig = AuthRig(stored: makeCredential("valid"))
+  #expect(await rig.session.validateSession() == .credentialReplaced(testAccount))
+  await rig.transport.setRefresh(.failure(URLError(.timedOut)))
+
+  _ = await rig.session.refreshSessionIfNeeded()
+  _ = await rig.session.refreshSessionIfNeeded()
+
+  #expect(
+    await rig.transport.recordedCalls().filter { $0 == .refreshSession }.count == 1
+  )
+  #expect(rig.session.account == testAccount)
+  #expect(rig.session.storedSessionPresence == .stored)
+  #expect(await rig.vault.storedForTesting() == makeCredential("valid"))
+}
+
+@Test @MainActor func unvalidatedStoredCredentialIsNotAutomaticallyRefreshed() async {
+  let rig = AuthRig(stored: makeCredential("unverified"))
+
+  #expect(await rig.session.refreshSessionIfNeeded() == nil)
+  #expect(await rig.transport.recordedCalls().isEmpty)
+  #expect(await rig.vault.storedForTesting() == makeCredential("unverified"))
+}
+
+@Test @MainActor func refreshRevalidationCannotRecursivelyRefreshAgain() async {
+  let rig = AuthRig(stored: makeCredential("old"))
+  await rig.transport.setRefresh(.success(makeCredential("new")))
+  _ = await rig.session.start()
+
+  #expect(await rig.session.validateSession() == .credentialReplaced(testAccount))
+  await rig.session.settleAutomaticRefreshForTesting()
+
+  #expect(
+    await rig.transport.recordedCalls() == [
+      .accountStatus,
+      .refreshSession,
+      .accountStatus,
+    ]
+  )
+  #expect(rig.session.account == testAccount)
+  #expect(await rig.vault.storedForTesting() == makeCredential("new"))
+}
+
+@Test @MainActor func automaticRefreshWaitsForLoginFlowsAndTheArbiter() async {
+  let rig = AuthRig(stored: makeCredential("valid"))
+  #expect(await rig.session.validateSession() == .credentialReplaced(testAccount))
+
+  _ = await rig.session.startQRLogin()
+  #expect(await rig.session.refreshSessionIfNeeded() == nil)
+  rig.session.cancelQRLogin()
+
+  rig.session.phoneNumber = "13800138000"
+  _ = await rig.session.sendVerificationCode()
+  #expect(await rig.session.refreshSessionIfNeeded() == nil)
+
+  let held = rig.arbiter.begin(name: "Like", effect: .write)
+  #expect(await rig.session.refreshSessionIfNeeded() == nil)
+  if let held { rig.arbiter.end(held, outcome: .applied) }
+
+  #expect(
+    await rig.transport.recordedCalls().filter { $0 == .refreshSession }.isEmpty
+  )
+}
 
 @Test @MainActor func refreshStoresTheNewCookieWithoutClaimingAnAccount() async {
   let stored = makeCredential("old")

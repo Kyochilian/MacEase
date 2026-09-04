@@ -34,7 +34,12 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
   @ObservationIgnored private let transport: any NeteaseTransporting
   @ObservationIgnored private let vault: any CredentialStoring
   @ObservationIgnored private let arbiter: OperationArbiter
+  @ObservationIgnored private let refreshDefaults: UserDefaults
+  @ObservationIgnored private let refreshCalendar: Calendar
+  @ObservationIgnored private let now: @MainActor () -> Date
   @ObservationIgnored private var operationToken: OperationToken?
+  @ObservationIgnored private var automaticRefreshEnabled = false
+  @ObservationIgnored private var automaticRefreshTask: Task<Void, Never>?
   @ObservationIgnored package let webView: WKWebView
 
   /// The only mutable session state. The reducer replaces it whole; no path
@@ -73,7 +78,10 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
   package init(
     transport: any NeteaseTransporting,
     vault: any CredentialStoring,
-    arbiter: OperationArbiter
+    arbiter: OperationArbiter,
+    refreshDefaults: UserDefaults = .standard,
+    refreshCalendar: Calendar = .current,
+    now: @escaping @MainActor () -> Date = Date.init
   ) {
     let dataStore = WKWebsiteDataStore.nonPersistent()
     let configuration = WKWebViewConfiguration()
@@ -83,6 +91,9 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
     self.transport = transport
     self.vault = vault
     self.arbiter = arbiter
+    self.refreshDefaults = refreshDefaults
+    self.refreshCalendar = refreshCalendar
+    self.now = now
     self.webView = WKWebView(frame: .zero, configuration: configuration)
     super.init()
 
@@ -94,6 +105,7 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
   package func start() async -> SessionMutationResult {
     guard beginOperation("Session start") else { return .rejected(.busy) }
     defer { endOperation() }
+    automaticRefreshEnabled = true
 
     let result: SessionMutationResult
     do {
@@ -520,6 +532,32 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
   /// refresh that answers 200 without a new cookie refreshed nothing, and
   /// overwriting a working credential with itself would hide that.
   package func refreshSession() async -> SessionMutationResult {
+    await refreshSession(automaticFor: nil)
+  }
+
+  /// Refreshes a saved, validated account at most once per local calendar day.
+  /// The attempt is persisted immediately before the request, so a failure or
+  /// the validation that follows a successful refresh cannot start a loop.
+  @discardableResult
+  package func refreshSessionIfNeeded() async -> SessionMutationResult? {
+    guard
+      let account = snapshot.account,
+      snapshot.validatedCredential != nil,
+      qrSession == nil,
+      !codeWasSent,
+      !isBusy,
+      arbiter.activeReadCount == 0,
+      !automaticRefreshWasAttemptedToday(for: account)
+    else { return nil }
+
+    let refreshed = await refreshSession(automaticFor: account)
+    guard refreshed == .storedUnvalidated else { return refreshed }
+    return await validateSession()
+  }
+
+  private func refreshSession(
+    automaticFor expectedAccount: NeteaseAccount?
+  ) async -> SessionMutationResult {
     guard await beginIdentityOperation("Refresh session") else {
       return .rejected(.busy)
     }
@@ -535,6 +573,17 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
     guard let stored else {
       status = "No stored session to refresh"
       return commit(.storedItemChanged(hasStoredItem: false))
+    }
+
+    if let expectedAccount {
+      guard
+        snapshot.account == expectedAccount,
+        snapshot.validatedCredential == stored,
+        qrSession == nil,
+        !codeWasSent,
+        !automaticRefreshWasAttemptedToday(for: expectedAccount)
+      else { return .rejected(.busy) }
+      refreshDefaults.set(now(), forKey: automaticRefreshKey(for: expectedAccount))
     }
 
     do {
@@ -563,6 +612,31 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
     } catch {
       status = "Refresh could not reach NetEase"
       return commit(.inconclusive(.transport))
+    }
+  }
+
+  private func automaticRefreshWasAttemptedToday(
+    for account: NeteaseAccount
+  ) -> Bool {
+    guard
+      let attempted = refreshDefaults.object(
+        forKey: automaticRefreshKey(for: account)
+      ) as? Date
+    else { return false }
+    return refreshCalendar.isDate(attempted, inSameDayAs: now())
+  }
+
+  private func automaticRefreshKey(for account: NeteaseAccount) -> String {
+    "MacEase.AutomaticSessionRefresh.\(account.userID)"
+  }
+
+  /// Awaits the launch-triggered refresh and the one recursive eligibility
+  /// check caused by revalidation. Production never waits on this seam.
+  package func settleAutomaticRefreshForTesting() async {
+    for _ in 0..<3 {
+      guard let task = automaticRefreshTask else { return }
+      await task.value
+      await Task.yield()
     }
   }
 
@@ -841,6 +915,12 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
     // account cannot forget to bind it.
     if snapshot.account != previousAccount {
       onValidatedAccountChanged?(snapshot.account)
+    }
+    if automaticRefreshEnabled, case .validated = event {
+      automaticRefreshTask = Task { [weak self] in
+        guard let self else { return }
+        _ = await self.refreshSessionIfNeeded()
+      }
     }
     return result
   }
