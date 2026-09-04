@@ -1,6 +1,9 @@
 name: CI
 
 # Everything here is offline. No job may send a NetEase request.
+permissions:
+  contents: read
+
 on:
   push:
     branches: [main]
@@ -13,6 +16,11 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate workflow YAML syntax
+        run: ruby -e 'require "yaml"; YAML.parse_file(".github/workflows/ci.yml")'
 
       - name: Verify Apple Silicon runner
         run: test "$(uname -m)" = arm64
@@ -32,8 +40,32 @@ jobs:
         working-directory: Packages/MacEaseCore
         run: swift build -c release --arch arm64
 
-      - name: Whitespace and conflict markers
-        run: git diff --check HEAD
+      - name: Whitespace in the submitted commit range
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
+            test -n "$PR_BASE_SHA" && test -n "$PR_HEAD_SHA"
+            git diff --check "$PR_BASE_SHA...$PR_HEAD_SHA"
+          elif [[ "$GITHUB_EVENT_NAME" == "push" \
+              && -n "$PUSH_BEFORE_SHA" \
+              && "$PUSH_BEFORE_SHA" != "0000000000000000000000000000000000000000" ]]; then
+            git diff --check "$PUSH_BEFORE_SHA" "$GITHUB_SHA"
+          elif git rev-parse HEAD^ >/dev/null 2>&1; then
+            git diff --check HEAD^ HEAD
+          else
+            empty_tree=$(git hash-object -t tree /dev/null)
+            git diff --check "$empty_tree" HEAD
+          fi
+
+      - name: No unresolved conflict markers in tracked files
+        run: |
+          if git grep -nE '^(<{7}|={7}|>{7})( |$)' -- .; then
+            echo "::error::an unresolved merge conflict marker is committed"
+            exit 1
+          fi
 
       - name: No process-terminating paths on untrusted input
         run: |

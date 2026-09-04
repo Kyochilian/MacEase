@@ -18,12 +18,22 @@ private func runScript(
   _ arguments: [String],
   environment additions: [String: String] = [:]
 ) throws -> (status: Int32, output: String) {
+  try runScript(
+    at: repositoryRoot.appending(path: "scripts/\(scriptName)"),
+    arguments,
+    environment: additions
+  )
+}
+
+private func runScript(
+  at script: URL,
+  _ arguments: [String],
+  environment additions: [String: String] = [:]
+) throws -> (status: Int32, output: String) {
   let process = Process()
   let output = Pipe()
   process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-  process.arguments = [
-    repositoryRoot.appending(path: "scripts/\(scriptName)").path
-  ] + arguments
+  process.arguments = [script.path] + arguments
   var environment = [
     "PATH": ProcessInfo.processInfo.environment["PATH"] ?? "/usr/bin:/bin"
   ]
@@ -78,6 +88,56 @@ private func run(_ executable: String, _ arguments: [String]) throws -> Int32 {
     as? [String] == ["com.macease.app-spks", "com.macease.app-spki"])
 }
 
+@Test func packageConfigurationRequiresCompleteLicenseSources() throws {
+  let files = FileManager.default
+  let license = try Data(contentsOf: repositoryRoot.appending(path: "LICENSE"))
+  let notices = try Data(
+    contentsOf: repositoryRoot.appending(path: "THIRD_PARTY_NOTICES.txt")
+  )
+  #expect(!license.isEmpty)
+  #expect(!notices.isEmpty)
+  let noticeText = String(decoding: notices, as: UTF8.self)
+  #expect(noticeText.contains("EXTERNAL LICENSES"))
+  #expect(noticeText.contains("bspatch.c and bsdiff.c"))
+  #expect(noticeText.contains("sais.c and sais.h"))
+  #expect(noticeText.contains("Portable C implementation of Ed25519"))
+  #expect(noticeText.contains("SUSignatureVerifier.m"))
+
+  let root = files.temporaryDirectory.appending(
+    path: "macease-missing-notices-\(UUID().uuidString)"
+  )
+  defer { try? files.removeItem(at: root) }
+  let script = root.appending(path: "scripts/package_macease_app.sh")
+  try files.createDirectory(
+    at: script.deletingLastPathComponent(),
+    withIntermediateDirectories: true
+  )
+  try files.createDirectory(
+    at: root.appending(path: "Support"),
+    withIntermediateDirectories: true
+  )
+  try files.createDirectory(
+    at: root.appending(path: "Packages/MacEaseCore"),
+    withIntermediateDirectories: true
+  )
+  for path in [
+    "scripts/package_macease_app.sh",
+    "Support/MacEase-Info.plist",
+    "Support/MacEase.entitlements",
+    "Packages/MacEaseCore/Package.resolved",
+    "LICENSE",
+  ] {
+    try files.copyItem(
+      at: repositoryRoot.appending(path: path),
+      to: root.appending(path: path)
+    )
+  }
+
+  let missing = try runScript(at: script, ["--check"])
+  #expect(missing.status != 0)
+  #expect(missing.output.contains("third-party notices are missing or empty"))
+}
+
 @Test func releaseDryRunPerformsOnlyStructuralChecks() throws {
   let result = try runReleaseScript(["verify-config"])
   #expect(result.status == 0)
@@ -129,12 +189,22 @@ private func run(_ executable: String, _ arguments: [String]) throws -> Int32 {
   let app = root.appending(path: "MacEase.app")
   let executable = app.appending(path: "Contents/MacOS/MacEase")
   let framework = app.appending(path: "Contents/Frameworks/Sparkle.framework")
+  let resources = app.appending(path: "Contents/Resources")
   let tools = root.appending(path: "tools")
   try files.createDirectory(at: executable.deletingLastPathComponent(), withIntermediateDirectories: true)
   try files.createDirectory(at: framework, withIntermediateDirectories: true)
+  try files.createDirectory(at: resources, withIntermediateDirectories: true)
   try files.createDirectory(at: tools, withIntermediateDirectories: true)
   try Data([0]).write(to: executable)
   try files.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+  try files.copyItem(
+    at: repositoryRoot.appending(path: "LICENSE"),
+    to: resources.appending(path: "LICENSE.txt")
+  )
+  try files.copyItem(
+    at: repositoryRoot.appending(path: "THIRD_PARTY_NOTICES.txt"),
+    to: resources.appending(path: "THIRD_PARTY_NOTICES.txt")
+  )
 
   var info = try supportDictionary("MacEase-Info.plist")
   info["CFBundleShortVersionString"] = "1.2.3"

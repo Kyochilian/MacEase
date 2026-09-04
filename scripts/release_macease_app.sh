@@ -7,6 +7,8 @@ package_root="$repo_root/Packages/MacEaseCore"
 info_plist="$repo_root/Support/MacEase-Info.plist"
 entitlements="$repo_root/Support/MacEase.entitlements"
 package_script="$repo_root/scripts/package_macease_app.sh"
+license_file="$repo_root/LICENSE"
+third_party_notices="$repo_root/THIRD_PARTY_NOTICES.txt"
 sparkle_tools="$package_root/.build/artifacts/sparkle/Sparkle/bin"
 user_home_directory=${HOME:-}
 if [[ -n "$user_home_directory" ]]; then
@@ -85,6 +87,11 @@ validate_app() {
   [[ -f "$app/Contents/Info.plist" ]] || die "Info.plist is missing"
   [[ -d "$app/Contents/Frameworks/Sparkle.framework" ]] \
     || die "Sparkle.framework is missing"
+  [[ -s "$app/Contents/Resources/LICENSE.txt" ]] || die "LICENSE.txt is missing or empty"
+  [[ -s "$app/Contents/Resources/THIRD_PARTY_NOTICES.txt" ]] \
+    || die "THIRD_PARTY_NOTICES.txt is missing or empty"
+  cmp -s "$third_party_notices" "$app/Contents/Resources/THIRD_PARTY_NOTICES.txt" \
+    || die "the app's third-party notices do not match the repository file"
   plutil -lint "$app/Contents/Info.plist" >/dev/null
   [[ $(plutil -extract CFBundleIdentifier raw "$app/Contents/Info.plist") \
     == com.macease.app ]] || die "unexpected bundle identifier"
@@ -95,6 +102,8 @@ validate_app() {
     || die "Sparkle's sandboxed installer service is disabled"
   [[ $(lipo -archs "$app/Contents/MacOS/MacEase") == arm64 ]] \
     || die "MacEase is not arm64-only"
+  [[ $(lipo -archs "$app/Contents/Frameworks/Sparkle.framework/Versions/B/Sparkle") \
+    == arm64 ]] || die "Sparkle.framework is not arm64-only"
   otool -L "$app/Contents/MacOS/MacEase" | grep -F \
     '@rpath/Sparkle.framework/Versions/B/Sparkle' >/dev/null \
     || die "MacEase does not link its embedded Sparkle framework"
@@ -171,6 +180,8 @@ verify_config() {
   require_command lipo
   require_command otool
   [[ -f "$info_plist" && -f "$entitlements" ]] || die "support configuration is missing"
+  [[ -s "$license_file" ]] || die "LICENSE is missing or empty"
+  [[ -s "$third_party_notices" ]] || die "third-party notices are missing or empty"
   plutil -lint "$info_plist" "$entitlements" >/dev/null
   [[ $(plutil -extract SUEnableInstallerLauncherService raw "$info_plist") == true ]] \
     || die "SUEnableInstallerLauncherService must be true"

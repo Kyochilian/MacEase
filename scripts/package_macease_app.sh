@@ -5,6 +5,8 @@ repo_root=${0:A:h:h}
 package_root="$repo_root/Packages/MacEaseCore"
 info_plist="$repo_root/Support/MacEase-Info.plist"
 entitlements="$repo_root/Support/MacEase.entitlements"
+license_file="$repo_root/LICENSE"
+third_party_notices="$repo_root/THIRD_PARTY_NOTICES.txt"
 user_home_directory=${HOME:-}
 if [[ -n "$user_home_directory" ]]; then
   user_home_directory=${user_home_directory:A}
@@ -58,6 +60,23 @@ validate_public_key() {
   byte_count=$(wc -c < "$decoded" | tr -d ' ')
   rm -f -- "$decoded"
   [[ "$byte_count" == 32 ]] || die "the Sparkle public key must decode to 32 bytes"
+}
+
+thin_arm64_binary() {
+  local binary=$1
+  local architectures
+  [[ -f "$binary" ]] || die "the Sparkle executable is missing: ${binary:t}"
+  architectures=$(lipo -archs "$binary") \
+    || die "could not inspect the Sparkle executable: ${binary:t}"
+  [[ " $architectures " == *" arm64 "* ]] \
+    || die "the Sparkle executable has no arm64 slice: ${binary:t}"
+  if [[ "$architectures" != arm64 ]]; then
+    local thinned_binary="${binary}.arm64"
+    lipo "$binary" -thin arm64 -output "$thinned_binary" \
+      || die "could not thin the Sparkle executable: ${binary:t}"
+    chmod "$(stat -f %Lp "$binary")" "$thinned_binary"
+    mv -f -- "$thinned_binary" "$binary"
+  fi
 }
 
 while (( $# > 0 )); do
@@ -117,6 +136,8 @@ build_pattern='^[1-9][0-9]*$'
 [[ "$short_version" =~ $version_pattern ]] || die "invalid short version"
 [[ "$build_number" =~ $build_pattern ]] || die "build number must be a positive integer"
 [[ -f "$info_plist" && -f "$entitlements" ]] || die "support configuration is missing"
+[[ -s "$license_file" ]] || die "LICENSE is missing or empty"
+[[ -s "$third_party_notices" ]] || die "third-party notices are missing or empty"
 plutil -lint "$info_plist" "$entitlements" >/dev/null
 [[ $(plutil -extract SUEnableInstallerLauncherService raw "$info_plist") == true ]] \
   || die "Sparkle's sandboxed installer service is not enabled"
@@ -187,24 +208,51 @@ trap 'rm -rf -- "$staging_directory"' EXIT INT TERM
 staged_app="$staging_directory/MacEase.app"
 executable_path="$staged_app/Contents/MacOS/MacEase"
 framework_path="$staged_app/Contents/Frameworks/Sparkle.framework"
+resources_path="$staged_app/Contents/Resources"
 
-mkdir -p "$staged_app/Contents/MacOS" "$staged_app/Contents/Frameworks"
+mkdir -p "$staged_app/Contents/MacOS" "$staged_app/Contents/Frameworks" "$resources_path"
 install -m 755 "$bin_path/MacEase" "$executable_path"
+install -m 644 "$license_file" "$resources_path/LICENSE.txt"
+install -m 644 "$third_party_notices" "$resources_path/THIRD_PARTY_NOTICES.txt"
 cp "$info_plist" "$staged_app/Contents/Info.plist"
 ditto "$bin_path/Sparkle.framework" "$framework_path"
+sparkle_version="$framework_path/Versions/B"
+for sparkle_binary in \
+  "$sparkle_version/Sparkle" \
+  "$sparkle_version/Autoupdate" \
+  "$sparkle_version/Updater.app/Contents/MacOS/Updater" \
+  "$sparkle_version/XPCServices/Downloader.xpc/Contents/MacOS/Downloader" \
+  "$sparkle_version/XPCServices/Installer.xpc/Contents/MacOS/Installer"
+do
+  thin_arm64_binary "$sparkle_binary"
+done
 plutil -replace CFBundleShortVersionString -string "$short_version" \
   "$staged_app/Contents/Info.plist"
 plutil -replace CFBundleVersion -string "$build_number" \
   "$staged_app/Contents/Info.plist"
 plutil -lint "$staged_app/Contents/Info.plist" >/dev/null
+cmp -s "$third_party_notices" "$resources_path/THIRD_PARTY_NOTICES.txt" \
+  || die "the packaged third-party notices do not match the repository file"
 
 # A development package does not enable Hardened Runtime: Sparkle documents
 # that ad-hoc signatures cannot satisfy runtime library validation.
+codesign --force --deep --sign - "$framework_path"
 codesign --force --sign - --entitlements "$entitlements" "$staged_app"
 
 codesign --verify --deep --strict --verbose=2 "$staged_app"
 [[ $(lipo -archs "$executable_path") == arm64 ]] \
   || die "the packaged executable is not arm64-only"
+[[ $(lipo -archs "$framework_path/Versions/B/Sparkle") == arm64 ]] \
+  || die "the packaged Sparkle framework is not arm64-only"
+for sparkle_binary in \
+  "$sparkle_version/Autoupdate" \
+  "$sparkle_version/Updater.app/Contents/MacOS/Updater" \
+  "$sparkle_version/XPCServices/Downloader.xpc/Contents/MacOS/Downloader" \
+  "$sparkle_version/XPCServices/Installer.xpc/Contents/MacOS/Installer"
+do
+  [[ $(lipo -archs "$sparkle_binary") == arm64 ]] \
+    || die "the packaged Sparkle executable is not arm64-only: ${sparkle_binary:t}"
+done
 otool -L "$executable_path" | grep -F \
   '@rpath/Sparkle.framework/Versions/B/Sparkle' >/dev/null \
   || die "the executable does not link the embedded Sparkle framework"
