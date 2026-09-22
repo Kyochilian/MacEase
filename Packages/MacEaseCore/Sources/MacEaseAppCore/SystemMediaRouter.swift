@@ -10,6 +10,7 @@ package enum AppPlaybackCommand: Equatable, Sendable {
   case playQueueEntry(songID: Int64, accountID: Int64, revision: UInt64)
   case removeQueueEntry(songID: Int64, accountID: Int64, revision: UInt64)
   case clearUpcoming(accountID: Int64, revision: UInt64)
+  case reorderUpcoming(songIDs: [Int64], accountID: Int64, revision: UInt64)
 }
 
 /// Connects the system media surface to the objects that actually own
@@ -45,7 +46,7 @@ package struct SystemMediaRouter {
     guard let playback else { return .empty }
     let liked =
       playback.currentTrack
-      .map { library?.liked.state(of: $0.id) ?? .unknown } ?? .unknown
+      .map { library?.likedState(for: $0) ?? .unknown } ?? .unknown
     return playback.snapshot(liked: liked)
   }
 
@@ -99,10 +100,11 @@ package struct SystemMediaRouter {
     case .toggleLiked:
       guard let session, let library else { return false }
       return playback.currentTrack != nil && snapshot.liked != .unknown
-        && library.canSetLiked(session: session)
+        && library.canWrite(session: session)
     case .playQueueEntry(_, let accountID, let revision),
       .removeQueueEntry(_, let accountID, let revision),
-      .clearUpcoming(let accountID, let revision):
+      .clearUpcoming(let accountID, let revision),
+      .reorderUpcoming(_, let accountID, let revision):
       guard let session else { return false }
       return playback.canEditQueue(
         accountID: accountID,
@@ -153,6 +155,10 @@ package struct SystemMediaRouter {
         revision: revision,
         session: session
       )
+    case .reorderUpcoming(let songIDs, let accountID, let revision):
+      guard let session else { return false }
+      return playback.reorderUpcoming(
+        songIDs: songIDs, accountID: accountID, revision: revision, session: session)
     }
   }
 }

@@ -53,6 +53,72 @@ private final class QueueLifecycleEvents {
   var values: [PlaybackLifecycleEvent] = []
 }
 
+@Test @MainActor func mixedQueueSourcesSurviveEditsStorageAndPlayback() async throws {
+  for mode in [PlaybackMode.sequential, .shuffle] {
+    let rig = QueueEditingRig()
+    let playlist = PlaybackContext.playlist(id: 7, name: "A")
+    let search = PlaybackContext.searchResults(keywords: "B")
+    let album = PlaybackContext.album(id: 8, name: "C")
+    await rig.play([1, 2], mode: mode, context: playlist)
+    #expect(rig.playback.enqueue(
+      makeTracks([3, 4]), next: false, context: search, accountID: testAccount.userID,
+      revision: rig.playback.queueRevision, session: rig.session))
+    #expect(rig.playback.queueNext(
+      makeTracks([2])[0], context: album, accountID: testAccount.userID,
+      revision: rig.playback.queueRevision, session: rig.session))
+    #expect(rig.playback.reorderUpcoming(
+      songIDs: [4, 2, 3], accountID: testAccount.userID,
+      revision: rig.playback.queueRevision, session: rig.session))
+    #expect(rig.playback.removeQueueEntry(
+      songID: 3, accountID: testAccount.userID, revision: rig.playback.queueRevision,
+      session: rig.session))
+    #expect(rig.playback.queueTrackContexts == [1: playlist, 2: album, 4: search])
+    #expect(rig.events.values.count == 1)
+
+    let path = FileManager.default.temporaryDirectory
+      .appendingPathComponent("queue-sources-\(UUID()).sqlite").path
+    defer {
+      for suffix in ["", "-shm", "-wal"] { try? FileManager.default.removeItem(atPath: path + suffix) }
+    }
+    let store = try LibraryStore(path: path)
+    try await store.saveQueue(try #require(rig.playback.persistedQueue()), accountID: testAccount.userID)
+    let reopened = try LibraryStore(path: path)
+    #expect(try await reopened.queue(accountID: testAccount.userID + 1) == nil)
+    let saved = try #require(try await reopened.queue(accountID: testAccount.userID))
+    let restored = QueueEditingRig()
+    restored.playback.restore(saved, accountID: testAccount.userID)
+    #expect(restored.playback.queueTrackContexts == rig.playback.queueTrackContexts)
+    await restored.transport.setSongURL(.success(makeResolvedAsset(songID: 4)))
+    #expect(restored.playback.playQueueEntry(
+      songID: 4, accountID: testAccount.userID, revision: restored.playback.queueRevision,
+      session: restored.session))
+    await restored.playback.settleForTesting()
+    let started = try #require(restored.events.values.compactMap { event in
+      if case .started(let instance) = event { return instance }
+      return nil
+    }.last)
+    #expect(started.context == search)
+    #expect(started.scrobbleContext.source == .search)
+    #expect(started.scrobbleContext.sourceID == nil)
+    #expect(restored.playback.clearUpcoming(
+      accountID: testAccount.userID, revision: restored.playback.queueRevision,
+      session: restored.session))
+    #expect(restored.playback.queueTrackContexts == [4: search])
+    restored.playback.stopForSessionChange()
+    #expect(restored.playback.queueTrackContexts.isEmpty)
+  }
+}
+
+@Test @MainActor func appendingADuplicateDoesNotChangeTheExistingEntriesSource() async {
+  let rig = QueueEditingRig()
+  let playlist = PlaybackContext.playlist(id: 7, name: "A")
+  await rig.play([1, 2], context: playlist)
+  #expect(rig.playback.enqueue(
+    makeTracks([1, 2]), next: false, context: .searchResults(keywords: "B"),
+    accountID: testAccount.userID, revision: rig.playback.queueRevision, session: rig.session))
+  #expect(rig.playback.queueTrackContexts == [1: playlist, 2: playlist])
+}
+
 @Test @MainActor func startingAQueueRemovesDuplicateSongIdentities() async {
   let rig = QueueEditingRig()
   await rig.play([1, 2, 1, 3, 2, 4], startIndex: 2)
@@ -168,10 +234,11 @@ private final class QueueLifecycleEvents {
   #expect(rig.playback.currentTrack?.id == 3)
   #expect(rig.output.teardownCount == teardowns + 1)
   #expect(rig.playback.phase == .playing)
-  #expect(await rig.transport.recordedCalls() == [
-    .resolveSongURL(1, .standard),
-    .resolveSongURL(3, .standard),
-  ])
+  #expect(
+    await rig.transport.recordedCalls() == [
+      .resolveSongURL(1, .standard),
+      .resolveSongURL(3, .standard),
+    ])
   let starts = rig.events.values.compactMap { event -> Int64? in
     guard case .started(let instance) = event else { return nil }
     return instance.track.id
@@ -253,7 +320,7 @@ func queueJumpUsesTheFormalPathInEveryMode(mode: PlaybackMode) async throws {
   #expect(rig.output.teardownCount == teardowns + 1)
   #expect(rig.playback.persistedQueue()?.tracks.map(\.id) == [1, 3])
   let finished = rig.events.values.compactMap { event -> Int64? in
-    guard case .finished(let instance, _) = event else { return nil }
+    guard case .finished(let instance, _, _) = event else { return nil }
     return instance.track.id
   }
   let started = rig.events.values.compactMap { event -> Int64? in
@@ -331,7 +398,9 @@ func removingTheCurrentEntryKeepsEveryModeValid(
   let events = rig.events.values
   let teardowns = rig.output.teardownCount
   let intentRevision = rig.playback.intentRevision
-  let write = try #require(rig.arbiter.begin(name: "Write", effect: .write))
+  let blockers = (0..<OperationArbiter.defaultMaximumConcurrentReads).map { index in
+    rig.arbiter.begin(name: "Read \(index)", effect: .read)!
+  }
 
   #expect(
     !rig.playback.removeQueueEntry(
@@ -348,7 +417,7 @@ func removingTheCurrentEntryKeepsEveryModeValid(
   #expect(rig.output.teardownCount == teardowns)
   #expect(rig.events.values == events)
   #expect(rig.playback.intentRevision == intentRevision)
-  #expect(rig.arbiter.end(write, outcome: .applied) == .applied)
+  for blocker in blockers { #expect(rig.arbiter.end(blocker, outcome: .applied) == .applied) }
 }
 
 @Test(arguments: PlaybackMode.allCases)
@@ -411,10 +480,11 @@ func clearingUpcomingKeepsOneValidCurrentEntryInEveryMode(
 
   #expect(rig.playback.currentTrack?.id == 2)
   #expect(rig.playback.phase == .playing)
-  #expect(await rig.transport.recordedCalls() == [
-    .resolveSongURL(2, .standard),
-    .resolveSongURL(2, .standard),
-  ])
+  #expect(
+    await rig.transport.recordedCalls() == [
+      .resolveSongURL(2, .standard),
+      .resolveSongURL(2, .standard),
+    ])
 }
 
 @Test @MainActor func removingAnEarlierEntryKeepsRetryAttachedToCurrentSong() async throws {
@@ -442,10 +512,11 @@ func clearingUpcomingKeepsOneValidCurrentEntryInEveryMode(
   await rig.playback.settleForTesting()
 
   #expect(rig.playback.currentTrack?.id == 3)
-  #expect(await rig.transport.recordedCalls() == [
-    .resolveSongURL(3, .standard),
-    .resolveSongURL(3, .standard),
-  ])
+  #expect(
+    await rig.transport.recordedCalls() == [
+      .resolveSongURL(3, .standard),
+      .resolveSongURL(3, .standard),
+    ])
 }
 
 @Test @MainActor func personalFMRejectsUserQueueEditsAndModeChanges() async throws {

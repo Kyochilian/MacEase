@@ -69,7 +69,7 @@ package struct LyricLine: Equatable, Sendable, Codable {
 /// "No lyrics" is a real answer from the catalogue and is not an error: an
 /// instrumental has nothing to show, and reporting that as a failure would put
 /// a retry button in front of a user for whom nothing can change.
-package struct LyricAttribution: Equatable, Sendable {
+package struct LyricAttribution: Equatable, Sendable, Codable {
   package let contributor: String?
   package let translationContributor: String?
 
@@ -79,7 +79,7 @@ package struct LyricAttribution: Equatable, Sendable {
   }
 }
 
-package enum Lyrics: Equatable, Sendable {
+package enum Lyrics: Equatable, Sendable, Codable {
   case none
   case instrumental(LyricAttribution)
   case lines([LyricLine])
@@ -170,7 +170,8 @@ package enum LyricsParser {
       contributor: displayName(contributor),
       translationContributor: displayName(translationContributor)
     )
-    let marksInstrumental = lrcLines.count <= 10
+    let marksInstrumental =
+      lrcLines.count <= 10
       && lrcLines.contains { $0.text.contains("纯音乐，请欣赏") }
     if marksInstrumental {
       lrcLines.removeAll {
@@ -208,8 +209,9 @@ package enum LyricsParser {
         lines[index].romanisation = JapaneseRomanisation.transcribe(lines[index].text)
       }
     }
-    guard attribution.contributor != nil
-      || attribution.translationContributor != nil
+    guard
+      attribution.contributor != nil
+        || attribution.translationContributor != nil
     else { return .lines(lines) }
     return .attributedLines(lines, attribution)
   }
@@ -234,7 +236,8 @@ package enum LyricsParser {
   }
 
   private static func isEmptySongwritingCredit(_ value: String) -> Bool {
-    let compact = value
+    let compact =
+      value
       .trimmingCharacters(in: .whitespacesAndNewlines)
       .replacingOccurrences(of: " ", with: "")
     return compact == "作词:无" || compact == "作词：无"
@@ -256,7 +259,8 @@ package enum LyricsParser {
     tolerance: Double
   ) {
     let preferredLines = adjustedLines(parseDocument(preferred))
-    let secondary = preferredLines.isEmpty
+    let secondary =
+      preferredLines.isEmpty
       ? adjustedLines(parseDocument(fallback)) : preferredLines
     guard !secondary.isEmpty else { return }
 
@@ -283,10 +287,11 @@ package enum LyricsParser {
       let candidates = [low - 1, low].filter {
         $0 >= minimumCandidate && $0 < secondary.count
       }
-      guard let best = candidates.min(by: {
-        abs(secondary[$0].timeSeconds - target)
-          < abs(secondary[$1].timeSeconds - target)
-      }), abs(secondary[best].timeSeconds - target) < tolerance
+      guard
+        let best = candidates.min(by: {
+          abs(secondary[$0].timeSeconds - target)
+            < abs(secondary[$1].timeSeconds - target)
+        }), abs(secondary[best].timeSeconds - target) < tolerance
       else { continue }
       lines[index][keyPath: keyPath] = secondary[best].text
       minimumCandidate = best + 1
@@ -473,11 +478,12 @@ package enum LyricsParser {
     guard !fraction.isEmpty, fraction.count <= 3, let value = Int(fraction) else {
       return nil
     }
-    let scale: Double = switch fraction.count {
-    case 1: 10
-    case 2: 100
-    default: 1000
-    }
+    let scale: Double =
+      switch fraction.count {
+      case 1: 10
+      case 2: 100
+      default: 1000
+      }
     return Double(wholeSeconds) + Double(value) / scale
   }
 
@@ -517,7 +523,8 @@ private enum JapaneseRomanisation {
     guard !trimmed.isEmpty,
       let transliterated = trimmed.applyingTransform(.toLatin, reverse: false)
     else { return nil }
-    let latin = (transliterated.applyingTransform(.stripCombiningMarks, reverse: false)
+    let latin =
+      (transliterated.applyingTransform(.stripCombiningMarks, reverse: false)
       ?? transliterated).trimmingCharacters(in: .whitespacesAndNewlines)
     guard
       !latin.isEmpty,

@@ -1,10 +1,16 @@
 import Foundation
 
-public struct NeteaseAccount: Equatable, Sendable {
+public struct NeteaseAccount: Equatable, Sendable, Codable {
   public let userID: Int64
+  public let nickname: String?
+  public let avatarURL: URL?
+  public let vipType: Int?
 
-  package init(userID: Int64) {
+  package init(userID: Int64, nickname: String? = nil, avatarURL: URL? = nil, vipType: Int? = nil) {
     self.userID = userID
+    self.nickname = nickname
+    self.avatarURL = avatarURL
+    self.vipType = vipType
   }
 }
 
@@ -21,10 +27,26 @@ public struct NeteaseServiceError: Error, Equatable, Sendable {
 
   public let source: Source
   public let statusCode: Int
+  public let message: String?
 
-  public init(source: Source, statusCode: Int) {
+  public init(source: Source, statusCode: Int, message: String? = nil) {
     self.source = source
     self.statusCode = statusCode
+    let text = message?.trimmingCharacters(in: .whitespacesAndNewlines)
+    if let text, !text.isEmpty, text.count <= 512,
+      !["music_u", "__csrf", "cookie", "token", "http://", "https://"].contains(where: {
+        text.lowercased().contains($0)
+      }),
+      text.unicodeScalars.allSatisfy({ !CharacterSet.controlCharacters.contains($0) })
+    {
+      self.message = text
+    } else {
+      self.message = nil
+    }
+  }
+
+  public static func == (lhs: Self, rhs: Self) -> Bool {
+    lhs.source == rhs.source && lhs.statusCode == rhs.statusCode
   }
 }
 
@@ -48,6 +70,7 @@ public struct ResolvedAudioAsset: Equatable, Sendable {
   public let expiresIn: Int?
   public let fee: Int?
   public let trial: Bool
+  public var fileMD5: String? = nil
 }
 
 public enum SongURLResolution: Equatable, Sendable {
@@ -55,28 +78,48 @@ public enum SongURLResolution: Equatable, Sendable {
   case unavailable(itemCode: Int, fee: Int?)
 }
 
-public struct UserPlaylist: Equatable, Sendable {
+public struct UserPlaylist: Equatable, Sendable, Codable {
   public let id: Int64
-  public let name: String
-  public let trackCount: Int
-  public let owned: Bool
+  public var name: String
+  public var trackCount: Int
+  public var owned: Bool
   /// `true` and `false` are service values 10 and 0 respectively. Missing or
   /// unrecognised response values stay nil, so MacEase never offers a privacy
   /// write from a guess.
-  public let isPrivate: Bool?
+  public var isPrivate: Bool?
+  public var description: String?
+  public var tags: [String]?
+  public var artworkURL: URL?
+  public var creatorName: String?
+  public var specialType: Int?
+  public var isSubscribed: Bool?
+  package var isLikedSongs: Bool { specialType == 5 }
+  package var canEdit: Bool { owned && specialType == 0 }
 
   package init(
     id: Int64,
     name: String,
     trackCount: Int,
     owned: Bool,
-    isPrivate: Bool? = nil
+    isPrivate: Bool? = nil,
+    description: String? = nil,
+    tags: [String]? = nil,
+    artworkURL: URL? = nil,
+    creatorName: String? = nil,
+    specialType: Int? = 0,
+    isSubscribed: Bool? = nil
   ) {
     self.id = id
     self.name = name
     self.trackCount = trackCount
     self.owned = owned
     self.isPrivate = isPrivate
+    self.description = description
+    self.tags = tags
+    self.artworkURL = artworkURL
+    self.creatorName = creatorName
+    self.specialType = specialType
+    self.isSubscribed = isSubscribed
   }
 }
 
@@ -94,11 +137,20 @@ package struct PlaylistDetail: Equatable, Sendable {
   package let id: Int64
   package let name: String
   package let trackIDs: [Int64]
+  package let metadata: UserPlaylist?
+  package let creatorID: Int64?
+  package let tracks: [Track]
 
-  package init(id: Int64, name: String, trackIDs: [Int64]) {
+  package init(
+    id: Int64, name: String, trackIDs: [Int64], metadata: UserPlaylist? = nil,
+    creatorID: Int64? = nil, tracks: [Track] = []
+  ) {
     self.id = id
     self.name = name
     self.trackIDs = trackIDs
+    self.metadata = metadata
+    self.creatorID = creatorID
+    self.tracks = tracks
   }
 }
 
@@ -159,20 +211,6 @@ public struct AudioURLProbeResult: Equatable, Sendable {
   public let redirectHost: String?
 }
 
-package enum LyricsProbeStatus: Equatable, Sendable {
-  case content
-  case noLyrics
-  case http(Int)
-  case service(Int)
-  case invalidResponse
-  case network
-}
-
-package struct LyricsProbeOutcome: Equatable, Sendable {
-  package let status: LyricsProbeStatus
-  package let setsCookie: Bool
-}
-
 package enum PlaylistTrackEdit: String, Sendable {
   case add
   case del
@@ -205,7 +243,7 @@ public actor NeteaseSession {
     url: URL(string: "https://interfacepc.music.163.com/eapi/toplist")!
   )
   private static let accountStatusURL = URL(
-    string: "https://music.163.com/weapi/w/nuser/account/get"
+    string: "https://music.163.com/weapi/nuser/account/get"
   )!
   private static let userPlaylistsURL = URL(
     string: "https://music.163.com/weapi/user/playlist"
@@ -246,10 +284,6 @@ public actor NeteaseSession {
       string: "https://interfacepc.music.163.com/eapi/playlist/manipulate/tracks"
     )!
   )
-  private static let batchEndpoint = EndpointDescriptor(
-    path: "/api/batch",
-    url: URL(string: "https://interfacepc.music.163.com/eapi/batch")!
-  )
   private static let subscribePlaylistEndpoint = EndpointDescriptor(
     path: "/api/playlist/subscribe",
     url: URL(string: "https://interfacepc.music.163.com/eapi/playlist/subscribe")!
@@ -272,6 +306,110 @@ public actor NeteaseSession {
 
   private let redirectBlocker: RedirectBlocker
   let urlSession: URLSession
+  private let checkToken: @Sendable () async throws -> String
+  private let diagnostics: @Sendable (RequestDiagnostic) -> Void
+  private var auxiliaryCredential: NeteaseCredential?
+  var auxiliaryGeneration = UUID()
+  private var nmtid: String?
+  private var nmtidResponsesRemaining = 3
+
+  package func resetSessionContext() {
+    auxiliaryCredential = nil
+    auxiliaryGeneration = UUID()
+    nmtid = nil
+    nmtidResponsesRemaining = 3
+  }
+
+  func requestGeneration(credential: NeteaseCredential?) -> UUID {
+    if auxiliaryCredential != credential {
+      resetSessionContext()
+      auxiliaryCredential = credential
+    }
+    return auxiliaryGeneration
+  }
+
+  /// api-enhanced d55d92cd0031d7c7746b7068faecd7ade1d354ac, util/request.js.
+  /// Sampling uses ordinary successful HTTP responses, including service rejections.
+  /// It never sends an extra request or changes the authenticated identity.
+  func send(
+    credential: NeteaseCredential?,
+    build: (String?) throws -> URLRequest
+  ) async throws -> (Data, URLResponse) {
+    let started = ContinuousClock.now
+    try Task.checkCancellation()
+    let generation = requestGeneration(credential: credential)
+    let token = nmtid ?? (nmtidResponsesRemaining == 0 ? Self.randomNMTID() : nil)
+    var request = try build(token)
+    let isEAPI = request.url?.path.hasPrefix("/eapi/") == true
+    if !isEAPI {
+      let cookie = request.value(forHTTPHeaderField: "Cookie") ?? ""
+      request.setValue(
+        cookie + (cookie.isEmpty ? "" : "; ") + "NMTID=" + (nmtid ?? Self.randomNMTID()),
+        forHTTPHeaderField: "Cookie"
+      )
+    }
+    let prepared = ContinuousClock.now
+    let observer = RequestDiagnostics(request: request, emit: diagnostics)
+    let result: (Data, URLResponse)
+    do {
+      result = try await urlSession.data(for: request, delegate: observer)
+      var event = observer.event(phase: "complete")
+      event.totalMS = Self.milliseconds(started.duration(to: .now))
+      event.preparationMS = Self.milliseconds(started.duration(to: prepared))
+      event.status = (result.1 as? HTTPURLResponse)?.statusCode
+      event.bytes = Int64(result.0.count)
+      diagnostics(event)
+    } catch {
+      var event = observer.event(phase: "complete")
+      event.totalMS = Self.milliseconds(started.duration(to: .now))
+      event.preparationMS = Self.milliseconds(started.duration(to: prepared))
+      event.errorCode = (error as NSError).code
+      diagnostics(event)
+      throw error
+    }
+    if !Task.isCancelled, generation == auxiliaryGeneration, isEAPI,
+      token == nil, nmtid == nil, nmtidResponsesRemaining > 0,
+      let response = result.1 as? HTTPURLResponse,
+      (200..<300).contains(response.statusCode),
+      response.url == request.url
+    {
+      nmtidResponsesRemaining -= 1
+      nmtid = Self.responseNMTID(response)
+    }
+    return result
+  }
+
+  private static func milliseconds(_ duration: Duration) -> Double {
+    Double(duration.components.seconds) * 1000 + Double(duration.components.attoseconds) / 1e15
+  }
+
+  private static func randomNMTID() -> String {
+    "00O" + (0..<19).map { _ in String(format: "%02x", UInt8.random(in: .min ... .max)) }.joined()
+  }
+
+  package static func responseNMTID(_ response: HTTPURLResponse) -> String? {
+    guard let url = response.url, url.scheme == "https",
+      let host = url.host?.lowercased(),
+      host == "music.163.com" || host.hasSuffix(".music.163.com"),
+      let header = response.value(forHTTPHeaderField: "Set-Cookie")
+    else { return nil }
+    let rawValues = header.matches(of: #/(?:^|[,;]\s*)NMTID=([^;,]*)/#)
+      .map { String($0.1) }
+    guard Set(rawValues).count == 1 else { return nil }
+    let values = HTTPCookie.cookies(withResponseHeaderFields: ["Set-Cookie": header], for: url)
+      .filter {
+        let domain = ($0.domain.hasPrefix(".") ? String($0.domain.dropFirst()) : $0.domain)
+          .lowercased()
+        return $0.name == "NMTID" && $0.path == "/"
+          && (domain == host || domain == "music.163.com")
+          && ($0.expiresDate.map { $0 > Date() } ?? true)
+      }.map(\.value)
+    guard let value = values.first, Set(values).count == 1,
+      value == rawValues.first, value.count <= 512,
+      NeteaseCookie.isValidValue(value)
+    else { return nil }
+    return value
+  }
 
   public init() {
     self.init(configuration: URLSessionConfiguration.ephemeral)
@@ -280,7 +418,15 @@ public actor NeteaseSession {
   /// Package-scoped so tests can install a `URLProtocol` stub. Callers cannot
   /// widen the cookie, cache or timeout policy: all are pinned here regardless
   /// of the configuration passed in.
-  package init(configuration: URLSessionConfiguration) {
+  package init(
+    configuration: URLSessionConfiguration,
+    checkToken: @escaping @Sendable () async throws -> String = {
+      try await NeteaseWatchman().token()
+    },
+    diagnostics: @escaping @Sendable (RequestDiagnostic) -> Void = RequestDiagnostic.log
+  ) {
+    self.checkToken = checkToken
+    self.diagnostics = diagnostics
     configuration.httpCookieStorage = nil
     configuration.httpShouldSetCookies = false
     configuration.urlCache = nil
@@ -314,8 +460,9 @@ public actor NeteaseSession {
   public func accountStatus(
     credential: NeteaseCredential
   ) async throws -> AccountSessionState {
-    let request = try Self.accountStatusRequest(credential: credential)
-    let (data, response) = try await urlSession.data(for: request)
+    let (data, response) = try await send(credential: credential) { nmtid in
+      try Self.accountStatusRequest(credential: credential)
+    }
     let httpResponse = try Self.requireHTTPResponse(response)
     return try Self.classifyAccountStatus(
       data: data,
@@ -329,13 +476,14 @@ public actor NeteaseSession {
     offset: Int = 0,
     credential: NeteaseCredential
   ) async throws -> UserPlaylistPage {
-    let request = try Self.userPlaylistsRequest(
-      userID: userID,
-      limit: limit,
-      offset: offset,
-      credential: credential
-    )
-    let (data, response) = try await urlSession.data(for: request)
+    let (data, response) = try await send(credential: credential) { nmtid in
+      try Self.userPlaylistsRequest(
+        userID: userID,
+        limit: limit,
+        offset: offset,
+        credential: credential
+      )
+    }
     let httpResponse = try Self.requireHTTPResponse(response)
     return try Self.classifyUserPlaylists(
       data: data,
@@ -349,14 +497,16 @@ public actor NeteaseSession {
     credential: NeteaseCredential
   ) async throws -> PlaylistDetail {
     let timestamp = Date().timeIntervalSince1970
-    let request = try Self.playlistDetailRequest(
-      playlistID: playlistID,
-      credential: credential,
-      osVersion: Self.osVersion,
-      buildVersion: String(Int(timestamp)),
-      requestID: Self.requestID(timestamp: timestamp)
-    )
-    let (data, response) = try await urlSession.data(for: request)
+    let (data, response) = try await send(credential: credential) { nmtid in
+      try Self.playlistDetailRequest(
+        playlistID: playlistID,
+        credential: credential,
+        osVersion: Self.osVersion,
+        buildVersion: String(Int(timestamp)),
+        requestID: Self.requestID(timestamp: timestamp),
+        nmtid: nmtid
+      )
+    }
     let httpResponse = try Self.requireHTTPResponse(response)
     return try Self.classifyPlaylistDetail(
       data: data,
@@ -369,11 +519,12 @@ public actor NeteaseSession {
     songIDs: [Int64],
     credential: NeteaseCredential
   ) async throws -> [Track] {
-    let request = try Self.songDetailsRequest(
-      songIDs: songIDs,
-      credential: credential
-    )
-    let (data, response) = try await urlSession.data(for: request)
+    let (data, response) = try await send(credential: credential) { nmtid in
+      try Self.songDetailsRequest(
+        songIDs: songIDs,
+        credential: credential
+      )
+    }
     let httpResponse = try Self.requireHTTPResponse(response)
     return try Self.classifySongDetails(
       data: data,
@@ -386,11 +537,12 @@ public actor NeteaseSession {
     userID: Int64,
     credential: NeteaseCredential
   ) async throws -> [Int64] {
-    let request = try Self.likedSongIDsRequest(
-      userID: userID,
-      credential: credential
-    )
-    let (data, response) = try await urlSession.data(for: request)
+    let (data, response) = try await send(credential: credential) { nmtid in
+      try Self.likedSongIDsRequest(
+        userID: userID,
+        credential: credential
+      )
+    }
     let httpResponse = try Self.requireHTTPResponse(response)
     return try Self.classifyLikedSongIDs(
       data: data,
@@ -403,12 +555,13 @@ public actor NeteaseSession {
     scope: PlayRecordScope,
     credential: NeteaseCredential
   ) async throws -> [PlayRecordEntry] {
-    let request = try Self.playRecordsRequest(
-      userID: userID,
-      scope: scope,
-      credential: credential
-    )
-    let (data, response) = try await urlSession.data(for: request)
+    let (data, response) = try await send(credential: credential) { nmtid in
+      try Self.playRecordsRequest(
+        userID: userID,
+        scope: scope,
+        credential: credential
+      )
+    }
     let httpResponse = try Self.requireHTTPResponse(response)
     return try Self.classifyPlayRecords(
       data: data,
@@ -420,8 +573,9 @@ public actor NeteaseSession {
   package func dailyRecommendedSongs(
     credential: NeteaseCredential
   ) async throws -> [Track] {
-    let request = try Self.dailyRecommendedSongsRequest(credential: credential)
-    let (data, response) = try await urlSession.data(for: request)
+    let (data, response) = try await send(credential: credential) { nmtid in
+      try Self.dailyRecommendedSongsRequest(credential: credential)
+    }
     let httpResponse = try Self.requireHTTPResponse(response)
     return try Self.classifyDailyRecommendedSongs(
       data: data,
@@ -432,8 +586,9 @@ public actor NeteaseSession {
   package func dailyRecommendedPlaylists(
     credential: NeteaseCredential
   ) async throws -> [DiscoveredPlaylist] {
-    let request = try Self.dailyRecommendedPlaylistsRequest(credential: credential)
-    let (data, response) = try await urlSession.data(for: request)
+    let (data, response) = try await send(credential: credential) { nmtid in
+      try Self.dailyRecommendedPlaylistsRequest(credential: credential)
+    }
     let httpResponse = try Self.requireHTTPResponse(response)
     return try Self.classifyDailyRecommendedPlaylists(
       data: data,
@@ -444,8 +599,9 @@ public actor NeteaseSession {
   package func personalizedPlaylists(
     credential: NeteaseCredential
   ) async throws -> [DiscoveredPlaylist] {
-    let request = try Self.personalizedPlaylistsRequest(credential: credential)
-    let (data, response) = try await urlSession.data(for: request)
+    let (data, response) = try await send(credential: credential) { nmtid in
+      try Self.personalizedPlaylistsRequest(credential: credential)
+    }
     let httpResponse = try Self.requireHTTPResponse(response)
     return try Self.classifyPersonalizedPlaylists(
       data: data,
@@ -457,13 +613,15 @@ public actor NeteaseSession {
     credential: NeteaseCredential
   ) async throws -> [DiscoveredPlaylist] {
     let timestamp = Date().timeIntervalSince1970
-    let request = try Self.toplistsRequest(
-      credential: credential,
-      osVersion: Self.osVersion,
-      buildVersion: String(Int(timestamp)),
-      requestID: Self.requestID(timestamp: timestamp)
-    )
-    let (data, response) = try await urlSession.data(for: request)
+    let (data, response) = try await send(credential: credential) { nmtid in
+      try Self.toplistsRequest(
+        credential: credential,
+        osVersion: Self.osVersion,
+        buildVersion: String(Int(timestamp)),
+        requestID: Self.requestID(timestamp: timestamp),
+        nmtid: nmtid
+      )
+    }
     let httpResponse = try Self.requireHTTPResponse(response)
     return try Self.classifyToplists(
       data: data,
@@ -475,11 +633,12 @@ public actor NeteaseSession {
     songID: Int64,
     credential: NeteaseCredential
   ) async throws -> [Track] {
-    let request = try Self.similarSongsRequest(
-      songID: songID,
-      credential: credential
-    )
-    let (data, response) = try await urlSession.data(for: request)
+    let (data, response) = try await send(credential: credential) { nmtid in
+      try Self.similarSongsRequest(
+        songID: songID,
+        credential: credential
+      )
+    }
     let httpResponse = try Self.requireHTTPResponse(response)
     return try Self.classifySimilarSongs(
       data: data,
@@ -493,12 +652,13 @@ public actor NeteaseSession {
     liked: Bool,
     credential: NeteaseCredential
   ) async throws {
-    let request = try Self.likeSongRequest(
-      songID: songID,
-      liked: liked,
-      credential: credential
-    )
-    let (data, response) = try await urlSession.data(for: request)
+    let (data, response) = try await send(credential: credential) { nmtid in
+      try Self.likeSongRequest(
+        songID: songID,
+        liked: liked,
+        credential: credential
+      )
+    }
     let httpResponse = try Self.requireHTTPResponse(response)
     try Self.classifyLikeSong(
       data: data,
@@ -506,24 +666,31 @@ public actor NeteaseSession {
     )
   }
 
-  /// Creates a playlist, ordinary or private (1 request). The response carries
-  /// the new id, but MacEase does not decode it: the user reloads the list
-  /// explicitly, so no follow-up request is issued automatically.
+  /// Creation confirms the new identity so the user can immediately add songs.
   package func createPlaylist(
     name: String,
     isPrivate: Bool,
     credential: NeteaseCredential
-  ) async throws {
-    let request = try Self.createPlaylistRequest(
-      name: name,
-      isPrivate: isPrivate,
-      credential: credential
-    )
-    let (data, response) = try await urlSession.data(for: request)
+  ) async throws -> UserPlaylist {
+    let (data, response) = try await send(credential: credential) { nmtid in
+      try Self.createPlaylistRequest(
+        name: name,
+        isPrivate: isPrivate,
+        credential: credential
+      )
+    }
     let httpResponse = try Self.requireHTTPResponse(response)
     try Self.requireSuccess(
       data: data,
       response: httpResponse
+    )
+    let created = try JSONDecoder().decode(CreatedPlaylistPayload.self, from: data)
+    guard let id = created.playlist?.id ?? created.id, id > 0 else {
+      throw NeteaseCatalogError.invalidResponse
+    }
+    return UserPlaylist(
+      id: id, name: created.playlist?.name ?? name, trackCount: 0,
+      owned: true, isPrivate: isPrivate
     )
   }
 
@@ -531,11 +698,12 @@ public actor NeteaseSession {
     playlistID: Int64,
     credential: NeteaseCredential
   ) async throws {
-    let request = try Self.deletePlaylistRequest(
-      playlistID: playlistID,
-      credential: credential
-    )
-    let (data, response) = try await urlSession.data(for: request)
+    let (data, response) = try await send(credential: credential) { nmtid in
+      try Self.deletePlaylistRequest(
+        playlistID: playlistID,
+        credential: credential
+      )
+    }
     let httpResponse = try Self.requireHTTPResponse(response)
     try Self.requireSuccess(
       data: data,
@@ -549,17 +717,52 @@ public actor NeteaseSession {
     trackIDs: [Int64],
     credential: NeteaseCredential
   ) async throws {
+    let generation = requestGeneration(credential: credential)
+    do {
+      try await sendPlaylistTracks(
+        edit, playlistID: playlistID, trackIDs: trackIDs, credential: credential)
+      return
+    } catch let error as NeteaseServiceError
+      where error.source == .service && error.statusCode == 512
+    {
+      // 512 is an explicit rejection. Read back before the upstream's one
+      // duplicate-ID compatibility attempt, so an already applied edit is not repeated.
+      guard generation == auxiliaryGeneration else {
+        throw NeteaseWritePreparationError.verificationUnavailable
+      }
+      let current: PlaylistDetail
+      do {
+        current = try await playlistDetail(playlistID: playlistID, credential: credential)
+      } catch { throw NeteaseServiceError(source: .service, statusCode: 512) }
+      guard generation == auxiliaryGeneration, !Task.isCancelled else {
+        throw NeteaseWritePreparationError.verificationUnavailable
+      }
+      let existing = Set(current.trackIDs)
+      let remaining = trackIDs.filter {
+        edit == .add ? !existing.contains($0) : existing.contains($0)
+      }
+      guard !remaining.isEmpty else { return }
+      try await sendPlaylistTracks(
+        edit, playlistID: playlistID, trackIDs: remaining + remaining, credential: credential)
+    }
+  }
+
+  private func sendPlaylistTracks(
+    _ edit: PlaylistTrackEdit, playlistID: Int64, trackIDs: [Int64], credential: NeteaseCredential
+  ) async throws {
     let timestamp = Date().timeIntervalSince1970
-    let request = try Self.editPlaylistTracksRequest(
-      edit,
-      playlistID: playlistID,
-      trackIDs: trackIDs,
-      credential: credential,
-      osVersion: Self.osVersion,
-      buildVersion: String(Int(timestamp)),
-      requestID: Self.requestID(timestamp: timestamp)
-    )
-    let (data, response) = try await urlSession.data(for: request)
+    let (data, response) = try await send(credential: credential) { nmtid in
+      try Self.editPlaylistTracksRequest(
+        edit,
+        playlistID: playlistID,
+        trackIDs: trackIDs,
+        credential: credential,
+        osVersion: Self.osVersion,
+        buildVersion: String(Int(timestamp)),
+        requestID: Self.requestID(timestamp: timestamp),
+        nmtid: nmtid
+      )
+    }
     let httpResponse = try Self.requireHTTPResponse(response)
     try Self.requireSuccess(
       data: data,
@@ -573,15 +776,17 @@ public actor NeteaseSession {
     credential: NeteaseCredential
   ) async throws {
     let timestamp = Date().timeIntervalSince1970
-    let request = try Self.renamePlaylistRequest(
-      playlistID: playlistID,
-      name: name,
-      credential: credential,
-      osVersion: Self.osVersion,
-      buildVersion: String(Int(timestamp)),
-      requestID: Self.requestID(timestamp: timestamp)
-    )
-    let (data, response) = try await urlSession.data(for: request)
+    let (data, response) = try await send(credential: credential) { nmtid in
+      try Self.renamePlaylistRequest(
+        playlistID: playlistID,
+        name: name,
+        credential: credential,
+        osVersion: Self.osVersion,
+        buildVersion: String(Int(timestamp)),
+        requestID: Self.requestID(timestamp: timestamp),
+        nmtid: nmtid
+      )
+    }
     let httpResponse = try Self.requireHTTPResponse(response)
     try Self.requireSuccess(
       data: data,
@@ -595,16 +800,33 @@ public actor NeteaseSession {
     playlistID: Int64,
     credential: NeteaseCredential
   ) async throws {
+    let generation = requestGeneration(credential: credential)
+    let token: String
+    do {
+      token = try await checkToken()
+      try Task.checkCancellation()
+      guard !token.isEmpty, token.count <= 4096, NeteaseCookie.isValidValue(token) else {
+        throw NeteaseWritePreparationError.verificationUnavailable
+      }
+    } catch {
+      throw NeteaseWritePreparationError.verificationUnavailable
+    }
+    guard generation == auxiliaryGeneration else {
+      throw NeteaseWritePreparationError.verificationUnavailable
+    }
     let timestamp = Date().timeIntervalSince1970
-    let request = try Self.subscribePlaylistRequest(
-      subscribed,
-      playlistID: playlistID,
-      credential: credential,
-      osVersion: Self.osVersion,
-      buildVersion: String(Int(timestamp)),
-      requestID: Self.requestID(timestamp: timestamp)
-    )
-    let (data, response) = try await urlSession.data(for: request)
+    let (data, response) = try await send(credential: credential) { nmtid in
+      try Self.subscribePlaylistRequest(
+        subscribed,
+        playlistID: playlistID,
+        credential: credential,
+        osVersion: Self.osVersion,
+        buildVersion: String(Int(timestamp)),
+        requestID: Self.requestID(timestamp: timestamp),
+        nmtid: nmtid,
+        checkToken: token
+      )
+    }
     let httpResponse = try Self.requireHTTPResponse(response)
     try Self.requireSuccess(
       data: data,
@@ -614,23 +836,23 @@ public actor NeteaseSession {
 
   /// The song's lyric document (1 request).
   ///
-  /// This is the same endpoint the Gate A probe uses, but sent with the
-  /// account's credential rather than anonymously: the probe only had to prove
-  /// the endpoint answers, whereas the product needs the account's own
-  /// translation entitlement to decide whether `tlyric` comes back.
+  /// The account credential lets the service apply that account's translation
+  /// entitlement when deciding whether `tlyric` is returned.
   package func lyrics(
     songID: Int64,
     credential: NeteaseCredential
   ) async throws -> Lyrics {
     let timestamp = Date().timeIntervalSince1970
-    let request = try Self.lyricsRequest(
-      songID: songID,
-      credential: credential,
-      osVersion: Self.osVersion,
-      buildVersion: String(Int(timestamp)),
-      requestID: Self.requestID(timestamp: timestamp)
-    )
-    let (data, response) = try await urlSession.data(for: request)
+    let (data, response) = try await send(credential: credential) { nmtid in
+      try Self.lyricsRequest(
+        songID: songID,
+        credential: credential,
+        osVersion: Self.osVersion,
+        buildVersion: String(Int(timestamp)),
+        requestID: Self.requestID(timestamp: timestamp),
+        nmtid: nmtid
+      )
+    }
     let httpResponse = try Self.requireHTTPResponse(response)
     return try Self.classifyLyrics(data: data, response: httpResponse)
   }
@@ -641,15 +863,17 @@ public actor NeteaseSession {
     credential: NeteaseCredential
   ) async throws -> SongURLResolution {
     let timestamp = Date().timeIntervalSince1970
-    let request = try Self.songURLRequest(
-      songID: songID,
-      quality: quality,
-      credential: credential,
-      osVersion: Self.osVersion,
-      buildVersion: String(Int(timestamp)),
-      requestID: Self.requestID(timestamp: timestamp)
-    )
-    let (data, response) = try await urlSession.data(for: request)
+    let (data, response) = try await send(credential: credential) { nmtid in
+      try Self.songURLRequest(
+        songID: songID,
+        quality: quality,
+        credential: credential,
+        osVersion: Self.osVersion,
+        buildVersion: String(Int(timestamp)),
+        requestID: Self.requestID(timestamp: timestamp),
+        nmtid: nmtid
+      )
+    }
     let httpResponse = try Self.requireHTTPResponse(response)
     return try Self.classifySongURL(
       data: data,
@@ -697,7 +921,12 @@ public actor NeteaseSession {
     guard let profile = payload.profile else {
       return .signedOut
     }
-    return .authenticated(NeteaseAccount(userID: profile.userId))
+    guard profile.userId > 0 else { throw NeteaseAuthError.invalidResponse }
+    return .authenticated(
+      NeteaseAccount(
+        userID: profile.userId, nickname: profile.nickname,
+        avatarURL: NeteaseArtworkURL.approved(profile.avatarUrl), vipType: profile.vipType
+      ))
   }
 
   package static func userPlaylistsRequest(
@@ -740,7 +969,11 @@ public actor NeteaseSession {
           name: item.name,
           trackCount: item.trackCount,
           owned: item.creator.userId == userID,
-          isPrivate: isPrivate
+          isPrivate: isPrivate,
+          description: item.description, tags: item.tags,
+          artworkURL: NeteaseArtworkURL.approved(item.coverImgUrl),
+          creatorName: item.creator.nickname, specialType: item.specialType,
+          isSubscribed: item.subscribed
         )
       },
       more: payload.more
@@ -752,13 +985,15 @@ public actor NeteaseSession {
     credential: NeteaseCredential,
     osVersion: String,
     buildVersion: String,
-    requestID: String
+    requestID: String,
+    nmtid: String? = nil
   ) throws -> URLRequest {
     let headerFields = eapiHeaderFields(
       credential: credential,
       osVersion: osVersion,
       buildVersion: buildVersion,
-      requestID: requestID
+      requestID: requestID,
+      nmtid: nmtid
     )
     let header = try eapiHeaderJSON(headerFields)
     let json =
@@ -777,14 +1012,31 @@ public actor NeteaseSession {
     playlistID: Int64
   ) throws -> PlaylistDetail {
     try requireSuccess(data: data, response: response)
-    let playlist = try JSONDecoder().decode(PlaylistDetailPayload.self, from: data).playlist
+    let payload = try JSONDecoder().decode(PlaylistDetailPayload.self, from: data)
+    let playlist = payload.playlist
     guard playlist.id == playlistID else {
       throw NeteaseCatalogError.invalidResponse
+    }
+    var tracks = Dictionary(
+      (playlist.tracks ?? []).map { ($0.id, $0.track) },
+      uniquingKeysWith: { first, _ in first })
+    for privilege in payload.privileges ?? [] {
+      if let id = privilege.id { tracks[id]?.privilege = privilege.value }
     }
     return PlaylistDetail(
       id: playlist.id,
       name: playlist.name,
-      trackIDs: playlist.trackIds.map(\.id)
+      trackIDs: playlist.trackIds.map(\.id),
+      metadata: UserPlaylist(
+        id: playlist.id, name: playlist.name, trackCount: playlist.trackIds.count, owned: false,
+        isPrivate: playlist.privacy == 10 ? true : (playlist.privacy == 0 ? false : nil),
+        description: playlist.description, tags: playlist.tags,
+        artworkURL: NeteaseArtworkURL.approved(playlist.coverImgUrl),
+        creatorName: playlist.creator?.nickname, specialType: playlist.specialType,
+        isSubscribed: playlist.subscribed
+      ),
+      creatorID: playlist.creator?.userId,
+      tracks: playlist.trackIds.compactMap { tracks[$0.id] }
     )
   }
 
@@ -807,10 +1059,13 @@ public actor NeteaseSession {
     songIDs: [Int64]
   ) throws -> [Track] {
     try requireSuccess(data: data, response: response)
-    let songs = try JSONDecoder().decode(SongDetailsPayload.self, from: data).songs
+    let payload = try JSONDecoder().decode(SongDetailsPayload.self, from: data)
     var tracksByID: [Int64: Track] = [:]
-    for song in songs {
+    for song in payload.songs {
       tracksByID[song.id] = song.track
+    }
+    for privilege in payload.privileges ?? [] {
+      if let id = privilege.id { tracksByID[id]?.privilege = privilege.value }
     }
     return songIDs.compactMap { tracksByID[$0] }
   }
@@ -938,13 +1193,15 @@ public actor NeteaseSession {
     credential: NeteaseCredential,
     osVersion: String,
     buildVersion: String,
-    requestID: String
+    requestID: String,
+    nmtid: String? = nil
   ) throws -> URLRequest {
     let headerFields = eapiHeaderFields(
       credential: credential,
       osVersion: osVersion,
       buildVersion: buildVersion,
-      requestID: requestID
+      requestID: requestID,
+      nmtid: nmtid
     )
     let header = try eapiHeaderJSON(headerFields)
     let json = #"{"e_r":false,"header":\#(header)}"#
@@ -1061,7 +1318,8 @@ public actor NeteaseSession {
     credential: NeteaseCredential,
     osVersion: String,
     buildVersion: String,
-    requestID: String
+    requestID: String,
+    nmtid: String? = nil
   ) throws -> URLRequest {
     guard !trackIDs.isEmpty else {
       throw NeteaseCatalogError.invalidSongDetailRequestCount(0)
@@ -1070,7 +1328,8 @@ public actor NeteaseSession {
       credential: credential,
       osVersion: osVersion,
       buildVersion: buildVersion,
-      requestID: requestID
+      requestID: requestID,
+      nmtid: nmtid
     )
     let header = try eapiHeaderJSON(headerFields)
     let list = "[" + trackIDs.map(String.init).joined(separator: ",") + "]"
@@ -1086,35 +1345,31 @@ public actor NeteaseSession {
     )
   }
 
-  /// Sends only the name sub-request. The reference implementation always also
-  /// sends desc and tags defaulted to empty strings, which silently wipes an
-  /// existing description and tag list; MacEase must not destroy data the user
-  /// did not ask to change.
+  /// playlist_name_update.js at d55d92cd0031d7c7746b7068faecd7ade1d354ac.
   package static func renamePlaylistRequest(
     playlistID: Int64,
     name: String,
     credential: NeteaseCredential,
     osVersion: String,
     buildVersion: String,
-    requestID: String
+    requestID: String,
+    nmtid: String? = nil
   ) throws -> URLRequest {
     let headerFields = eapiHeaderFields(
       credential: credential,
       osVersion: osVersion,
       buildVersion: buildVersion,
-      requestID: requestID
+      requestID: requestID,
+      nmtid: nmtid
     )
     let header = try eapiHeaderJSON(headerFields)
     let encodedName = String(decoding: try JSONEncoder().encode(name), as: UTF8.self)
-    let inner = #"{"id":\#(playlistID),"name":\#(encodedName)}"#
-    let encodedInner = String(decoding: try JSONEncoder().encode(inner), as: UTF8.self)
     let json =
-      #"{"/api/playlist/update/name":\#(encodedInner),"e_r":false,"header":\#(header)}"#
+      #"{"id":\#(playlistID),"name":\#(encodedName),"e_r":false,"header":\#(header)}"#
     return try eapiFormRequest(
-      path: batchEndpoint.path,
+      path: "/api/playlist/update/name",
       json: json,
-      headerFields: headerFields,
-      url: batchEndpoint.url
+      headerFields: headerFields
     )
   }
 
@@ -1124,16 +1379,29 @@ public actor NeteaseSession {
     credential: NeteaseCredential,
     osVersion: String,
     buildVersion: String,
-    requestID: String
+    requestID: String,
+    nmtid: String? = nil,
+    checkToken: String? = nil
   ) throws -> URLRequest {
-    let headerFields = eapiHeaderFields(
+    var headerFields = eapiHeaderFields(
       credential: credential,
       osVersion: osVersion,
       buildVersion: buildVersion,
-      requestID: requestID
+      requestID: requestID,
+      nmtid: nmtid
     )
+    if let checkToken {
+      guard checkToken.count <= 4096, NeteaseCookie.isValidValue(checkToken) else {
+        throw NeteaseWritePreparationError.verificationUnavailable
+      }
+      headerFields.append(("X-antiCheatToken", checkToken))
+    }
     let header = try eapiHeaderJSON(headerFields)
-    let json = #"{"id":\#(playlistID),"e_r":false,"header":\#(header)}"#
+    let bodyToken =
+      subscribed
+      ? #""checkToken":"9ca17ae2e6ffcda170e2e6ee8af14fbabdb988f225b3868eb2c15a879b9a83d274a790ac8ff54a97b889d5d42af0feaec3b92af58cff99c470a7eafd88f75e839a9ea7c14e909da883e83fb692a3abdb6b92adee9e","#
+      : ""
+    let json = #"{"id":\#(playlistID),\#(bodyToken)"e_r":false,"header":\#(header)}"#
     let endpoint = subscribed ? subscribePlaylistEndpoint : unsubscribePlaylistEndpoint
     return try eapiFormRequest(
       path: endpoint.path,
@@ -1169,13 +1437,15 @@ public actor NeteaseSession {
     credential: NeteaseCredential,
     osVersion: String,
     buildVersion: String,
-    requestID: String
+    requestID: String,
+    nmtid: String? = nil
   ) throws -> URLRequest {
     let headerFields = eapiHeaderFields(
       credential: credential,
       osVersion: osVersion,
       buildVersion: buildVersion,
-      requestID: requestID
+      requestID: requestID,
+      nmtid: nmtid
     )
     let header = try eapiHeaderJSON(headerFields)
     let json =
@@ -1205,22 +1475,41 @@ public actor NeteaseSession {
     guard let item = payload.data?.first(where: { $0.id == songID }) else {
       throw NeteasePlaybackError.invalidResponse
     }
+    return try classifyAudioItem(item, songID: songID, requestedQuality: requestedQuality)
+  }
+
+  static func classifyAudioItem(
+    _ item: SongURLPayload.Item,
+    songID: Int64,
+    requestedQuality: PlaybackQuality,
+    upgradeCDNToHTTPS: Bool = false
+  ) throws -> SongURLResolution {
+    guard item.id == songID else { throw NeteasePlaybackError.invalidResponse }
     guard item.code == 200, let value = item.url else {
       return .unavailable(itemCode: item.code, fee: item.fee)
     }
     guard
-      let url = URL(string: value), let host = url.host?.lowercased(),
-      let sourceScheme = url.scheme?.lowercased()
+      var url = URL(string: value), let host = url.host?.lowercased(),
+      let sourceScheme = url.scheme?.lowercased(), url.user == nil, url.password == nil
     else {
       throw NeteasePlaybackError.invalidResponse
     }
-    let isMusic126 = host == "music.126.net" || host.hasSuffix(".music.126.net")
-    let isMusic163 = host == "music.163.com" || host.hasSuffix(".music.163.com")
-    guard isMusic126 || isMusic163 else {
+    guard NeteaseResourceHost.isApproved(host) else {
       throw NeteasePlaybackError.unapprovedHost(host)
     }
-    guard sourceScheme == "https" || (sourceScheme == "http" && isMusic126) else {
+    guard
+      sourceScheme == "https" || (sourceScheme == "http" && NeteaseResourceHost.isAudioCDN(host))
+    else {
       throw NeteasePlaybackError.nonHTTPSURL(host)
+    }
+    if upgradeCDNToHTTPS, sourceScheme == "http" {
+      guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+        components.port == nil || components.port == 80
+      else { throw NeteasePlaybackError.invalidResponse }
+      components.scheme = "https"
+      components.port = nil
+      guard let upgraded = components.url else { throw NeteasePlaybackError.invalidResponse }
+      url = upgraded
     }
 
     return .resolved(
@@ -1235,7 +1524,13 @@ public actor NeteaseSession {
         byteCount: item.size,
         expiresIn: item.expi,
         fee: item.fee,
-        trial: item.freeTrialInfo?.isObject == true
+        trial: item.freeTrialInfo?.isObject == true,
+        fileMD5: item.md5.flatMap { value in
+          value.count == 32
+            && value.utf8.allSatisfy({
+              (48...57).contains($0) || (65...70).contains($0) || (97...102).contains($0)
+            }) ? value.lowercased() : nil
+        }
       )
     )
   }
@@ -1249,13 +1544,15 @@ public actor NeteaseSession {
     credential: NeteaseCredential,
     osVersion: String,
     buildVersion: String,
-    requestID: String
+    requestID: String,
+    nmtid: String? = nil
   ) throws -> URLRequest {
     let headerFields = eapiHeaderFields(
       credential: credential,
       osVersion: osVersion,
       buildVersion: buildVersion,
-      requestID: requestID
+      requestID: requestID,
+      nmtid: nmtid
     )
     let header = try eapiHeaderJSON(headerFields)
     let json =
@@ -1304,61 +1601,6 @@ public actor NeteaseSession {
       contributor: payload.lyricUser?.nickname,
       translationContributor: payload.transUser?.nickname
     )
-  }
-
-  package static func lyricsProbeRequest(songID: Int64) throws -> URLRequest {
-    let json =
-      #"{"id":"\#(songID)","cp":false,"tv":0,"lv":0,"rv":0,"kv":0,"yv":0,"ytv":0,"yrv":0,"e_r":false,"header":{}}"#
-    let params = try NeteaseCrypto.eapi(path: lyricsEndpoint.path, json: json)
-    var request = URLRequest(url: lyricsEndpoint.url)
-    request.httpMethod = "POST"
-    request.httpBody = FormURLEncoder.encode([("params", params)])
-    request.httpShouldHandleCookies = false
-    request.setValue(
-      "application/x-www-form-urlencoded",
-      forHTTPHeaderField: "Content-Type"
-    )
-    request.setValue("MacEasePhase0/0.1 (macOS 15)", forHTTPHeaderField: "User-Agent")
-    return request
-  }
-
-  package func probeLyrics(songID: Int64) async -> LyricsProbeOutcome {
-    do {
-      let (data, response) = try await urlSession.data(
-        for: try Self.lyricsProbeRequest(songID: songID)
-      )
-      return Self.classifyLyricsProbe(
-        data: data,
-        response: try Self.requireHTTPResponse(response)
-      )
-    } catch is NeteaseTransportError {
-      return LyricsProbeOutcome(status: .invalidResponse, setsCookie: false)
-    } catch {
-      return LyricsProbeOutcome(status: .network, setsCookie: false)
-    }
-  }
-
-  package static func classifyLyricsProbe(
-    data: Data,
-    response: HTTPURLResponse
-  ) -> LyricsProbeOutcome {
-    let setsCookie = response.value(forHTTPHeaderField: "Set-Cookie") != nil
-    guard (200..<300).contains(response.statusCode) else {
-      return LyricsProbeOutcome(status: .http(response.statusCode), setsCookie: setsCookie)
-    }
-    guard let payload = try? JSONDecoder().decode(LyricsProbePayload.self, from: data)
-    else {
-      return LyricsProbeOutcome(status: .invalidResponse, setsCookie: setsCookie)
-    }
-    guard payload.code == 200 else {
-      return LyricsProbeOutcome(status: .service(payload.code), setsCookie: setsCookie)
-    }
-    let status: LyricsProbeStatus =
-      payload.lrc?.hasContent == true || payload.yrc?.hasContent == true
-      ? .content
-      : payload.nolyric == true || payload.uncollected == true
-        ? .noLyrics : .invalidResponse
-    return LyricsProbeOutcome(status: status, setsCookie: setsCookie)
   }
 
   static func cookieHeader(_ credential: NeteaseCredential) -> String {
@@ -1473,9 +1715,10 @@ public actor NeteaseSession {
     credential: NeteaseCredential,
     osVersion: String,
     buildVersion: String,
-    requestID: String
+    requestID: String,
+    nmtid: String? = nil
   ) -> [(String, String)] {
-    [
+    var fields: [(String, String)] = [
       ("osver", osVersion),
       ("os", "osx"),
       ("appver", "0.1"),
@@ -1485,6 +1728,8 @@ public actor NeteaseSession {
       ("requestId", requestID),
       ("MUSIC_U", credential.musicU.value),
     ]
+    if let nmtid { fields.append(("NMTID", nmtid)) }
+    return fields
   }
 
   static func eapiHeaderJSON(
@@ -1506,9 +1751,10 @@ public actor NeteaseSession {
     guard (200..<300).contains(response.statusCode) else {
       throw NeteaseServiceError(source: .http, statusCode: response.statusCode)
     }
-    let code = try JSONDecoder().decode(ServiceCodePayload.self, from: data).code
-    guard code == 200 else {
-      throw NeteaseServiceError(source: .service, statusCode: code)
+    let payload = try JSONDecoder().decode(ServiceCodePayload.self, from: data)
+    guard payload.code == 200 else {
+      throw NeteaseServiceError(
+        source: .service, statusCode: payload.code, message: payload.message)
     }
   }
 
@@ -1616,6 +1862,15 @@ private struct AccountStatusParameters: Encodable {
 
 struct ServiceCodePayload: Decodable {
   let code: Int
+  let message: String?
+  enum CodingKeys: String, CodingKey { case code, msg, message }
+  init(from decoder: any Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    code = try container.decode(Int.self, forKey: .code)
+    message =
+      (try? container.decode(String.self, forKey: .msg))
+      ?? (try? container.decode(String.self, forKey: .message))
+  }
 }
 
 private struct AccountStatusPayload: Decodable {
@@ -1641,6 +1896,9 @@ private struct AccountStatusPayload: Decodable {
 
   struct Profile: Decodable {
     let userId: Int64
+    let nickname: String?
+    let avatarUrl: String?
+    let vipType: Int?
   }
 }
 
@@ -1654,20 +1912,44 @@ private struct UserPlaylistsPayload: Decodable {
     let trackCount: Int
     let privacy: Int?
     let creator: Creator
+    let description: String?
+    let tags: [String]?
+    let coverImgUrl: String?
+    let specialType: Int?
+    let subscribed: Bool?
   }
 
   struct Creator: Decodable {
     let userId: Int64
+    let nickname: String?
+  }
+}
+
+private struct CreatedPlaylistPayload: Decodable {
+  let id: Int64?
+  let playlist: Item?
+  struct Item: Decodable {
+    let id: Int64
+    let name: String?
   }
 }
 
 private struct PlaylistDetailPayload: Decodable {
   let playlist: Playlist
+  let privileges: [SongPrivilegePayload]?
 
   struct Playlist: Decodable {
     let id: Int64
     let name: String
     let trackIds: [TrackID]
+    let tracks: [SongRowPayload]?
+    let description: String?
+    let tags: [String]?
+    let coverImgUrl: String?
+    let specialType: Int?
+    let subscribed: Bool?
+    let privacy: Int?
+    let creator: UserPlaylistsPayload.Creator?
   }
 
   struct TrackID: Decodable {
@@ -1677,6 +1959,7 @@ private struct PlaylistDetailPayload: Decodable {
 
 private struct SongDetailsPayload: Decodable {
   let songs: [SongRowPayload]
+  let privileges: [SongPrivilegePayload]?
 }
 
 private struct LikedSongIDsPayload: Decodable {
@@ -1717,13 +2000,10 @@ private struct SimilarSongsPayload: Decodable {
   let songs: [SongRowPayload]
 }
 
-/// The minimum lyric payload documented by the authoritative local API
-/// reference. Object presence alone is not content: `{}` and an empty lyric
-/// must remain an invalid response rather than a false positive.
+/// A lyric document must be an object. A missing or empty `lyric` field is an
+/// empty document, while scalar and array values fail decoding.
 private struct LyricsContent: Decodable {
   let lyric: String
-
-  var hasContent: Bool { !lyric.isEmpty }
 
   private enum CodingKeys: String, CodingKey {
     case lyric
@@ -1738,22 +2018,17 @@ private struct LyricsContent: Decodable {
 /// Same rule, but a non-object is recorded rather than thrown: this field
 /// only feeds a diagnostic string, and failing the whole song-URL resolution
 /// over it would stop playback for no benefit.
-private struct LenientObjectMarker: Decodable {
+struct LenientObjectMarker: Decodable {
   let isObject: Bool
+  let isMalformed: Bool
 
   private enum NoKeys: CodingKey {}
 
   init(from decoder: Decoder) throws {
     isObject = (try? decoder.container(keyedBy: NoKeys.self)) != nil
+    let scalar = try decoder.singleValueContainer()
+    isMalformed = !isObject && !scalar.decodeNil()
   }
-}
-
-private struct LyricsProbePayload: Decodable {
-  let code: Int
-  let lrc: LyricsContent?
-  let yrc: LyricsContent?
-  let nolyric: Bool?
-  let uncollected: Bool?
 }
 
 /// The product lyric payload. `yrc` carries absolute millisecond word timing;
@@ -1788,7 +2063,7 @@ private struct LyricContributor: Decodable {
   }
 }
 
-private struct SongURLPayload: Decodable {
+struct SongURLPayload: Decodable {
   let code: Int
   let data: [Item]?
 
@@ -1804,6 +2079,7 @@ private struct SongURLPayload: Decodable {
     let expi: Int?
     let fee: Int?
     let freeTrialInfo: LenientObjectMarker?
+    let md5: String?
   }
 }
 

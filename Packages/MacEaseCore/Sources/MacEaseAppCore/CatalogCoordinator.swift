@@ -111,14 +111,9 @@ package final class CatalogCoordinator: SessionGuardedCoordinator {
     let scope: CatalogSearchScope
   }
 
-  private enum SearchGroupResult: Sendable {
-    case success(SearchPage)
-    case failure(OperationFailure)
-  }
-
   private struct SearchGroup: Sendable {
     let scope: SearchScope
-    let result: SearchGroupResult
+    let result: Result<SearchPage, OperationFailure>
   }
 
   @ObservationIgnored private let transport: any NeteaseTransporting
@@ -163,6 +158,10 @@ package final class CatalogCoordinator: SessionGuardedCoordinator {
   /// The service's own idea of what to search for. Shown as a placeholder and
   /// never run on the user's behalf.
   package private(set) var defaultKeyword: String?
+  package private(set) var hotSearches: [HotSearch] = []
+  package private(set) var searchHistory: [String] = []
+  @ObservationIgnored private var store: LibraryStore?
+  @ObservationIgnored private var historyWriteTask: Task<Void, Never>?
   package var isSearching = false
   package var status = "Type a search and press Search"
   @ObservationIgnored private var searchOffset = 0
@@ -172,6 +171,11 @@ package final class CatalogCoordinator: SessionGuardedCoordinator {
   package private(set) var album: AlbumDetail?
   package private(set) var albumDynamic: AlbumDynamic?
   package private(set) var artist: ArtistDetail?
+  package private(set) var song: Track?
+  package private(set) var artistSongs: [Track] = []
+  package private(set) var artistSongsHaveMore = true
+  package private(set) var artistBiography: String?
+  @ObservationIgnored private var artistSongOffset = 0
   package private(set) var artistAlbums: [Album] = []
   package private(set) var artistAlbumsHaveMore = false
   @ObservationIgnored private var artistAlbumOffset = 0
@@ -207,6 +211,34 @@ package final class CatalogCoordinator: SessionGuardedCoordinator {
     clearAll()
   }
 
+  package func attach(store: LibraryStore?) { self.store = store }
+
+  package func loadSearchHistory(session: any SessionProviding) async {
+    guard let account = session.account else { return }
+    let expected = generation
+    do {
+      let saved = try await store?.searchHistory(accountID: account.userID) ?? []
+      if generation == expected, session.account?.userID == account.userID {
+        var seen = Set(searchHistory)
+        searchHistory = Array(
+          (searchHistory + saved.filter { seen.insert($0).inserted }).prefix(50))
+      }
+    } catch { if generation == expected { status = "Search history could not be read" } }
+  }
+
+  package func clearSearchHistory(session: any SessionProviding) {
+    guard let account = session.account else { return }
+    searchHistory = []
+    let previous = historyWriteTask
+    let expected = generation
+    historyWriteTask = Task {
+      await previous?.value
+      do { try await store?.clearSearchHistory(accountID: account.userID) } catch {
+        if generation == expected { status = "Search history could not be cleared from storage" }
+      }
+    }
+  }
+
   // MARK: - Search
 
   /// Runs the search the user submitted. All uses four bounded requests;
@@ -214,6 +246,19 @@ package final class CatalogCoordinator: SessionGuardedCoordinator {
   package func runSearch(session: any SessionProviding) {
     let keywords = Self.trimmed(query)
     guard !keywords.isEmpty else { return }
+    if let account = session.account {
+      searchHistory.removeAll { $0 == keywords }
+      searchHistory.insert(keywords, at: 0)
+      searchHistory = Array(searchHistory.prefix(50))
+      let previous = historyWriteTask
+      let expected = generation
+      historyWriteTask = Task {
+        await previous?.value
+        do { try await store?.saveSearch(keywords, accountID: account.userID) } catch {
+          if generation == expected { status = "Search history could not be saved" }
+        }
+      }
+    }
     guard let requested = scope.neteaseScope else {
       performCombinedSearch(keywords: keywords, session: session)
       return
@@ -519,7 +564,8 @@ package final class CatalogCoordinator: SessionGuardedCoordinator {
       cancelSuggestions()
       suggestions = []
     }
-    status = currentSearchInput.keywords.isEmpty
+    status =
+      currentSearchInput.keywords.isEmpty
       ? "Type a search and press Search"
       : "Press Search to search the current input"
   }
@@ -549,9 +595,117 @@ package final class CatalogCoordinator: SessionGuardedCoordinator {
 
   // MARK: - Album and artist pages
 
+  package func loadHotSearches(session: any SessionProviding) {
+    read(
+      in: search, identity: "hot-searches", operation: "Hot searches",
+      loading: "Loading hot searches", report: { self.status = $0 },
+      busy: { self.isSearching = $0 }, session: session, onStart: {},
+      fetch: {
+        try await self.transport.hotSearches(credential: $0)
+      },
+      apply: {
+        self.hotSearches = $0
+        return "Hot searches loaded"
+      })
+  }
+
+  package func openSong(id: Int64, session: any SessionProviding) {
+    read(
+      in: detail, identity: "song-\(id)", operation: "Song", loading: "Loading song",
+      report: { self.detailStatus = $0 }, busy: { self.isLoadingDetail = $0 }, session: session,
+      onStart: { self.song = nil },
+      fetch: {
+        try await self.transport.songDetails(songIDs: [id], credential: $0)
+      },
+      apply: { tracks in
+        self.song = tracks.first
+        return tracks.isEmpty ? "This song is unavailable" : "Song loaded"
+      })
+  }
+
+  package func loadArtistBiography(session: any SessionProviding) {
+    guard let artist = artist?.artist else { return }
+    read(
+      in: detail, identity: "artist-biography-\(artist.id)", operation: "Artist biography",
+      loading: "Loading biography", report: { self.detailStatus = $0 },
+      busy: { self.isLoadingDetail = $0 }, session: session, onStart: {},
+      fetch: {
+        try await self.transport.artistBiography(artistID: artist.id, credential: $0)
+      },
+      apply: {
+        self.artistBiography = $0
+        return "Biography loaded"
+      })
+  }
+
+  package func loadArtistSongs(
+    all: Bool = false, playback: PlaybackController? = nil, startingAt songID: Int64? = nil,
+    session: any SessionProviding
+  ) {
+    guard let artist = artist?.artist, artistSongsHaveMore || playback != nil else { return }
+    let offset = artistSongOffset
+    let held = artistSongs
+    let initialMore = artistSongsHaveMore
+    let playbackIntent = playback?.intentRevision
+    read(
+      in: detail, identity: "artist-songs-\(artist.id)-\(offset)-\(all)", operation: "Artist songs",
+      loading: "Loading artist songs", report: { self.detailStatus = $0 },
+      busy: { self.isLoadingDetail = $0 }, session: session, onStart: {},
+      fetch: { credential in
+        var songs = held
+        var offset = offset
+        var more = initialMore
+        var pages = 0
+        var seen = Set(held.map(\.id))
+        while more {
+          try Task.checkCancellation()
+          guard pages < 1000 else { throw NeteaseCatalogError.invalidResponse }
+          let page = try await self.transport.artistSongs(
+            artistID: artist.id, limit: 100, offset: offset, credential: credential)
+          try Task.checkCancellation()
+          if let playbackIntent, playback?.intentRevision != playbackIntent {
+            throw CancellationError()
+          }
+          songs += page.items.filter { seen.insert($0.id).inserted }
+          offset += page.items.count
+          more = page.more
+          pages += 1
+          self.detailStatus = "Loaded \(songs.count) songs"
+          if !all { break }
+        }
+        return (songs, offset, more)
+      },
+      apply: { result in
+        self.artistSongs = result.0
+        self.artistSongOffset = result.1
+        self.artistSongsHaveMore = result.2
+        if let playback {
+          guard playback.intentRevision == playbackIntent else {
+            return "Playback changed while the songs were loading"
+          }
+          let start: Int
+          if let songID {
+            guard let index = result.0.firstIndex(where: { $0.id == songID }) else {
+              return "This song is no longer available"
+            }
+            start = index
+          } else {
+            start = 0
+          }
+          let reserved = self.detail.token.flatMap { self.arbiter.transferRead($0) }
+          self.detail.token = nil
+          _ = playback.play(
+            tracks: result.0, startIndex: start, context: .artist(id: artist.id, name: artist.name),
+            session: session, reservedResolution: reserved)
+        }
+        return "Loaded \(result.0.count) songs"
+      })
+  }
+
   /// Opens an album: what is on it, and whether the account has collected it
   /// (2 requests).
   package func openAlbum(id albumID: Int64, session: any SessionProviding) {
+    let membershipRevision = arbiter.writeRevision
     read(
       in: detail,
       identity: "album-\(albumID)",
@@ -569,24 +723,32 @@ package final class CatalogCoordinator: SessionGuardedCoordinator {
         self.artistAlbumOffset = 0
       },
       fetch: { credential in
-        let detail = try await self.transport.albumDetail(
-          albumID: albumID,
-          credential: credential
-        )
-        let dynamic = try await self.transport.albumDynamic(
-          albumID: albumID,
-          credential: credential
-        )
-        return (detail, dynamic)
+        let pageGeneration = self.detail.generation
+        guard let account = session.account else { throw CancellationError() }
+        async let dynamic = self.transport.albumDynamic(albumID: albumID, credential: credential)
+        let detail = try await self.transport.albumDetail(albumID: albumID, credential: credential)
+        guard self.detail.accepts(pageGeneration), !Task.isCancelled,
+          session.matchesValidatedSession(credential, account: account)
+        else { throw CancellationError() }
+        self.album = detail
+        self.detailStatus = "Loaded \(detail.tracks.count) tracks; updating collection status"
+        do { return (detail, try await dynamic as AlbumDynamic?) } catch is CancellationError {
+          throw CancellationError()
+        } catch { return (detail, nil as AlbumDynamic?) }
       },
       apply: { loaded in
         self.album = loaded.0
         self.albumDynamic = loaded.1
-        if let collected = loaded.1.isCollected {
+        if self.arbiter.writeRevision == membershipRevision, self.arbiter.active?.effect != .write,
+          self.arbiter.active?.effect != .upload,
+          let collected = loaded.1?.isCollected
+        {
           self.onAlbumCollectionStateConfirmed?(albumID, collected)
         }
         return "Loaded \(loaded.0.tracks.count) tracks from \(loaded.0.album.name)"
+          + (loaded.1 == nil ? "; collection status unavailable" : "")
       }
+
     )
   }
 
@@ -603,6 +765,10 @@ package final class CatalogCoordinator: SessionGuardedCoordinator {
       session: session,
       onStart: {
         self.artist = nil
+        self.artistSongs = []
+        self.artistSongsHaveMore = true
+        self.artistSongOffset = 0
+        self.artistBiography = nil
         self.artistAlbums = []
         self.artistAlbumsHaveMore = false
         self.artistAlbumOffset = 0
@@ -610,27 +776,32 @@ package final class CatalogCoordinator: SessionGuardedCoordinator {
         self.albumDynamic = nil
       },
       fetch: { credential in
+        let pageGeneration = self.detail.generation
+        guard let account = session.account else { throw CancellationError() }
+        async let albums = self.transport.artistAlbums(
+          artistID: artistID, limit: Self.albumPageSize, offset: 0, credential: credential)
         let detail = try await self.transport.artistDetail(
-          artistID: artistID,
-          credential: credential
-        )
-        let albums = try await self.transport.artistAlbums(
-          artistID: artistID,
-          limit: Self.albumPageSize,
-          offset: 0,
-          credential: credential
-        )
-        return (detail, albums)
+          artistID: artistID, credential: credential)
+        guard self.detail.accepts(pageGeneration), !Task.isCancelled,
+          session.matchesValidatedSession(credential, account: account)
+        else { throw CancellationError() }
+        self.artist = detail
+        self.detailStatus = "Loaded \(detail.hotSongs.count) top songs; loading albums"
+        do { return (detail, try await albums as CatalogPage<Album>?) } catch is CancellationError {
+          throw CancellationError()
+        } catch { return (detail, nil as CatalogPage<Album>?) }
       },
       apply: { loaded in
         self.artist = loaded.0
-        self.artistAlbums = Self.deduplicated(loaded.1.items)
-        self.artistAlbumOffset = loaded.1.items.count
-        self.artistAlbumsHaveMore = loaded.1.more && !loaded.1.items.isEmpty
-        return
-          "Loaded \(loaded.0.hotSongs.count) top songs and "
-          + "\(loaded.1.items.count) albums for \(loaded.0.artist.name)"
+        if let albums = loaded.1 {
+          self.artistAlbums = Self.deduplicated(albums.items)
+          self.artistAlbumOffset = albums.items.count
+          self.artistAlbumsHaveMore = albums.more && !albums.items.isEmpty
+        }
+        return "Loaded \(loaded.0.hotSongs.count) top songs for \(loaded.0.artist.name)"
+          + (loaded.1 == nil ? "; albums could not be loaded" : "")
       }
+
     )
   }
 
@@ -747,6 +918,13 @@ package final class CatalogCoordinator: SessionGuardedCoordinator {
     await suggest.task?.value
   }
 
+  package func cancelDetail() {
+    releaseLaneToken(detail)
+    detail.cancel()
+    isLoadingDetail = false
+    detailStatus = "Loading cancelled"
+  }
+
   package func reset() {
     generation += 1
     for lane in [search, detail, suggest] {
@@ -782,20 +960,30 @@ package final class CatalogCoordinator: SessionGuardedCoordinator {
     releaseLaneToken(lane)
     lane.cancel()
     busy(false)
-    guard let token = arbiter.begin(name: operation, effect: .read) else { return }
-    guard let account = session.account else {
-      arbiter.end(token, outcome: .failed)
+    guard let account = session.account, session.isOnline else {
       report("Validate the session first")
       return
     }
 
     let identityGeneration = generation
     let laneGeneration = lane.begin(identity)
-    lane.token = token
     onStart()
     busy(true)
     report(loading)
     lane.task = Task {
+      guard let token = await arbiter.beginWhenAvailable(name: operation, effect: .read) else {
+        if lane.accepts(laneGeneration) {
+          busy(false)
+          lane.finish(laneGeneration)
+        }
+        return
+      }
+      guard lane.accepts(laneGeneration), self.generation == identityGeneration, !Task.isCancelled
+      else {
+        arbiter.end(token, outcome: .cancelled)
+        return
+      }
+      lane.token = token
       var outcome = OperationOutcome.failed
       defer {
         self.releaseToken(token, in: lane, outcome: outcome)
@@ -865,6 +1053,13 @@ package final class CatalogCoordinator: SessionGuardedCoordinator {
     searchOffset = 0
     suggestions = []
     defaultKeyword = nil
+    hotSearches = []
+    searchHistory = []
+    song = nil
+    artistSongs = []
+    artistSongOffset = 0
+    artistSongsHaveMore = true
+    artistBiography = nil
     album = nil
     albumDynamic = nil
     artist = nil

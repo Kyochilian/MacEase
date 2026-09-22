@@ -17,7 +17,10 @@ private struct PlaybackRig {
   let session: FakeSession
   let playback: PlaybackController
 
-  init(arbiter: OperationArbiter = OperationArbiter()) {
+  init(
+    arbiter: OperationArbiter = OperationArbiter(),
+    admissionTimeout: Duration = .seconds(30)
+  ) {
     let credential = makeCredential()
     self.arbiter = arbiter
     vault = FakeVault(stored: credential)
@@ -26,13 +29,16 @@ private struct PlaybackRig {
       transport: transport,
       vault: vault,
       arbiter: arbiter,
-      output: output
+      output: output,
+      admissionTimeout: admissionTimeout
     )
     playback.attach(session: session)
   }
 
   func play(_ ids: [Int64] = [101], startIndex: Int = 0) async {
-    playback.play(tracks: makeTracks(ids), startIndex: startIndex, context: .dailyRecommendations, session: session)
+    playback.play(
+      tracks: makeTracks(ids), startIndex: startIndex, context: .dailyRecommendations,
+      session: session)
     await playback.settleForTesting()
   }
 
@@ -40,6 +46,85 @@ private struct PlaybackRig {
     playback.playAgain(session: session)
     await playback.settleForTesting()
   }
+}
+
+@Test @MainActor func naturalContinuationWaitsForReadsOrSameAccountRenewal() async throws {
+  for effect in [OperationEffect.read, .sessionMutation] {
+    let rig = PlaybackRig(arbiter: OperationArbiter(maximumConcurrentReads: 1))
+    var events: [PlaybackLifecycleEvent] = []
+    rig.playback.onLifecycleEvent = { events.append($0) }
+    await rig.transport.setSongURL(.success(makeResolvedAsset(songID: 101)))
+    await rig.play([101, 102])
+    let oldEnd = rig.output.onPlayedToEnd
+    let blocker = try #require(rig.arbiter.begin(name: "Busy", effect: effect))
+
+    oldEnd?()
+    #expect(rig.playback.phase == .resolving)
+    #expect(rig.playback.currentTrack?.id == 102)
+    #expect(rig.playback.attempt?.resumePosition == 0)
+    // A late duplicate completion still belongs to the ended item.
+    oldEnd?()
+    if effect == .sessionMutation {
+      let renewed = makeCredential("renewed")
+      await rig.vault.setStored(renewed)
+      rig.session.validatedCredential = renewed
+    }
+    await rig.transport.setSongURL(.success(makeResolvedAsset(songID: 102)))
+    rig.arbiter.end(blocker, outcome: .applied)
+    await rig.playback.settleForTesting()
+
+    #expect(rig.playback.phase == .playing)
+    #expect(rig.playback.currentTrack?.id == 102)
+    #expect(events.count == 3)
+    #expect(await rig.transport.recordedCalls() == [
+      .resolveSongURL(101, .standard), .resolveSongURL(102, .standard)
+    ])
+    #expect(rig.arbiter.activeReadCount == 0)
+  }
+}
+
+@Test @MainActor func pendingContinuationIsCancelledByStopNewIntentOrAccountChange() async throws {
+  for replacement in 0..<3 {
+    let rig = PlaybackRig(arbiter: OperationArbiter(maximumConcurrentReads: 1))
+    await rig.transport.setSongURL(.success(makeResolvedAsset(songID: 101)))
+    await rig.play([101, 102])
+    let blocker = try #require(rig.arbiter.begin(name: "Busy", effect: .read))
+    rig.output.reportPlayedToEnd()
+    let pending = rig.playback.playTask
+    switch replacement {
+    case 0: rig.playback.stop()
+    case 1:
+      #expect(!rig.playback.play(
+        tracks: makeTracks([201]), startIndex: 0, context: .dailyRecommendations,
+        session: rig.session))
+    default:
+      rig.session.account = nil
+      rig.playback.stopForSessionChange()
+    }
+    rig.arbiter.end(blocker, outcome: .applied)
+    await pending?.value
+    #expect(await rig.transport.recordedCalls() == [.resolveSongURL(101, .standard)])
+    #expect(rig.playback.phase != .resolving)
+    #expect(rig.arbiter.activeReadCount == 0)
+  }
+}
+
+@Test @MainActor func continuationDeadlineRetainsTheNextTrackForExplicitRetry() async throws {
+  let rig = PlaybackRig(
+    arbiter: OperationArbiter(maximumConcurrentReads: 1), admissionTimeout: .milliseconds(10))
+  await rig.transport.setSongURL(.success(makeResolvedAsset(songID: 101)))
+  await rig.play([101, 102])
+  let blocker = try #require(rig.arbiter.begin(name: "Busy", effect: .read))
+  rig.output.reportPlayedToEnd()
+  await rig.playback.settleForTesting()
+  #expect(rig.playback.phase == .failed)
+  #expect(rig.playback.canPlayAgain)
+  #expect(rig.playback.attempt?.songID == 102)
+  rig.arbiter.end(blocker, outcome: .applied)
+  await rig.transport.setSongURL(.success(makeResolvedAsset(songID: 102)))
+  await rig.playAgain()
+  #expect(rig.playback.phase == .playing)
+  #expect(rig.playback.currentTrack?.id == 102)
 }
 
 @Test @MainActor func aFullReadCeilingDoesNotReplaceCurrentRemotePlayback() async throws {
@@ -434,13 +519,15 @@ private struct PlaybackRig {
     .success(makeResolvedAsset(songID: 101, urlString: "https://m8.music.126.net/old.mp3"))
   )
   rig.output.blockNextPrepare()
-  rig.playback.play(tracks: makeTracks([101]), startIndex: 0, context: .dailyRecommendations, session: rig.session)
+  rig.playback.play(
+    tracks: makeTracks([101]), startIndex: 0, context: .dailyRecommendations, session: rig.session)
   while !rig.output.prepareIsBlocked { await Task.yield() }
 
   await rig.transport.setSongURL(
     .success(makeResolvedAsset(songID: 202, urlString: "https://m8.music.126.net/new.mp3"))
   )
-  rig.playback.play(tracks: makeTracks([202]), startIndex: 0, context: .dailyRecommendations, session: rig.session)
+  rig.playback.play(
+    tracks: makeTracks([202]), startIndex: 0, context: .dailyRecommendations, session: rig.session)
   await rig.playback.settleForTesting()
   rig.output.resumeBlockedPrepare()
   await Task.yield()
@@ -512,18 +599,18 @@ private struct PlaybackRig {
 
   await rig.play()
 
-  #expect(await rig.transport.recordedCalls() == [
-    .resolveSongURL(101, .hires),
-    .resolveSongURL(101, .lossless),
-    .resolveSongURL(101, .exhigh),
-    .resolveSongURL(101, .higher),
-    .resolveSongURL(101, .standard),
-  ])
+  #expect(
+    await rig.transport.recordedCalls() == [
+      .resolveSongURL(101, .hires),
+      .resolveSongURL(101, .lossless),
+      .resolveSongURL(101, .exhigh),
+      .resolveSongURL(101, .higher),
+      .resolveSongURL(101, .standard),
+    ])
   #expect(rig.playback.quality == .hires)
   #expect(rig.playback.phase == .playing)
-  #expect(rig.playback.status.contains("requestedQuality=hires"))
-  #expect(rig.playback.status.contains("actualQuality=standard"))
-  #expect(rig.playback.status.contains("degraded=true"))
+  #expect(rig.playback.status.contains("requested Hi-Res"))
+  #expect(rig.playback.status.contains("Standard"))
   #expect(rig.arbiter.activeReadCount == 0)
 }
 
@@ -543,11 +630,12 @@ private struct PlaybackRig {
 
   await rig.play()
 
-  #expect(await rig.transport.recordedCalls() == [
-    .resolveSongURL(101, .lossless),
-    .resolveSongURL(101, .lossless),
-    .resolveSongURL(101, .exhigh),
-  ])
+  #expect(
+    await rig.transport.recordedCalls() == [
+      .resolveSongURL(101, .lossless),
+      .resolveSongURL(101, .lossless),
+      .resolveSongURL(101, .exhigh),
+    ])
   #expect(rig.playback.phase == .playing)
   #expect(rig.playback.quality == .lossless)
 }
@@ -579,13 +667,14 @@ private struct PlaybackRig {
 
   await rig.play([101, 202])
 
-  #expect(await rig.transport.recordedCalls() == [
-    .resolveSongURL(101, .higher),
-    .resolveSongURL(101, .standard),
-    .resolveSongURL(202, .higher),
-  ])
+  #expect(
+    await rig.transport.recordedCalls() == [
+      .resolveSongURL(101, .higher),
+      .resolveSongURL(101, .standard),
+      .resolveSongURL(202, .higher),
+    ])
   #expect(rig.playback.currentTrack?.id == 202)
-  #expect(rig.playback.status.contains("skipped=1"))
+  #expect(rig.playback.status.contains("Skipped 1"))
 }
 
 @Test @MainActor func repeatOneAndRepeatAllRecoveryCannotLoop() async {
@@ -596,9 +685,10 @@ private struct PlaybackRig {
     .success(.unavailable(itemCode: 404, fee: nil))
   )
   await repeatOne.play([101])
-  #expect(await repeatOne.transport.recordedCalls() == [
-    .resolveSongURL(101, .standard)
-  ])
+  #expect(
+    await repeatOne.transport.recordedCalls() == [
+      .resolveSongURL(101, .standard)
+    ])
   #expect(repeatOne.playback.phase == .failed)
 
   let repeatAll = PlaybackRig()
@@ -609,10 +699,11 @@ private struct PlaybackRig {
     .success(.unavailable(itemCode: 404, fee: nil)),
   ])
   await repeatAll.play([101, 202])
-  #expect(await repeatAll.transport.recordedCalls() == [
-    .resolveSongURL(101, .standard),
-    .resolveSongURL(202, .standard),
-  ])
+  #expect(
+    await repeatAll.transport.recordedCalls() == [
+      .resolveSongURL(101, .standard),
+      .resolveSongURL(202, .standard),
+    ])
   #expect(repeatAll.playback.phase == .failed)
   #expect(repeatAll.arbiter.activeReadCount == 0)
 }
@@ -661,9 +752,10 @@ private struct PlaybackRig {
   await rig.transport.gate.open()
   await rig.playback.settleForTesting()
 
-  #expect(await rig.transport.recordedCalls() == [
-    .resolveSongURL(101, .standard)
-  ])
+  #expect(
+    await rig.transport.recordedCalls() == [
+      .resolveSongURL(101, .standard)
+    ])
   #expect(rig.playback.queuedTracks(context: .personalFM).map(\.id) == [101, 202])
   #expect(rig.playback.currentTrack?.id == 101)
   #expect(rig.playback.phase == .failed)
@@ -697,9 +789,10 @@ private struct PlaybackRig {
   await rig.transport.gate.open()
   await rig.playback.settleForTesting()
 
-  #expect(await rig.transport.recordedCalls() == [
-    .resolveSongURL(101, .standard)
-  ])
+  #expect(
+    await rig.transport.recordedCalls() == [
+      .resolveSongURL(101, .standard)
+    ])
   #expect(rig.playback.persistedQueue()?.tracks.map(\.id) == [101, 202])
   #expect(rig.playback.currentTrack?.id == 101)
   #expect(rig.playback.phase == .failed)
@@ -740,12 +833,13 @@ private struct PlaybackRig {
   clock.now += 4
   playback.stop()
 
-  #expect(await transport.recordedCalls() == [
-    .resolveSongURL(101, .standard),
-    .resolveSongURL(101, .standard),
-  ])
+  #expect(
+    await transport.recordedCalls() == [
+      .resolveSongURL(101, .standard),
+      .resolveSongURL(101, .standard),
+    ])
   #expect(events.compactMap { if case .started = $0 { 1 } else { nil } }.count == 1)
-  guard case .finished(_, let seconds) = events.last else {
+  guard case .finished(_, let seconds, _) = events.last else {
     Issue.record("Expected one final lifecycle settlement")
     return
   }

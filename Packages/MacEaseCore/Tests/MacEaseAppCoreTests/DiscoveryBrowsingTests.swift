@@ -237,8 +237,7 @@ private struct BrowseRig {
 
 // MARK: - Radar
 
-/// The radar family is four separate playlists, so it is four requests, run in
-/// order and stopping at the first failure with whatever it already read.
+/// The four independent radar playlists load concurrently; each ID is read once.
 @Test @MainActor func radarReadsEachFixedPlaylistOnceAndKeepsPartialResults() async {
   let rig = BrowseRig()
   await rig.transport.setPlaylistBrief(
@@ -248,14 +247,15 @@ private struct BrowseRig {
   rig.discovery.loadRadarPlaylists(session: rig.session)
   await rig.settle()
 
-  #expect(
-    await rig.transport.recordedCalls()
-      == DiscoveryCoordinator.radarPlaylistIDs.map { .playlistBrief($0) }
-  )
+  let calls = await rig.transport.recordedCalls()
+  #expect(calls.count == DiscoveryCoordinator.radarPlaylistIDs.count)
+  for id in DiscoveryCoordinator.radarPlaylistIDs {
+    #expect(calls.filter { $0 == .playlistBrief(id) }.count == 1)
+  }
   #expect(rig.discovery.radarPlaylists.count == 4)
 }
 
-@Test @MainActor func radarStopsAtTheFirstFailure() async {
+@Test @MainActor func radarFailureDoesNotStopOtherPlaylists() async {
   let rig = BrowseRig()
   await rig.transport.setCatalogError(
     NeteaseServiceError(source: .http, statusCode: 500)
@@ -264,7 +264,7 @@ private struct BrowseRig {
   rig.discovery.loadRadarPlaylists(session: rig.session)
   await rig.settle()
 
-  #expect(await rig.transport.callCount() == 1)
+  #expect(await rig.transport.callCount() == 4)
   #expect(rig.discovery.radarPlaylists.isEmpty)
 }
 
@@ -367,7 +367,7 @@ private struct BrowseRig {
 }
 
 /// A read the arbiter refuses sends nothing and leaves what is on screen.
-@Test @MainActor func aRefusedBrowseReadKeepsTheOldPage() async {
+@Test @MainActor func aWaitingBrowseReadKeepsTheOldPageUntilItCanContinue() async {
   let rig = BrowseRig()
   await rig.transport.setBrowsePages([
     CatalogPage(items: makeDiscovered([1]), more: true)
@@ -376,10 +376,13 @@ private struct BrowseRig {
   await rig.settle()
 
   let blocking = try! #require(rig.arbiter.begin(name: "write", effect: .write))
+  await rig.transport.setBrowsePages([CatalogPage(items: makeDiscovered([2]), more: false)])
   rig.discovery.loadCategoryPlaylists(reset: false, session: rig.session)
-  await rig.settle()
+  await Task.yield()
 
   #expect(await rig.transport.callCount() == 1)
   #expect(rig.discovery.categoryPlaylists.map(\.id) == [1])
   rig.arbiter.end(blocking, outcome: .applied)
+  await rig.settle()
+  #expect(rig.discovery.categoryPlaylists.map(\.id) == [1, 2])
 }

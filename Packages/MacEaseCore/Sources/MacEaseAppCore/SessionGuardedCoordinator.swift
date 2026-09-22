@@ -25,6 +25,10 @@ extension SessionGuardedCoordinator {
     generation: Int,
     session: any SessionProviding
   ) async throws -> NeteaseCredential? {
+    guard session.isOnline else {
+      status = "Offline: connect to use your online library"
+      return nil
+    }
     guard let credential = try await vault.load() else {
       guard self.generation == generation else { return nil }
       session.reportDivergence(.storedSessionMissing)
@@ -53,8 +57,8 @@ extension SessionGuardedCoordinator {
     let storedCredential = try await vault.load()
     guard self.generation == generation else { return false }
     guard
-      storedCredential == credential,
-      session.matchesValidatedSession(credential, account: account)
+      let storedCredential,
+      session.matchesValidatedSession(storedCredential, account: account)
     else {
       session.reportDivergence(
         .storedSessionChanged(hasStoredItem: storedCredential != nil)
@@ -93,7 +97,7 @@ package func claimSessionOperation(
   guard !isLoading, let token = arbiter.begin(name: name, effect: effect) else {
     return nil
   }
-  guard let account = session.account else {
+  guard let account = session.account, session.isOnline else {
     arbiter.end(token, outcome: .failed)
     status = noAccountStatus
     return nil
@@ -126,11 +130,18 @@ package func finishSessionOperation(
   task = nil
 }
 
-extension NeteaseServiceError {
+extension Error {
   /// An application response or a non-5xx HTTP response proves a write did
   /// not run. A 5xx may have arrived after the server applied it.
   package var provesWriteDidNotRun: Bool {
-    guard source == .http else { return true }
-    return !(500...599).contains(statusCode)
+    if self is NeteaseWritePreparationError { return true }
+    if let upload = self as? NeteaseUploadError {
+      switch upload {
+      case .beforePublication, .invalidFile, .notImportable: return true
+      case .invalidResponse: return false
+      }
+    }
+    guard let service = self as? NeteaseServiceError else { return false }
+    return service.source == .service || !(500...599).contains(service.statusCode)
   }
 }

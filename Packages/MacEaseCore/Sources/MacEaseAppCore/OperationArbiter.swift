@@ -1,4 +1,5 @@
 import Foundation
+import OSLog
 import Observation
 
 /// What a NetEase request does to server state. Effects are not
@@ -7,12 +8,16 @@ import Observation
 package enum OperationEffect: Equatable, Sendable {
   case read
   case write
-  /// Automatic listening feedback. It is still a server write with unknown
-  /// outcome semantics, but may overlap reads that were already admitted.
-  /// New work remains blocked while it owns the exclusive slot.
+  /// Long file uploads keep identity and other writes stable while independent reads continue.
+  case upload
+  /// Listening feedback serializes with writes and identity changes, while independent reads continue.
   case feedback
   case sessionMutation
+  /// Same-account credential renewal runs alongside browsing and playback.
+  case sessionRefresh
   case playbackResolution
+  /// A local credential check bypasses the network ceiling but excludes identity mutation.
+  case localSessionAccess
 }
 
 /// How far an operation has got. Only `preparing` is safe to abandon.
@@ -92,11 +97,9 @@ package struct UnresolvedOutcome: Equatable, Identifiable, Sendable {
 ///
 /// Rules enforced here:
 /// - writes, feedback and session mutations are mutually exclusive;
-/// - reads and playback resolution may run together, but cannot start while an
-///   exclusive operation is active, and never exceed a fixed ceiling;
-/// - feedback may start alongside reads already in flight, because a remote
-///   track transition necessarily owns its next song-URL read before the old
-///   listening instance can settle; it still blocks every new operation;
+/// - network reads share a fixed ceiling and may overlap writes and same-account renewal;
+/// - identity replacement waits for active reads to finish;
+/// - local credential reads do not spend that network budget;
 /// - local playback actions (pause, seek, volume) never claim it;
 /// - a read may be abandoned freely;
 /// - a write that has been sent is never silently dropped: abandoning it
@@ -108,17 +111,27 @@ package struct UnresolvedOutcome: Equatable, Identifiable, Sendable {
 @MainActor
 @Observable
 package final class OperationArbiter {
-  /// The most reads MacEase keeps in flight at once. Concurrency exists so an
-  /// independent read does not wait behind an unrelated one, not so the app can
-  /// fan out: a composite search is four requests on its own, and without a
-  /// ceiling a future feature could turn one user action into a burst that
-  /// looks nothing like a person using a music client.
+  /// Bounds concurrent user operations. Each operation can run a small group
+  /// of independent requests; URLSession manages connections and multiplexing.
   package static let defaultMaximumConcurrentReads = 6
 
   package private(set) var active: ActiveOperation?
   package private(set) var unresolvedOutcomes: [UnresolvedOutcome] = []
+  package private(set) var writeRevision = 0
+  private static let logger = Logger(subsystem: "com.macease.app", category: "Operations")
+  private var started: [UUID: (name: String, time: ContinuousClock.Instant)] = [:]
   private var activeReadTokens: Set<UUID> = []
+  private var activeLocalTokens: Set<UUID> = []
   private let maximumConcurrentReads: Int
+  private struct Waiter {
+    let id: UUID
+    let name: String
+    let effect: OperationEffect
+    let continuation: CheckedContinuation<OperationToken?, Never>
+    let timeout: Task<Void, Never>
+    let queuedAt: ContinuousClock.Instant
+  }
+  @ObservationIgnored private var waiters: [Waiter] = []
 
   package init(maximumConcurrentReads: Int = defaultMaximumConcurrentReads) {
     // A ceiling below one would refuse every read; clamp rather than trap,
@@ -135,28 +148,133 @@ package final class OperationArbiter {
   /// True when no write or session mutation owns the exclusive slot.
   package func canStart() -> Bool { active == nil }
 
-  /// Claims an operation. Reads share the read side up to the ceiling, while a
-  /// write or session mutation requires both the read side and the exclusive
-  /// slot to be free.
+  /// Browsing and playback share bounded read capacity. Ordinary writes and
+  /// renewal may overlap reads; only replacing identity drains the read side.
   package func canBegin(effect: OperationEffect) -> Bool {
-    if effect == .write || effect == .sessionMutation {
-      return active == nil && activeReadTokens.isEmpty
+    canAdmit(effect: effect) && !waiters.contains { $0.effect.blocksFollowing(effect) }
+  }
+
+  private func canAdmit(effect: OperationEffect) -> Bool {
+    if effect == .sessionMutation {
+      return active == nil && activeReadTokens.isEmpty && activeLocalTokens.isEmpty
     }
-    if effect == .feedback { return active == nil }
-    return active == nil && activeReadTokens.count < maximumConcurrentReads
+    if effect == .write || effect == .feedback || effect == .upload || effect == .sessionRefresh {
+      return active == nil
+    }
+    if effect == .playbackResolution {
+      return active?.effect != .sessionMutation && activeReadTokens.count < maximumConcurrentReads
+    }
+    if effect == .localSessionAccess {
+      return active?.effect != .sessionMutation
+    }
+    return active?.effect != .sessionMutation && activeReadTokens.count < maximumConcurrentReads
   }
 
   package func begin(name: String, effect: OperationEffect) -> OperationToken? {
+    guard canBegin(effect: effect) else { return nil }
+    return admit(name: name, effect: effect)
+  }
+
+  private func admit(name: String, effect: OperationEffect) -> OperationToken {
     let id = UUID()
-    guard effect == .write || effect == .feedback || effect == .sessionMutation
+    started[id] = (name, .now)
+    Self.logger.info(
+      "id=\(id.uuidString, privacy: .public) phase=start operation=\(name, privacy: .public) effect=\(String(describing: effect), privacy: .public)"
+    )
+    if effect == .write || effect == .upload { writeRevision += 1 }
+    guard
+      effect == .write || effect == .upload || effect == .feedback || effect == .sessionMutation
+        || effect == .sessionRefresh
     else {
-      guard canBegin(effect: effect) else { return nil }
-      activeReadTokens.insert(id)
+      if effect == .localSessionAccess {
+        activeLocalTokens.insert(id)
+      } else {
+        activeReadTokens.insert(id)
+      }
       return OperationToken(id: id, kind: .read)
     }
-    guard canBegin(effect: effect) else { return nil }
     active = ActiveOperation(id: id, name: name, effect: effect, phase: .preparing)
     return OperationToken(id: id, kind: .exclusive)
+  }
+
+  /// Transfers an admitted metadata read to playback without a free-slot gap.
+  package func transferRead(_ token: OperationToken) -> OperationToken? {
+    guard token.kind == .read, active?.effect != .sessionMutation,
+      activeReadTokens.remove(token.id) != nil
+    else { return nil }
+    let next = OperationToken(id: UUID(), kind: .read)
+    started[next.id] = started.removeValue(forKey: token.id) ?? ("Playback", .now)
+    activeReadTokens.insert(next.id)
+    return next
+  }
+
+  /// Waits only before sending a request. Cancellation and the deadline release
+  /// the intent; neither path retries a request that has already been sent.
+  package func beginWhenAvailable(
+    name: String,
+    effect: OperationEffect,
+    timeout: Duration = .seconds(30)
+  ) async -> OperationToken? {
+    let id = UUID()
+    return await withTaskCancellationHandler {
+      await withCheckedContinuation { continuation in
+        guard !Task.isCancelled else {
+          continuation.resume(returning: nil)
+          return
+        }
+        if let token = begin(name: name, effect: effect) {
+          continuation.resume(returning: token)
+          return
+        }
+        guard waiters.count < 64 else {
+          continuation.resume(returning: nil)
+          return
+        }
+        let deadline = Task { [weak self] in
+          do { try await Task.sleep(for: timeout) } catch { return }
+          self?.cancelWaiter(id)
+        }
+        waiters.append(
+          Waiter(
+            id: id, name: name, effect: effect,
+            continuation: continuation, timeout: deadline, queuedAt: .now
+          ))
+      }
+    } onCancel: {
+      Task { @MainActor [weak self] in self?.cancelWaiter(id) }
+    }
+  }
+
+  private func cancelWaiter(_ id: UUID) {
+    guard let index = waiters.firstIndex(where: { $0.id == id }) else { return }
+    let waiter = waiters.remove(at: index)
+    waiter.timeout.cancel()
+    waiter.continuation.resume(returning: nil)
+    admitWaiters()
+  }
+
+  private func admitWaiters() {
+    var index = 0
+    while index < waiters.count {
+      let waiter = waiters[index]
+      // FIFO for competing resources, while independent reads may pass a
+      // feedback operation waiting for an upload. Only a queued identity
+      // change reserves the drain so later reads cannot starve it.
+      guard canAdmit(effect: waiter.effect),
+        !waiters[..<index].contains(where: { $0.effect.blocksFollowing(waiter.effect) })
+      else {
+        index += 1
+        continue
+      }
+      let wait = waiter.queuedAt.duration(to: .now)
+      let token = admit(name: waiter.name, effect: waiter.effect)
+      Self.logger.info(
+        "id=\(token.id.uuidString, privacy: .public) phase=admitted queue_ms=\(Self.milliseconds(wait), privacy: .public)"
+      )
+      waiters.remove(at: index)
+      waiter.timeout.cancel()
+      waiter.continuation.resume(returning: token)
+    }
   }
 
   /// Turns an active read into a session mutation without exposing a gap in
@@ -231,7 +349,10 @@ package final class OperationArbiter {
     outcome: OperationOutcome
   ) -> OperationOutcome? {
     if token.kind == .read {
-      guard activeReadTokens.remove(token.id) != nil else { return nil }
+      guard activeReadTokens.remove(token.id) != nil || activeLocalTokens.remove(token.id) != nil
+      else { return nil }
+      recordCompletion(token, outcome: outcome)
+      admitWaiters()
       return outcome
     }
     guard let operation = active, operation.id == token.id else { return nil }
@@ -241,8 +362,22 @@ package final class OperationArbiter {
         UnresolvedOutcome(id: operation.id, name: operation.name, kind: kind)
       )
     }
+    if operation.effect == .write || operation.effect == .upload { writeRevision += 1 }
+    recordCompletion(token, outcome: resolved)
     active = nil
+    admitWaiters()
     return resolved
+  }
+
+  private func recordCompletion(_ token: OperationToken, outcome: OperationOutcome) {
+    guard let start = started.removeValue(forKey: token.id) else { return }
+    Self.logger.info(
+      "id=\(token.id.uuidString, privacy: .public) phase=complete operation=\(start.name, privacy: .public) operation_ms=\(Self.milliseconds(start.time.duration(to: .now)), privacy: .public) outcome=\(String(describing: outcome), privacy: .public)"
+    )
+  }
+
+  private static func milliseconds(_ duration: Duration) -> Double {
+    Double(duration.components.seconds) * 1000 + Double(duration.components.attoseconds) / 1e15
   }
 
   /// The user acknowledged that they have checked the account themselves.
@@ -273,8 +408,22 @@ package final class OperationArbiter {
 }
 
 extension OperationEffect {
+  fileprivate func blocksFollowing(_ later: OperationEffect) -> Bool {
+    switch self {
+    case .sessionMutation:
+      true
+    case .write, .upload, .feedback, .sessionRefresh:
+      later == .write || later == .sessionMutation || later == .upload || later == .feedback
+        || later == .sessionRefresh
+    case .read, .playbackResolution:
+      later == .read || later == .playbackResolution || later == .sessionMutation
+    case .localSessionAccess:
+      later == .sessionMutation
+    }
+  }
+
   fileprivate var isServerWrite: Bool {
-    self == .write || self == .feedback
+    self == .write || self == .upload || self == .feedback
   }
 }
 

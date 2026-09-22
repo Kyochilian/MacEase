@@ -12,8 +12,13 @@ package enum NeteaseResourceHost {
   /// `p1..p4.music.126.net`, which this covers without naming each shard.
   package static func isApproved(_ host: String) -> Bool {
     let host = host.lowercased()
-    return host == "music.126.net" || host.hasSuffix(".music.126.net")
+    return isAudioCDN(host)
       || host == "music.163.com" || host.hasSuffix(".music.163.com")
+  }
+
+  package static func isAudioCDN(_ host: String) -> Bool {
+    let host = host.lowercased()
+    return host == "music.126.net" || host.hasSuffix(".music.126.net")
   }
 }
 
@@ -39,6 +44,24 @@ package enum NeteaseArtworkURL {
     var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
     components?.scheme = "https"
     return components?.url
+  }
+
+  /// The same image scaled server-side to a `pixels` × `pixels` square.
+  ///
+  /// The image CDN resizes on a `param=WxH` query, which api-enhanced
+  /// d55d92cd0031d7c7746b7068faecd7ade1d354ac uses in `public/ugc.html`
+  /// (`?param=50y50`, `?param=100y100`) and strips in
+  /// `module/related_playlist.js`. Without it every cover is the original
+  /// upload, commonly a megabyte or more for a row drawn at 36 points.
+  /// Any `param` already present is replaced so one image has one address per size.
+  package static func sized(_ url: URL, pixels: Int) -> URL {
+    guard pixels > 0,
+      var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+    else { return url }
+    var items = (components.queryItems ?? []).filter { $0.name != "param" }
+    items.append(URLQueryItem(name: "param", value: "\(pixels)y\(pixels)"))
+    components.queryItems = items
+    return components.url ?? url
   }
 }
 
@@ -82,7 +105,9 @@ package struct AlbumRef: Equatable, Hashable, Sendable, Codable {
 /// rather than what it is: search results, daily recommendations, similar
 /// songs, listening rankings and the cloud drive all produce the same thing.
 package struct Track: Equatable, Hashable, Sendable, Codable, Identifiable {
-  package let id: Int64
+  package var id: Int64
+  package var cloudFileID: Int64?
+  package var catalogSongID: Int64?
   package let name: String
   package let artists: [ArtistRef]
   package let album: AlbumRef?
@@ -90,22 +115,52 @@ package struct Track: Equatable, Hashable, Sendable, Codable, Identifiable {
   /// duration from the decoded asset; this is what a list can show before
   /// anything has been resolved.
   package let durationMilliseconds: Int?
+  package let aliases: [String]?
+  package let translations: [String]?
+  package let disc: String?
+  package let trackNumber: Int?
+  package let fee: Int?
+  package var privilege: SongPrivilege?
 
   package init(
     id: Int64,
     name: String,
     artists: [ArtistRef] = [],
     album: AlbumRef? = nil,
-    durationMilliseconds: Int? = nil
+    durationMilliseconds: Int? = nil,
+    cloudFileID: Int64? = nil,
+    catalogSongID: Int64? = nil,
+    aliases: [String]? = nil,
+    translations: [String]? = nil,
+    disc: String? = nil,
+    trackNumber: Int? = nil,
+    fee: Int? = nil,
+    privilege: SongPrivilege? = nil
   ) {
     self.id = id
     self.name = name
     self.artists = artists
     self.album = album
     self.durationMilliseconds = durationMilliseconds
+    self.cloudFileID = cloudFileID
+    self.catalogSongID = catalogSongID
+    self.aliases = aliases
+    self.translations = translations
+    self.disc = disc
+    self.trackNumber = trackNumber
+    self.fee = fee
+    self.privilege = privilege
   }
 
   package var artistNames: [String] { artists.map(\.name) }
+
+  /// Public catalog actions use the matched song, while playback/downloads
+  /// retain the cloud file ID. An unmatched upload has no catalog identity.
+  package var catalogIdentity: Int64? {
+    let candidate = cloudFileID == nil ? id : catalogSongID
+    guard let candidate, candidate > 0 else { return nil }
+    return candidate
+  }
 
   /// The one place artist names are joined for display, so the separator does
   /// not drift between the track list, Now Playing and the lyrics header.
@@ -114,10 +169,30 @@ package struct Track: Equatable, Hashable, Sendable, Codable, Identifiable {
   }
 
   package var artworkURL: URL? { album?.artworkURL }
+  package var playbackNotice: String? {
+    if cloudFileID != nil { return nil }
+    if let status = privilege?.status, status < 0 { return "Currently unavailable" }
+    if privilege?.playBitRate == 0 { return "Playback may be limited to a preview" }
+    if let rate = privilege?.playBitRate, rate > 0 { return nil }
+    if let fee, fee == 1 || fee == 8 { return "Membership may be required" }
+    if fee == 4 { return "Album purchase may be required" }
+    return nil
+  }
 
   package var durationSeconds: Double? {
     guard let durationMilliseconds, durationMilliseconds > 0 else { return nil }
     return Double(durationMilliseconds) / 1000
+  }
+}
+
+package struct SongPrivilege: Equatable, Hashable, Sendable, Codable {
+  package let status: Int?
+  package let playBitRate: Int?
+  package let downloadBitRate: Int?
+  package init(status: Int?, playBitRate: Int?, downloadBitRate: Int?) {
+    self.status = status
+    self.playBitRate = playBitRate
+    self.downloadBitRate = downloadBitRate
   }
 }
 
@@ -127,20 +202,29 @@ package struct Album: Equatable, Sendable, Codable, Identifiable {
   package let name: String
   package let artists: [ArtistRef]
   package let artworkURL: URL?
-  package let trackCount: Int
+  package var trackCount: Int
+  package let description: String?
+  package let releaseDate: Date?
+  package let company: String?
 
   package init(
     id: Int64,
     name: String,
     artists: [ArtistRef],
     artworkURL: URL?,
-    trackCount: Int
+    trackCount: Int,
+    description: String? = nil,
+    releaseDate: Date? = nil,
+    company: String? = nil
   ) {
     self.id = id
     self.name = name
     self.artists = artists
     self.artworkURL = artworkURL
     self.trackCount = trackCount
+    self.description = description
+    self.releaseDate = releaseDate
+    self.company = company
   }
 
   package var artistDisplayName: String? {
@@ -155,19 +239,22 @@ package struct Artist: Equatable, Sendable, Codable, Identifiable {
   package let artworkURL: URL?
   package let albumCount: Int
   package let songCount: Int
+  package let biography: String?
 
   package init(
     id: Int64,
     name: String,
     artworkURL: URL?,
     albumCount: Int,
-    songCount: Int
+    songCount: Int,
+    biography: String? = nil
   ) {
     self.id = id
     self.name = name
     self.artworkURL = artworkURL
     self.albumCount = albumCount
     self.songCount = songCount
+    self.biography = biography
   }
 }
 
@@ -231,32 +318,8 @@ package struct CloudPage: Equatable, Sendable {
 
 // MARK: - Browsing the catalogue
 
-/// The playlist tags `/playlist/list` and `/playlist/highquality/list` accept.
-///
-/// These are inputs, not data: `api-enhanced@a7e8d48` documents the accepted
-/// `cat` values inline in `module/top_playlist.js` and
-/// `module/top_playlist_highquality.js`. There is a `/playlist/catalogue`
-/// endpoint that returns them, but neither authority records its response
-/// container, so MacEase does not send a request whose answer it would have to
-/// guess at — it sends the tags the authority already documents.
 package enum PlaylistCategory {
   package static let `default` = "全部"
-
-  /// The subset MacEase offers for browsing. The full list the endpoint
-  /// accepts is longer; these are the language, genre and mood tags a listener
-  /// picks from, which is what the browse picker is for.
-  package static let browsable = [
-    "全部", "华语", "欧美", "日语", "韩语", "粤语",
-    "流行", "摇滚", "民谣", "电子", "说唱", "轻音乐", "爵士", "古典", "古风",
-    "影视原声", "ACG", "怀旧", "治愈", "放松", "伤感", "快乐",
-    "学习", "工作", "运动", "驾车", "夜晚",
-  ]
-
-  /// `/playlist/highquality/list` accepts a smaller set than `/playlist/list`.
-  package static let highQuality = [
-    "全部", "华语", "欧美", "韩语", "日语", "粤语", "运动", "ACG", "影视原声",
-    "流行", "摇滚", "古风", "民谣", "轻音乐", "电子", "说唱", "古典", "爵士",
-  ]
 }
 
 /// The order `/playlist/list` sorts a category by.

@@ -60,14 +60,15 @@ extension NeteaseSession {
     offset: Int = 0,
     credential: NeteaseCredential
   ) async throws -> CatalogPage<DiscoveredPlaylist> {
-    let request = try Self.categoryPlaylistsRequest(
-      category: category,
-      order: order,
-      limit: limit,
-      offset: offset,
-      credential: credential
-    )
-    let (data, response) = try await urlSession.data(for: request)
+    let (data, response) = try await send(credential: credential) { nmtid in
+      try Self.categoryPlaylistsRequest(
+        category: category,
+        order: order,
+        limit: limit,
+        offset: offset,
+        credential: credential
+      )
+    }
     return try Self.classifyCategoryPlaylists(
       data: data,
       response: try Self.requireHTTPResponse(response),
@@ -81,13 +82,14 @@ extension NeteaseSession {
     before: Int64 = 0,
     credential: NeteaseCredential
   ) async throws -> HighQualityPlaylistPage {
-    let request = try Self.highQualityPlaylistsRequest(
-      category: category,
-      limit: limit,
-      before: before,
-      credential: credential
-    )
-    let (data, response) = try await urlSession.data(for: request)
+    let (data, response) = try await send(credential: credential) { nmtid in
+      try Self.highQualityPlaylistsRequest(
+        category: category,
+        limit: limit,
+        before: before,
+        credential: credential
+      )
+    }
     return try Self.classifyHighQualityPlaylists(
       data: data,
       response: try Self.requireHTTPResponse(response),
@@ -108,14 +110,16 @@ extension NeteaseSession {
     credential: NeteaseCredential
   ) async throws -> DiscoveredPlaylist {
     let timestamp = Date().timeIntervalSince1970
-    let request = try Self.playlistBriefRequest(
-      playlistID: playlistID,
-      credential: credential,
-      osVersion: Self.osVersion,
-      buildVersion: String(Int(timestamp)),
-      requestID: Self.requestID(timestamp: timestamp)
-    )
-    let (data, response) = try await urlSession.data(for: request)
+    let (data, response) = try await send(credential: credential) { nmtid in
+      try Self.playlistBriefRequest(
+        playlistID: playlistID,
+        credential: credential,
+        osVersion: Self.osVersion,
+        buildVersion: String(Int(timestamp)),
+        requestID: Self.requestID(timestamp: timestamp),
+        nmtid: nmtid
+      )
+    }
     return try Self.classifyPlaylistBrief(
       data: data,
       response: try Self.requireHTTPResponse(response),
@@ -127,11 +131,12 @@ extension NeteaseSession {
     limit: Int = 10,
     credential: NeteaseCredential
   ) async throws -> [Track] {
-    let request = try Self.recommendedNewSongsRequest(
-      limit: limit,
-      credential: credential
-    )
-    let (data, response) = try await urlSession.data(for: request)
+    let (data, response) = try await send(credential: credential) { nmtid in
+      try Self.recommendedNewSongsRequest(
+        limit: limit,
+        credential: credential
+      )
+    }
     return try Self.classifyRecommendedNewSongs(
       data: data,
       response: try Self.requireHTTPResponse(response)
@@ -218,13 +223,15 @@ extension NeteaseSession {
     credential: NeteaseCredential,
     osVersion: String,
     buildVersion: String,
-    requestID: String
+    requestID: String,
+    nmtid: String? = nil
   ) throws -> URLRequest {
     let headerFields = eapiHeaderFields(
       credential: credential,
       osVersion: osVersion,
       buildVersion: buildVersion,
-      requestID: requestID
+      requestID: requestID,
+      nmtid: nmtid
     )
     let json =
       #"{"id":\#(playlistID),"n":1,"s":0,"e_r":false,"#
@@ -283,8 +290,9 @@ extension NeteaseSession {
   package func personalFM(
     credential: NeteaseCredential
   ) async throws -> [Track] {
-    let request = try Self.personalFMRequest(credential: credential)
-    let (data, response) = try await urlSession.data(for: request)
+    let (data, response) = try await send(credential: credential) { nmtid in
+      try Self.personalFMRequest(credential: credential)
+    }
     return try Self.classifyPersonalFM(
       data: data,
       response: try Self.requireHTTPResponse(response)
@@ -297,8 +305,9 @@ extension NeteaseSession {
     songID: Int64,
     credential: NeteaseCredential
   ) async throws {
-    let request = try Self.fmTrashRequest(songID: songID, credential: credential)
-    let (data, response) = try await urlSession.data(for: request)
+    let (data, response) = try await send(credential: credential) { nmtid in
+      try Self.fmTrashRequest(songID: songID, credential: credential)
+    }
     try Self.requireSuccess(
       data: data,
       response: try Self.requireHTTPResponse(response)
@@ -315,16 +324,18 @@ extension NeteaseSession {
     credential: NeteaseCredential
   ) async throws -> [Track] {
     let timestamp = Date().timeIntervalSince1970
-    let request = try Self.heartbeatQueueRequest(
-      songID: songID,
-      playlistID: playlistID,
-      startMusicID: startMusicID,
-      credential: credential,
-      osVersion: Self.osVersion,
-      buildVersion: String(Int(timestamp)),
-      requestID: Self.requestID(timestamp: timestamp)
-    )
-    let (data, response) = try await urlSession.data(for: request)
+    let (data, response) = try await send(credential: credential) { nmtid in
+      try Self.heartbeatQueueRequest(
+        songID: songID,
+        playlistID: playlistID,
+        startMusicID: startMusicID,
+        credential: credential,
+        osVersion: Self.osVersion,
+        buildVersion: String(Int(timestamp)),
+        requestID: Self.requestID(timestamp: timestamp),
+        nmtid: nmtid
+      )
+    }
     return try Self.classifyHeartbeatQueue(
       data: data,
       response: try Self.requireHTTPResponse(response)
@@ -378,13 +389,15 @@ extension NeteaseSession {
     credential: NeteaseCredential,
     osVersion: String,
     buildVersion: String,
-    requestID: String
+    requestID: String,
+    nmtid: String? = nil
   ) throws -> URLRequest {
     let headerFields = eapiHeaderFields(
       credential: credential,
       osVersion: osVersion,
       buildVersion: buildVersion,
-      requestID: requestID
+      requestID: requestID,
+      nmtid: nmtid
     )
     let json =
       #"{"songId":\#(songID),"type":"fromPlayOne","playlistId":\#(playlistID),"#
@@ -414,11 +427,12 @@ extension NeteaseSession {
     artistID: Int64,
     credential: NeteaseCredential
   ) async throws -> [Artist] {
-    let request = try Self.similarArtistsRequest(
-      artistID: artistID,
-      credential: credential
-    )
-    let (data, response) = try await urlSession.data(for: request)
+    let (data, response) = try await send(credential: credential) { nmtid in
+      try Self.similarArtistsRequest(
+        artistID: artistID,
+        credential: credential
+      )
+    }
     return try Self.classifySimilarArtists(
       data: data,
       response: try Self.requireHTTPResponse(response)
@@ -461,17 +475,19 @@ extension NeteaseSession {
     credential: NeteaseCredential
   ) async throws -> SearchPage {
     let timestamp = Date().timeIntervalSince1970
-    let request = try Self.searchRequest(
-      keywords: keywords,
-      scope: scope,
-      limit: limit,
-      offset: offset,
-      credential: credential,
-      osVersion: Self.osVersion,
-      buildVersion: String(Int(timestamp)),
-      requestID: Self.requestID(timestamp: timestamp)
-    )
-    let (data, response) = try await urlSession.data(for: request)
+    let (data, response) = try await send(credential: credential) { nmtid in
+      try Self.searchRequest(
+        keywords: keywords,
+        scope: scope,
+        limit: limit,
+        offset: offset,
+        credential: credential,
+        osVersion: Self.osVersion,
+        buildVersion: String(Int(timestamp)),
+        requestID: Self.requestID(timestamp: timestamp),
+        nmtid: nmtid
+      )
+    }
     return try Self.classifySearch(
       data: data,
       response: try Self.requireHTTPResponse(response),
@@ -483,11 +499,12 @@ extension NeteaseSession {
     keywords: String,
     credential: NeteaseCredential
   ) async throws -> [SearchSuggestion] {
-    let request = try Self.searchSuggestionsRequest(
-      keywords: keywords,
-      credential: credential
-    )
-    let (data, response) = try await urlSession.data(for: request)
+    let (data, response) = try await send(credential: credential) { nmtid in
+      try Self.searchSuggestionsRequest(
+        keywords: keywords,
+        credential: credential
+      )
+    }
     return try Self.classifySearchSuggestions(
       data: data,
       response: try Self.requireHTTPResponse(response)
@@ -500,13 +517,15 @@ extension NeteaseSession {
     credential: NeteaseCredential
   ) async throws -> String? {
     let timestamp = Date().timeIntervalSince1970
-    let request = try Self.defaultSearchKeywordRequest(
-      credential: credential,
-      osVersion: Self.osVersion,
-      buildVersion: String(Int(timestamp)),
-      requestID: Self.requestID(timestamp: timestamp)
-    )
-    let (data, response) = try await urlSession.data(for: request)
+    let (data, response) = try await send(credential: credential) { nmtid in
+      try Self.defaultSearchKeywordRequest(
+        credential: credential,
+        osVersion: Self.osVersion,
+        buildVersion: String(Int(timestamp)),
+        requestID: Self.requestID(timestamp: timestamp),
+        nmtid: nmtid
+      )
+    }
     return try Self.classifyDefaultSearchKeyword(
       data: data,
       response: try Self.requireHTTPResponse(response)
@@ -521,13 +540,15 @@ extension NeteaseSession {
     credential: NeteaseCredential,
     osVersion: String,
     buildVersion: String,
-    requestID: String
+    requestID: String,
+    nmtid: String? = nil
   ) throws -> URLRequest {
     let headerFields = eapiHeaderFields(
       credential: credential,
       osVersion: osVersion,
       buildVersion: buildVersion,
-      requestID: requestID
+      requestID: requestID,
+      nmtid: nmtid
     )
     let json =
       #"{"s":\#(try jsonString(keywords)),"type":\#(scope.rawValue),"#
@@ -631,13 +652,15 @@ extension NeteaseSession {
     credential: NeteaseCredential,
     osVersion: String,
     buildVersion: String,
-    requestID: String
+    requestID: String,
+    nmtid: String? = nil
   ) throws -> URLRequest {
     let headerFields = eapiHeaderFields(
       credential: credential,
       osVersion: osVersion,
       buildVersion: buildVersion,
-      requestID: requestID
+      requestID: requestID,
+      nmtid: nmtid
     )
     let json =
       #"{"e_r":false,"header":\#(try eapiHeaderJSON(headerFields))}"#
@@ -667,11 +690,12 @@ extension NeteaseSession {
     albumID: Int64,
     credential: NeteaseCredential
   ) async throws -> AlbumDetail {
-    let request = try Self.albumDetailRequest(
-      albumID: albumID,
-      credential: credential
-    )
-    let (data, response) = try await urlSession.data(for: request)
+    let (data, response) = try await send(credential: credential) { nmtid in
+      try Self.albumDetailRequest(
+        albumID: albumID,
+        credential: credential
+      )
+    }
     return try Self.classifyAlbumDetail(
       data: data,
       response: try Self.requireHTTPResponse(response),
@@ -683,11 +707,12 @@ extension NeteaseSession {
     albumID: Int64,
     credential: NeteaseCredential
   ) async throws -> AlbumDynamic {
-    let request = try Self.albumDynamicRequest(
-      albumID: albumID,
-      credential: credential
-    )
-    let (data, response) = try await urlSession.data(for: request)
+    let (data, response) = try await send(credential: credential) { nmtid in
+      try Self.albumDynamicRequest(
+        albumID: albumID,
+        credential: credential
+      )
+    }
     return try Self.classifyAlbumDynamic(
       data: data,
       response: try Self.requireHTTPResponse(response)
@@ -700,13 +725,14 @@ extension NeteaseSession {
     offset: Int = 0,
     credential: NeteaseCredential
   ) async throws -> CatalogPage<Album> {
-    let request = try Self.newAlbumsRequest(
-      area: area,
-      limit: limit,
-      offset: offset,
-      credential: credential
-    )
-    let (data, response) = try await urlSession.data(for: request)
+    let (data, response) = try await send(credential: credential) { nmtid in
+      try Self.newAlbumsRequest(
+        area: area,
+        limit: limit,
+        offset: offset,
+        credential: credential
+      )
+    }
     return try Self.classifyNewAlbums(
       data: data,
       response: try Self.requireHTTPResponse(response),
@@ -744,17 +770,10 @@ extension NeteaseSession {
       throw NeteaseCatalogError.invalidResponse
     }
     let tracks = (payload.songs ?? []).map(\.track)
-    let album = payload.album.album
+    var album = payload.album.album
+    if album.trackCount == 0 { album.trackCount = tracks.count }
     return AlbumDetail(
-      album: Album(
-        id: album.id,
-        name: album.name,
-        artists: album.artists,
-        artworkURL: album.artworkURL,
-        // The header's own count is missing on some rows; the track list that
-        // arrived with it is then the honest number.
-        trackCount: album.trackCount > 0 ? album.trackCount : tracks.count
-      ),
+      album: album,
       tracks: tracks
     )
   }
@@ -824,11 +843,12 @@ extension NeteaseSession {
     artistID: Int64,
     credential: NeteaseCredential
   ) async throws -> ArtistDetail {
-    let request = try Self.artistDetailRequest(
-      artistID: artistID,
-      credential: credential
-    )
-    let (data, response) = try await urlSession.data(for: request)
+    let (data, response) = try await send(credential: credential) { nmtid in
+      try Self.artistDetailRequest(
+        artistID: artistID,
+        credential: credential
+      )
+    }
     return try Self.classifyArtistDetail(
       data: data,
       response: try Self.requireHTTPResponse(response),
@@ -842,13 +862,14 @@ extension NeteaseSession {
     offset: Int = 0,
     credential: NeteaseCredential
   ) async throws -> CatalogPage<Album> {
-    let request = try Self.artistAlbumsRequest(
-      artistID: artistID,
-      limit: limit,
-      offset: offset,
-      credential: credential
-    )
-    let (data, response) = try await urlSession.data(for: request)
+    let (data, response) = try await send(credential: credential) { nmtid in
+      try Self.artistAlbumsRequest(
+        artistID: artistID,
+        limit: limit,
+        offset: offset,
+        credential: credential
+      )
+    }
     return try Self.classifyArtistAlbums(
       data: data,
       response: try Self.requireHTTPResponse(response),
@@ -859,8 +880,9 @@ extension NeteaseSession {
   package func topArtists(
     credential: NeteaseCredential
   ) async throws -> CatalogPage<Artist> {
-    let request = try Self.topArtistsRequest(credential: credential)
-    let (data, response) = try await urlSession.data(for: request)
+    let (data, response) = try await send(credential: credential) { nmtid in
+      try Self.topArtistsRequest(credential: credential)
+    }
     return try Self.classifyTopArtists(
       data: data,
       response: try Self.requireHTTPResponse(response)

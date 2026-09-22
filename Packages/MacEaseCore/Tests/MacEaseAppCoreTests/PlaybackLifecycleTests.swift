@@ -101,7 +101,7 @@ private final class EventBox {
   rig.playback.stop()
 
   #expect(rig.events.values.count == 2)
-  guard case .finished(_, let seconds) = rig.events.values.last else {
+  guard case .finished(_, let seconds, _) = rig.events.values.last else {
     Issue.record("Expected a finish event")
     return
   }
@@ -120,7 +120,7 @@ private final class EventBox {
   rig.playback.stopForSessionChange()
 
   let finishes = rig.events.values.compactMap { event -> (Int64, Int)? in
-    guard case .finished(let instance, let seconds) = event else { return nil }
+    guard case .finished(let instance, let seconds, _) = event else { return nil }
     return (instance.track.id, seconds)
   }
   #expect(finishes.map(\.0) == [101, 202])
@@ -138,7 +138,7 @@ private final class EventBox {
   rig.output.reportPlayedToEnd()
 
   let finishedIDs = rig.events.values.compactMap { event -> Int64? in
-    guard case .finished(let instance, _) = event else { return nil }
+    guard case .finished(let instance, _, _) = event else { return nil }
     return instance.track.id
   }
   #expect(finishedIDs == [202, 101])
@@ -161,7 +161,7 @@ private final class EventBox {
   await rig.playback.settleForTesting()
 
   let finishes = rig.events.values.compactMap { event -> (Int64, Int)? in
-    guard case .finished(let instance, let seconds) = event else { return nil }
+    guard case .finished(let instance, let seconds, _) = event else { return nil }
     return (instance.track.id, seconds)
   }
   #expect(finishes.map(\.0) == [101])
@@ -186,15 +186,15 @@ private final class EventBox {
   nonfinite.playback.stop()
 
   let cappedSeconds = capped.events.values.compactMap { event -> Int? in
-    guard case .finished(_, let seconds) = event else { return nil }
+    guard case .finished(_, let seconds, _) = event else { return nil }
     return seconds
   }
   let reversedSeconds = reversed.events.values.compactMap { event -> Int? in
-    guard case .finished(_, let seconds) = event else { return nil }
+    guard case .finished(_, let seconds, _) = event else { return nil }
     return seconds
   }
   let nonfiniteSeconds = nonfinite.events.values.compactMap { event -> Int? in
-    guard case .finished(_, let seconds) = event else { return nil }
+    guard case .finished(_, let seconds, _) = event else { return nil }
     return seconds
   }
   #expect(cappedSeconds == [200])
@@ -218,7 +218,7 @@ private final class EventBox {
     return instance.id
   }
   let finishes = rig.events.values.compactMap { event -> UUID? in
-    guard case .finished(let instance, _) = event else { return nil }
+    guard case .finished(let instance, _, _) = event else { return nil }
     return instance.id
   }
   #expect(starts.count == 3)
@@ -227,7 +227,7 @@ private final class EventBox {
   #expect(finishes == Array(starts.prefix(2)))
 }
 
-@Test func scrobbleSourceUsesOnlyAConfirmedPlaylistID() {
+@Test func scrobbleSourceKeepsPlaylistAndAlbumAssociationsDistinct() {
   let track = makeTracks([1])[0]
   let playlist = PlaybackLifecycleInstance(
     accountID: 42,
@@ -241,10 +241,10 @@ private final class EventBox {
   )
 
   #expect(playlist.scrobbleContext == ScrobbleContext(sourceID: 77))
-  #expect(album.scrobbleContext == nil)
+  #expect(album.scrobbleContext == ScrobbleContext(sourceID: 88, source: .album))
 }
 
-@Test @MainActor func nonPlaylistPlaybackSendsNoScrobbleRequests() async {
+@Test @MainActor func nonPlaylistPlaybackReportsActualListeningWithoutInventingPlaylistIDs() async {
   let credential = makeCredential()
   let transport = FakeTransport()
   let vault = FakeVault(stored: credential)
@@ -273,7 +273,13 @@ private final class EventBox {
   }
   await coordinator.settleForTesting()
 
-  #expect(await transport.recordedCalls().isEmpty)
+  #expect(
+    await transport.recordedCalls() == [
+      .scrobbleStart(101, ScrobbleContext(sourceID: 88, source: .album)),
+      .scrobbleFinish(101, ScrobbleContext(sourceID: 88, source: .album), 12),
+      .scrobbleStart(101, ScrobbleContext()),
+      .scrobbleFinish(101, ScrobbleContext(), 12),
+    ])
   #expect(arbiter.unresolvedOutcomes.isEmpty)
 }
 
@@ -299,9 +305,10 @@ private final class EventBox {
   coordinator.handle(.finished(instance, playedSeconds: 20), session: session)
   await coordinator.settleForTesting()
 
-  #expect(await transport.recordedCalls() == [
-    .scrobbleStart(101, ScrobbleContext(sourceID: 77))
-  ])
+  #expect(
+    await transport.recordedCalls() == [
+      .scrobbleStart(101, ScrobbleContext(sourceID: 77))
+    ])
   #expect(arbiter.unresolvedOutcomes.count == 1)
   #expect(coordinator.status.contains("not sent"))
 }
@@ -327,15 +334,16 @@ private final class EventBox {
   coordinator.handle(.finished(instance, playedSeconds: 12), session: session)
   await coordinator.settleForTesting()
 
-  #expect(await transport.recordedCalls() == [
-    .scrobbleStart(101, ScrobbleContext(sourceID: 77)),
-    .scrobbleFinish(101, ScrobbleContext(sourceID: 77), 12),
-  ])
+  #expect(
+    await transport.recordedCalls() == [
+      .scrobbleStart(101, ScrobbleContext(sourceID: 77)),
+      .scrobbleFinish(101, ScrobbleContext(sourceID: 77), 12),
+    ])
   #expect(arbiter.active == nil)
   #expect(coordinator.status.contains("12s"))
 }
 
-@Test @MainActor func scrobbleArbiterRefusalSendsNothingAndDoesNotRetry() async {
+@Test @MainActor func scrobbleWaitsForTheArbiterBeforeSendingEachEventOnce() async {
   let credential = makeCredential()
   let transport = FakeTransport()
   let vault = FakeVault(stored: credential)
@@ -355,11 +363,15 @@ private final class EventBox {
 
   coordinator.handle(.started(instance), session: session)
   coordinator.handle(.finished(instance, playedSeconds: 4), session: session)
-  await coordinator.settleForTesting()
-
+  await Task.yield()
   #expect(await transport.recordedCalls().isEmpty)
-  #expect(coordinator.status.contains("not confirmed"))
   #expect(arbiter.end(blocker, outcome: .applied) == .applied)
+  await coordinator.settleForTesting()
+  #expect(
+    await transport.recordedCalls() == [
+      .scrobbleStart(101, ScrobbleContext(sourceID: 77)),
+      .scrobbleFinish(101, ScrobbleContext(sourceID: 77), 4),
+    ])
 }
 
 @Test @MainActor func remoteNextSettlesTheOldScrobbleWhileResolvingTheNewSong() async {
@@ -407,11 +419,14 @@ private final class EventBox {
     default: false
     }
   }
-  #expect(feedback == [
-    .scrobbleStart(101, ScrobbleContext(sourceID: 77)),
-    .scrobbleFinish(101, ScrobbleContext(sourceID: 77), 8),
-    .scrobbleStart(202, ScrobbleContext(sourceID: 77)),
-  ])
+  var interrupted = ScrobbleContext(sourceID: 77)
+  interrupted.end = .interrupted
+  #expect(
+    feedback == [
+      .scrobbleStart(101, ScrobbleContext(sourceID: 77)),
+      .scrobbleFinish(101, interrupted, 8),
+      .scrobbleStart(202, ScrobbleContext(sourceID: 77)),
+    ])
   #expect(arbiter.active == nil)
   #expect(arbiter.activeReadCount == 0)
 }
@@ -446,9 +461,10 @@ private final class EventBox {
   coordinator.handle(.finished(old, playedSeconds: 9), session: session)
   await coordinator.settleForTesting()
 
-  #expect(await transport.recordedCalls() == [
-    .scrobbleStart(101, ScrobbleContext(sourceID: 77))
-  ])
+  #expect(
+    await transport.recordedCalls() == [
+      .scrobbleStart(101, ScrobbleContext(sourceID: 77))
+    ])
   #expect(!coordinator.status.contains("confirmed: 9s"))
 }
 
@@ -510,9 +526,12 @@ private final class EventBox {
     default: false
     }
   }
-  #expect(feedbackCalls == [
-    .scrobbleStart(101, ScrobbleContext(sourceID: 77)),
-    .scrobbleFinish(101, ScrobbleContext(sourceID: 77), 7),
-  ])
+  var stopped = ScrobbleContext(sourceID: 77)
+  stopped.end = .stopped
+  #expect(
+    feedbackCalls == [
+      .scrobbleStart(101, ScrobbleContext(sourceID: 77)),
+      .scrobbleFinish(101, stopped, 7),
+    ])
   #expect(arbiter.active == nil)
 }

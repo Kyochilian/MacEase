@@ -159,6 +159,36 @@ private func run(_ executable: String, _ arguments: [String]) throws -> Int32 {
   #expect(!result.output.contains("success"))
 }
 
+@Test func notarizationWaitRequiresOnlyItsSubmissionAndProfile() throws {
+  let tools = FileManager.default.temporaryDirectory
+    .appending(path: "macease-notary-wait-\(UUID().uuidString)")
+  try FileManager.default.createDirectory(at: tools, withIntermediateDirectories: true)
+  defer { try? FileManager.default.removeItem(at: tools) }
+  let submission = "01234567-89ab-cdef-0123-456789abcdef"
+  try writeExecutable(
+    """
+    #!/bin/zsh
+    [[ "$*" == 'notarytool wait \(submission) --keychain-profile test-profile' ]] || exit 2
+    print -r -- waited
+    """,
+    named: "xcrun",
+    in: tools
+  )
+  let environment = [
+    "PATH": "\(tools.path):/usr/bin:/bin",
+    "MACEASE_NOTARY_PROFILE": "test-profile",
+  ]
+  let result = try runReleaseScript(["wait", submission], environment: environment)
+  #expect(result.status == 0)
+  #expect(result.output.trimmingCharacters(in: .whitespacesAndNewlines) == "waited")
+  let invalid = try runReleaseScript(["wait", "invalid"], environment: environment)
+  #expect(invalid.status != 0)
+  #expect(invalid.output.contains("submission UUID is required"))
+  let missing = try runReleaseScript(["wait", submission])
+  #expect(missing.status != 0)
+  #expect(missing.output.contains("MACEASE_NOTARY_PROFILE is required"))
+}
+
 @Test func packageDryRunRejectsBroadOutputAndLiveUpdatesForAdHocBuild() throws {
   let home = FileManager.default.homeDirectoryForCurrentUser.path
   let broadOutput = try runScript(
@@ -277,13 +307,9 @@ private func run(_ executable: String, _ arguments: [String]) throws -> Int32 {
   let output = root.appending(path: "metadata")
   let releaseEnvironment = [
     "PATH": "\(tools.path):/usr/bin:/bin:/usr/sbin:/sbin",
-    "MACEASE_SIGNING_IDENTITY": "Developer ID Application: Test (ABCDE12345)",
     "MACEASE_TEAM_ID": "ABCDE12345",
     "MACEASE_SPARKLE_FEED_URL": feedURL,
     "MACEASE_SPARKLE_PUBLIC_KEY": publicKey,
-    "MACEASE_NOTARY_PROFILE": "macease-test-notary",
-    "MACEASE_SPARKLE_KEYCHAIN_ACCOUNT": "macease-test-key",
-    "MACEASE_RELEASE_DOWNLOAD_PREFIX": "https://downloads.example.test",
     "MACEASE_RELEASE_URL": "https://downloads.example.test/MacEase-1.2.3.zip",
     "MACEASE_HOMEPAGE_URL": "https://macease.example.test",
     "MACEASE_TEST_ENTITLEMENTS": repositoryRoot
@@ -314,6 +340,8 @@ private func run(_ executable: String, _ arguments: [String]) throws -> Int32 {
   #expect(cask.contains("app \"MacEase.app\""))
 
   var mismatchedKeyEnvironment = releaseEnvironment
+  mismatchedKeyEnvironment["MACEASE_SPARKLE_KEYCHAIN_ACCOUNT"] = "macease-test-key"
+  mismatchedKeyEnvironment["MACEASE_RELEASE_DOWNLOAD_PREFIX"] = "https://downloads.example.test"
   mismatchedKeyEnvironment["MACEASE_SPARKLE_PUBLIC_KEY"] = Data(
     repeating: 8,
     count: 32

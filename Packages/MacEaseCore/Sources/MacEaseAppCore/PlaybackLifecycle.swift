@@ -8,30 +8,39 @@ package struct PlaybackLifecycleInstance: Equatable, Sendable {
   package let accountID: Int64
   package let track: Track
   package let context: PlaybackContext
+  package let downloaded: Bool
 
   package init(
     id: UUID = UUID(),
     accountID: Int64,
     track: Track,
-    context: PlaybackContext
+    context: PlaybackContext,
+    downloaded: Bool = false
   ) {
     self.id = id
     self.accountID = accountID
     self.track = track
     self.context = context
+    self.downloaded = downloaded
   }
 
-  /// The endpoint only accepts a real playlist source. Other playback
-  /// contexts must not be represented as a made-up playlist id.
-  package var scrobbleContext: ScrobbleContext? {
+  package var scrobbleContext: ScrobbleContext {
     switch context {
-    case .playlist(let id, _): ScrobbleContext(sourceID: id)
-    default: nil
+    case .song(let id, _): ScrobbleContext(sourceID: id, source: .song, downloaded: downloaded)
+    case .playlist(let id, _): ScrobbleContext(sourceID: id, downloaded: downloaded)
+    case .album(let id, _): ScrobbleContext(sourceID: id, source: .album, downloaded: downloaded)
+    case .artist(let id, _): ScrobbleContext(sourceID: id, source: .artist, downloaded: downloaded)
+    case .heartbeatMode(_, let playlistID, _):
+      ScrobbleContext(sourceID: playlistID, downloaded: downloaded)
+    case .searchResults: ScrobbleContext(source: .search, downloaded: downloaded)
+    case .dailyRecommendations, .recommendationHistory:
+      ScrobbleContext(source: .recommendations, downloaded: downloaded)
+    default: ScrobbleContext(downloaded: downloaded)
     }
   }
 }
 
 package enum PlaybackLifecycleEvent: Equatable, Sendable {
   case started(PlaybackLifecycleInstance)
-  case finished(PlaybackLifecycleInstance, playedSeconds: Int)
+  case finished(PlaybackLifecycleInstance, playedSeconds: Int, end: ScrobbleEnd = .completed)
 }

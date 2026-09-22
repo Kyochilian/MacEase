@@ -245,9 +245,11 @@ package final class RadioCoordinator: SessionGuardedCoordinator {
             "Removed \(track.name) on the server; the local queue had changed"
           return
         }
-        guard playback.queuedTracks(context: .personalFM).contains(where: {
-          $0.id == track.id
-        }) else {
+        guard
+          playback.queuedTracks(context: .personalFM).contains(where: {
+            $0.id == track.id
+          })
+        else {
           outcome = .applied
           self.status =
             "Removed \(track.name) on the server; the local queue had changed"
@@ -263,7 +265,8 @@ package final class RadioCoordinator: SessionGuardedCoordinator {
           session: session,
           emptyStatus: "Removed \(track.name); personal FM has nothing left to play"
         )
-        self.status = removed
+        self.status =
+          removed
           ? "Removed \(track.name) from personal FM"
           : "Removed \(track.name) on the server; the local queue had changed"
       } catch is CancellationError {
@@ -271,9 +274,7 @@ package final class RadioCoordinator: SessionGuardedCoordinator {
       } catch {
         if Task.isCancelled {
           outcome = .cancelled
-        } else if let service = error as? NeteaseServiceError,
-          service.provesWriteDidNotRun
-        {
+        } else if error.provesWriteDidNotRun {
           outcome = .failed
         } else if self.arbiter.abandoningLosesTheOutcome(token) {
           outcome = .outcomeUnknown
@@ -330,7 +331,7 @@ package final class RadioCoordinator: SessionGuardedCoordinator {
         playback.play(
           tracks: queue,
           startIndex: 0,
-          context: .heartbeatMode(seedName: seed.name),
+          context: .heartbeatMode(seedName: seed.name, playlistID: playlistID, seedSongID: seed.id),
           session: session
         )
         self.publishingRadioQueue = false

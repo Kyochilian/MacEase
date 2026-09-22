@@ -1,5 +1,8 @@
 import AppKit
 import Foundation
+import ImageIO
+import MediaPlayer
+import NeteaseKit
 import Testing
 
 @testable import MacEaseAppCore
@@ -64,65 +67,105 @@ private final class InvalidArtworkURLProtocol: URLProtocol, @unchecked Sendable 
   override func stopLoading() {}
 }
 
-@MainActor
-private final class ArtworkDecodeGate {
+private actor ArtworkDecodeGate {
+  let bitmap: CGImage
   private(set) var calls = 0
-  private var waiters: [Int: CheckedContinuation<Void, Never>] = [:]
+  private var waiter: CheckedContinuation<Void, Never>?
 
-  func decode(_ data: Data) async -> NSImage? {
+  init(bitmap: CGImage) { self.bitmap = bitmap }
+
+  func decode() async -> CGImage? {
     calls += 1
-    let call = calls
-    if call == 2 || call == 3 {
-      await withCheckedContinuation { waiters[call] = $0 }
-    }
-    return nil
+    await withCheckedContinuation { waiter = $0 }
+    return bitmap
   }
 
-  func release(_ call: Int) {
-    waiters.removeValue(forKey: call)?.resume()
+  func release() {
+    waiter?.resume()
+    waiter = nil
   }
 }
 
-@Test @MainActor func aFailedArtworkDecodeCannotClearAReplacementInFlightTask() async {
+@Test @MainActor func artworkCoalescesTransferAndDecodeAndClearDiscardsLateResults() async throws {
   let requestGate = ArtworkRequestGate()
   InvalidArtworkURLProtocol.install(requestGate)
   defer { InvalidArtworkURLProtocol.remove() }
-
   let configuration = URLSessionConfiguration.ephemeral
   configuration.protocolClasses = [InvalidArtworkURLProtocol.self]
-  configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
-  let urlSession = URLSession(configuration: configuration)
-  let decodeGate = ArtworkDecodeGate()
+  let decodeGate = ArtworkDecodeGate(bitmap: try artworkTestBitmap())
   let loader = ArtworkLoader(
-    diskCapacityBytes: 0,
-    directory: nil,
-    urlSession: urlSession,
-    decoder: { data in await decodeGate.decode(data) }
+    diskCapacityBytes: 0, directory: nil,
+    urlSession: URLSession(configuration: configuration),
+    decoder: { _, _ in await decodeGate.decode() }
   )
   let url = URL(string: "https://p1.music.126.net/artwork-race.png")!
-
-  let first = Task { @MainActor in _ = await loader.image(for: url) }
+  let first = Task { await loader.image(for: url) == nil }
   while await requestGate.arrivalCount() < 1 { await Task.yield() }
-  let second = Task { @MainActor in _ = await loader.image(for: url) }
+  let second = Task { await loader.image(for: url) == nil }
+  await requestGate.openFirstRequest()
+  while await decodeGate.calls < 1 { await Task.yield() }
   for _ in 0..<20 { await Task.yield() }
   #expect(InvalidArtworkURLProtocol.requestCount() == 1)
-  await requestGate.openFirstRequest()
-  while decodeGate.calls < 2 { await Task.yield() }
+  #expect(await decodeGate.calls == 1)
+  loader.clear()
+  await decodeGate.release()
+  #expect(await first.value)
+  #expect(await second.value)
 
-  let third = Task { @MainActor in _ = await loader.image(for: url) }
-  while await requestGate.arrivalCount() < 2 || decodeGate.calls < 3 {
-    await Task.yield()
-  }
-
-  decodeGate.release(2)
-  await second.value
-  let fourth = Task { @MainActor in _ = await loader.image(for: url) }
+  let replacement = Task { await loader.image(for: url) == nil }
+  while await decodeGate.calls < 2 { await Task.yield() }
+  let follower = Task { await loader.image(for: url) == nil }
+  let cancelled = Task { await loader.image(for: url) == nil }
   for _ in 0..<20 { await Task.yield() }
-
+  cancelled.cancel()
   #expect(InvalidArtworkURLProtocol.requestCount() == 2)
+  await decodeGate.release()
+  #expect(await replacement.value == false)
+  #expect(await follower.value == false)
+  #expect(await cancelled.value)
+  #expect(await loader.image(for: url) != nil)
+  #expect(await decodeGate.calls == 2)
+  #expect(InvalidArtworkURLProtocol.requestCount() == 2)
+}
 
-  decodeGate.release(3)
-  _ = await first.value
-  _ = await third.value
-  _ = await fourth.value
+@Test func artworkRequestsReplaceSizeAndPreserveOtherQueryItems() throws {
+  let original = try #require(URL(string: "https://p1.music.126.net/cover.jpg?param=3000y3000&v=2"))
+  let sized = NeteaseArtworkURL.sized(original, pixels: 128)
+  let items = try #require(URLComponents(url: sized, resolvingAgainstBaseURL: false)?.queryItems)
+  #expect(items == [URLQueryItem(name: "v", value: "2"), URLQueryItem(name: "param", value: "128y128")])
+}
+
+private func artworkTestBitmap() throws -> CGImage {
+  let context = try #require(CGContext(
+    data: nil, width: 1024, height: 512, bitsPerComponent: 8, bytesPerRow: 0,
+    space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+  ))
+  return try #require(context.makeImage())
+}
+
+@Test func artworkDecodeCapsOriginalDimensions() async throws {
+  let bitmap = try artworkTestBitmap()
+  let bytes = NSMutableData()
+  let destination = try #require(CGImageDestinationCreateWithData(bytes, "public.png" as CFString, 1, nil))
+  CGImageDestinationAddImage(destination, bitmap, nil)
+  #expect(CGImageDestinationFinalize(destination))
+  let thumbnail = try #require(await ArtworkLoader.decode(bytes as Data, variant: .thumbnail))
+  #expect(thumbnail.width == 128)
+  #expect(thumbnail.height == 64)
+  let display = try #require(await ArtworkLoader.decode(bytes as Data, variant: .display))
+  #expect(display.width == 512)
+  #expect(display.height == 256)
+}
+
+@Test @MainActor func systemArtworkCanBeRequestedOffMainThread() async throws {
+  let bitmap = try artworkTestBitmap()
+  // Use the production factory and the actual MediaPlayer callback from a
+  // worker, as the system does when serializing Now Playing artwork.
+  let dimensions = await Task.detached {
+    let artwork = MPSystemMediaController.mediaArtwork(bitmap)
+    let image = artwork.image(at: CGSize(width: 128, height: 64))
+    return image?.size
+  }.value
+  #expect(dimensions != nil)
+  #expect(dimensions!.width > 0)
 }

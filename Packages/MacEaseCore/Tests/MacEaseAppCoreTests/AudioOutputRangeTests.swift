@@ -1,8 +1,54 @@
+import AVFoundation
 import Foundation
 import NeteaseKit
 import Testing
 
 @testable import MacEaseAppCore
+
+@Test(
+  .enabled(if: ProcessInfo.processInfo.environment["MACEASE_ACCEPTANCE_AUDIO_PATH"] != nil),
+  .timeLimit(.minutes(1))
+)
+@MainActor func suppliedAudioPassesMetadataFullDecodeAndNativeLocalSeek() async throws {
+  let path = try #require(ProcessInfo.processInfo.environment["MACEASE_ACCEPTANCE_AUDIO_PATH"])
+  let url = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
+  let metadata = try await NeteaseSession.cloudFileMetadata(at: url)
+  print("acceptance=localAudio stage=metadata bytes=\(metadata.fileSize) md5=\(metadata.md5)")
+  let audio = try AVAudioFile(forReading: url)
+  print("acceptance=localAudio stage=decoderOpened sampleRate=\(audio.processingFormat.sampleRate)")
+  let buffer = try #require(AVAudioPCMBuffer(pcmFormat: audio.processingFormat, frameCapacity: 16_384))
+  var frames: Int64 = 0
+  while audio.framePosition < audio.length {
+    try Task.checkCancellation()
+    try audio.read(into: buffer, frameCount: AVAudioFrameCount(min(16_384, audio.length - audio.framePosition)))
+    guard buffer.frameLength > 0 else { break }
+    frames += Int64(buffer.frameLength)
+  }
+  #expect(frames > 0)
+  #expect(frames == audio.length)
+  let decodedSeconds = Double(frames) / audio.processingFormat.sampleRate
+  print("acceptance=localAudio stage=decoded frames=\(frames) seconds=\(decodedSeconds)")
+  let output = AVPlayerAudioOutput()
+  output.isMuted = true
+  defer { output.teardown() }
+  let info = try await output.prepare(
+    resource: PlaybackResource(
+      location: .local(url), accountID: 1, songID: 1, requestedQuality: .standard,
+      actualQuality: nil, format: url.pathExtension, byteCount: metadata.fileSize, expiresAt: nil),
+    userAgent: "MacEase local acceptance")
+  #expect(info.isPlayable)
+  print("acceptance=localAudio stage=prepared")
+  let duration = try #require(info.durationSeconds)
+  #expect(abs(decodedSeconds - duration) < 2)
+  for position in [0, duration / 2, max(0, duration - 1)] {
+    try await output.seek(to: position)
+    #expect(abs((output.currentPositionSeconds ?? -10) - position) < 0.2)
+  }
+  print("acceptance=localAudio bytes=\(metadata.fileSize) md5=\(metadata.md5) "
+    + "decodedFrames=\(frames) sampleRate=\(audio.processingFormat.sampleRate) "
+    + "durationSeconds=\(duration) seeks=beginning,middle,end result=passed")
+  print("acceptance=localMetadata title=\(metadata.title) artist=\(metadata.artist) album=\(metadata.album)")
+}
 
 private actor WAVRangeFetcher: AudioByteFetching {
   private let bytes: Data

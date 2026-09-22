@@ -432,6 +432,39 @@ private func response(setCookie: String) -> HTTPURLResponse {
 
 // MARK: - Cloud drive
 
+@Test func cloudFileIdentityAndPublicIdentityRemainDistinctAcrossRawResponseShapes() throws {
+  for simple in [
+    #"{"id":42,"name":"Matched","t":0}"#,
+    #"{"id":9001,"name":"Matched","t":2,"s_id":42}"#
+  ] {
+    let page = try NeteaseSession.classifyCloudSongs(
+      data: Data("{\"code\":200,\"data\":[{\"songId\":9001,\"simpleSong\":\(simple)}]}".utf8),
+      response: okResponse, limit: 30)
+    let track = try #require(page.songs.first?.track)
+    #expect(track.id == 9001)
+    #expect(track.cloudFileID == 9001)
+    #expect(track.catalogSongID == 42)
+    #expect(track.catalogIdentity == 42)
+  }
+  let unmatched = try JSONDecoder().decode(CloudPayload.self, from: Data(
+    #"{"data":[{"songId":9001,"songName":"Tagged upload","simpleSong":{"id":9001,"name":null,"t":1,"s_id":42}}]}"#.utf8))
+  #expect(unmatched.data.first?.song.track.name == "Tagged upload")
+  #expect(unmatched.data.first?.song.track.catalogIdentity == nil)
+}
+
+@Test func sharedSongRowsRecognizeCloudIdentityOutsideTheCloudPage() throws {
+  let track = try JSONDecoder().decode(SongRowPayload.self, from: Data(
+    #"{"id":9001,"name":"Cloud in playlist","t":2,"s_id":42}"#.utf8)).track
+  #expect(track.id == 9001)
+  #expect(track.cloudFileID == 9001)
+  #expect(track.catalogIdentity == 42)
+  for match: Int64 in [0, -1, 9001] {
+    let unproven = try JSONDecoder().decode(SongRowPayload.self, from: Data(
+      "{\"id\":9001,\"name\":\"Unmatched\",\"t\":2,\"s_id\":\(match)}".utf8)).track
+    #expect(unproven.catalogIdentity == nil)
+  }
+}
+
 @Test func cloudSongsDecodeTheMatchedTrackAndCapacity() throws {
   let page = try NeteaseSession.classifyCloudSongs(
     data: Data((

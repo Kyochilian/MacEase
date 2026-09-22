@@ -205,19 +205,141 @@ private struct LibraryRig {
     )
   }
 
-  func loadFirstPage(_ ids: [Int64], more: Bool) async {
+  func loadFirstPage(_ ids: [Int64], more: Bool, owned: Bool = true) async {
     await transport.setPlaylistPages([
-      UserPlaylistPage(playlists: makePlaylists(ids), more: more)
+      UserPlaylistPage(playlists: makePlaylists(ids, owned: owned), more: more)
     ])
     library.load(reset: true, session: session)
     await library.settleForTesting()
   }
+
+  func openLiked(_ ids: [Int64]) async {
+    await transport.setPlaylistPages([
+      UserPlaylistPage(playlists: [
+        UserPlaylist(id: 17, name: "Liked", trackCount: ids.count, owned: true, specialType: 5)
+      ], more: false)
+    ])
+    await transport.setLikedIDs(.success(ids))
+    await transport.setPlaylistDetail(.success(PlaylistDetail(id: 17, name: "Liked", trackIDs: ids)))
+    await transport.setSongDetailBatches([makeTracks(Array(ids.prefix(NeteaseSession.songDetailRequestLimit)))])
+    await library.openLikedSongs(session: session)
+    await library.settleForTesting()
+  }
 }
 
-@Test @MainActor func loadMoreIsRefusedAfterEachCollectionChangingWrite() async {
+@Test @MainActor func unlikeKeepsLikedPlaylistIDsRowsCountsAndPaginationConsistent() async {
+  for removedID: Int64 in [1, 1001] {
+    let rig = LibraryRig()
+    await rig.openLiked(Array(1...1002))
+    let before = await rig.transport.callCount()
+    #expect(rig.library.setLiked(false, for: makeTracks([removedID])[0], session: rig.session))
+    await rig.library.settleForTesting()
+    #expect(rig.library.liked.state(of: removedID) == .notLiked)
+    #expect(!rig.library.detail.trackIDs.contains(removedID))
+    #expect(!rig.library.tracks.contains { $0.id == removedID })
+    #expect(rig.library.selectedPlaylist?.trackCount == 1001)
+    #expect(rig.library.playlists.first?.trackCount == 1001)
+    #expect(rig.library.detail.loadedIDCount == (removedID == 1 ? 999 : 1000))
+    #expect(rig.library.detail.nextBatch(limit: 1000) == (removedID == 1 ? [1001, 1002] : [1002]))
+    #expect(await rig.transport.callCount() == before + 1)
+    #expect(!rig.library.tracksNeedReload)
+  }
+}
+
+@Test @MainActor func unlikingTheOnlySongLeavesAnEmptyPlayableCollection() async {
+  let rig = LibraryRig()
+  await rig.openLiked([1])
+  rig.library.setLiked(false, for: makeTracks([1])[0], session: rig.session)
+  await rig.library.settleForTesting()
+  #expect(rig.library.tracks.isEmpty)
+  #expect(rig.library.detail.trackIDs.isEmpty)
+  #expect(rig.library.selectedPlaylist?.trackCount == 0)
+  #expect(rig.library.playlists.first?.trackCount == 0)
+}
+
+@Test @MainActor func matchedCloudAddsThePublicSongAndUnmatchedBatchIsRefused() async {
+  let rig = LibraryRig()
+  await rig.loadFirstPage([17], more: false)
+  let playlist = rig.library.playlists[0]
+  let matched = Track(id: 9001, name: "Matched", cloudFileID: 9001, catalogSongID: 42)
+  rig.library.addTrack(matched, to: playlist, session: rig.session)
+  await rig.library.settleForTesting()
+  #expect(await rig.transport.recordedCalls().contains(.editPlaylistTracks(.add, 17, [42])))
+  let before = await rig.transport.callCount()
+  rig.library.editTracks(
+    .add, tracks: [makeTracks([43])[0], Track(id: 9002, name: "Unmatched", cloudFileID: 9002)],
+    in: playlist, session: rig.session)
+  await rig.library.settleForTesting()
+  #expect(await rig.transport.callCount() == before)
+  #expect(rig.library.status.contains("Match each cloud file"))
+}
+
+@Test @MainActor func likingIntoAnOpenSpecialPlaylistUsesConfirmedServerOrder() async {
+  let rig = LibraryRig()
+  await rig.openLiked([1, 2])
+  await rig.transport.setPlaylistDetail(.success(
+    PlaylistDetail(id: 17, name: "Liked", trackIDs: [3, 1, 2])))
+  await rig.transport.setSongDetailBatches([makeTracks([3, 1, 2])])
+  let before = await rig.transport.callCount()
+  rig.library.setLiked(true, for: makeTracks([3])[0], session: rig.session)
+  await rig.library.settleForTesting()
+  #expect(rig.library.tracks.map(\.id) == [3, 1, 2])
+  #expect(rig.library.detail.trackIDs == [3, 1, 2])
+  #expect(rig.library.selectedPlaylist?.trackCount == 3)
+  #expect(rig.library.playlists.first?.trackCount == 3)
+  #expect(rig.library.liked.state(of: 3) == .liked)
+  #expect(await rig.transport.callCount() == before + 3)
+}
+
+@Test @MainActor func failedOrUnknownUnlikeDoesNotInventAConfirmedRemoval() async {
+  for unknown in [false, true] {
+    let rig = LibraryRig()
+    await rig.openLiked([1])
+    await rig.transport.setWriteResult(.failure(
+      NeteaseServiceError(source: unknown ? .http : .service, statusCode: 503)))
+    let before = await rig.transport.callCount()
+    rig.library.setLiked(false, for: makeTracks([1])[0], session: rig.session)
+    await rig.library.settleForTesting()
+    #expect(rig.library.tracks.map(\.id) == [1])
+    #expect(rig.library.selectedPlaylist?.trackCount == 1)
+    #expect(rig.library.liked.state(of: 1) == .liked)
+    #expect(rig.arbiter.unresolvedOutcomes.isEmpty == !unknown)
+    #expect(await rig.transport.callCount() == before + 1)
+  }
+}
+
+@Test @MainActor func unlikePostflightCannotPublishIntoAReplacementAccount() async {
+  let rig = LibraryRig()
+  await rig.openLiked([1])
+  await rig.transport.gate.close()
+  let before = await rig.transport.gate.arrivalCount()
+  rig.library.setLiked(false, for: makeTracks([1])[0], session: rig.session)
+  while await rig.transport.gate.arrivalCount() == before { await Task.yield() }
+  await rig.vault.setStored(makeCredential("replacement"))
+  await rig.transport.gate.open()
+  await rig.library.settleForTesting()
+  #expect(rig.library.playlists.isEmpty)
+  #expect(rig.library.tracks.isEmpty)
+  #expect(rig.library.liked.state(of: 1) == .unknown)
+  #expect(rig.arbiter.unresolvedOutcomes.map(\.kind) == [.appliedRemotelyOnly])
+}
+
+@Test @MainActor func likedWriteReadbackFailureKeepsSuccessAndRequiresFreshPlaybackMetadata() async {
+  let rig = LibraryRig()
+  await rig.openLiked([1])
+  await rig.transport.setPlaylistDetail(.failure(URLError(.timedOut)))
+  rig.library.setLiked(true, for: makeTracks([2])[0], session: rig.session)
+  await rig.library.settleForTesting()
+  #expect(rig.library.liked.state(of: 2) == .liked)
+  #expect(rig.library.tracksNeedReload)
+  #expect(rig.library.status.contains("saved, but"))
+  #expect(rig.arbiter.unresolvedOutcomes.isEmpty)
+}
+
+@Test @MainActor func aStaleCursorRestartsAtZeroAfterCollectionChangingWrites() async {
   for write in ["create", "delete", "subscribe", "unsubscribe"] {
     let rig = LibraryRig()
-    await rig.loadFirstPage(Array(1...30), more: true)
+    await rig.loadFirstPage(Array(1...30), more: true, owned: write != "unsubscribe")
     #expect(rig.library.canLoadMore, "\(write): paging should start usable")
 
     switch write {
@@ -245,11 +367,12 @@ private struct LibraryRig {
     #expect(!rig.library.canLoadMore, "\(write): paging must stop")
     #expect(rig.library.playlistsNeedReload, "\(write): a reload must be asked for")
 
-    // Load More must not reach the transport while the cursor is stale.
+    // A new paging intent must refresh the first page, never use the old offset.
     let before = await rig.transport.callCount()
     rig.library.load(reset: false, session: rig.session)
     await rig.library.settleForTesting()
-    #expect(await rig.transport.callCount() == before, "\(write): no extra read")
+    #expect(await rig.transport.callCount() == before + 1)
+    #expect(await rig.transport.recordedCalls().last == .userPlaylists(offset: 0, limit: 30))
 
     // An explicit reload starts over and makes paging usable again.
     await rig.transport.setPlaylistPages([
@@ -293,6 +416,8 @@ private struct LibraryRig {
   await rig.library.settleForTesting()
 
   #expect(await rig.transport.recordedCalls().last == .createPlaylist("Secret", isPrivate: true))
+  #expect(rig.library.selectedPlaylist?.id == 9999)
+  #expect(rig.library.playlists.first?.name == "Secret")
   #expect(rig.arbiter.canStart())
   #expect(rig.arbiter.unresolvedOutcomes.isEmpty)
 }
@@ -300,7 +425,7 @@ private struct LibraryRig {
 /// Publishing is the only privacy change MacEase makes to a playlist that
 /// already exists, and it retires the page cursor because whether the server
 /// reorders afterwards is not something this client has verified.
-@Test @MainActor func publishingAPlaylistIsOneArbitratedWriteAndStopsPaging() async {
+@Test @MainActor func publishingAPlaylistSynchronizesPrivacyAndRestartsTheCursor() async {
   let rig = LibraryRig()
   await rig.transport.setPlaylistPages([
     UserPlaylistPage(
@@ -313,15 +438,19 @@ private struct LibraryRig {
   #expect(rig.library.canLoadMore)
   rig.library.selectedPlaylist = rig.library.playlists[0]
 
+  var published = makePlaylists(Array(1...30), isPrivate: true)
+  published[0].isPrivate = false
+  await rig.transport.setPlaylistPages([UserPlaylistPage(playlists: published, more: true)])
+
   rig.library.publishPlaylist(rig.library.playlists[0], session: rig.session)
   #expect(rig.arbiter.active?.effect == .write)
   await rig.library.settleForTesting()
 
   let calls = await rig.transport.recordedCalls()
-  #expect(calls.last == .publishPrivatePlaylist(1))
+  #expect(calls.last == .userPlaylists(offset: 0, limit: 30))
   #expect(calls.filter { $0 == .publishPrivatePlaylist(1) }.count == 1)
-  #expect(!rig.library.canLoadMore)
-  #expect(rig.library.playlistsNeedReload)
+  #expect(rig.library.canLoadMore)
+  #expect(!rig.library.playlistsNeedReload)
   #expect(rig.library.playlists[0].isPrivate == false)
   #expect(rig.library.selectedPlaylist?.isPrivate == false)
   #expect(rig.arbiter.canStart())
@@ -391,6 +520,9 @@ private struct LibraryRig {
   #expect(rig.library.playlists[0].isPrivate == true)
   #expect(rig.library.selectedPlaylist?.isPrivate == true)
 
+  await rig.transport.setPlaylistDetail(
+    .success(PlaylistDetail(id: 1, name: "Renamed", trackIDs: [10, 11])))
+  await rig.transport.setSongDetailBatches([makeTracks([10, 11])])
   rig.library.addTrack(
     makeTracks([11])[0],
     to: rig.library.playlists[0],
@@ -443,6 +575,9 @@ private struct LibraryRig {
   await rig.library.settleForTesting()
   #expect(rig.library.selectedPlaylist?.trackCount == 3)
 
+  await rig.transport.setPlaylistDetail(
+    .success(PlaylistDetail(id: 1, name: "playlist-1", trackIDs: [10, 12])))
+  await rig.transport.setSongDetailBatches([makeTracks([10, 12])])
   rig.library.removeSelectedPlaylistTrack(id: 11, session: rig.session)
   await rig.library.settleForTesting()
 
@@ -464,6 +599,9 @@ private struct LibraryRig {
   rig.library.loadTracks(for: rig.library.playlists[0], session: rig.session)
   await rig.library.settleForTesting()
 
+  await rig.transport.setPlaylistDetail(
+    .success(PlaylistDetail(id: 1, name: "playlist-1", trackIDs: [10, 11])))
+  await rig.transport.setSongDetailBatches([makeTracks([10, 11])])
   rig.library.removeSelectedPlaylistTrack(id: 12, session: rig.session)
   await rig.library.settleForTesting()
 
@@ -475,7 +613,7 @@ private struct LibraryRig {
   #expect(rig.library.tracks.map(\.id) == [10, 11])
 }
 
-@Test @MainActor func addingToTheOpenPlaylistMarksItStaleAndBumpsTheCount() async {
+@Test @MainActor func addingToTheOpenPlaylistUsesTheServerOrderAndCount() async {
   let rig = LibraryRig()
   await rig.loadFirstPage([1], more: false)
   await rig.transport.setPlaylistDetail(
@@ -485,6 +623,9 @@ private struct LibraryRig {
   rig.library.loadTracks(for: rig.library.playlists[0], session: rig.session)
   await rig.library.settleForTesting()
 
+  await rig.transport.setPlaylistDetail(
+    .success(PlaylistDetail(id: 1, name: "playlist-1", trackIDs: [77, 10])))
+  await rig.transport.setSongDetailBatches([makeTracks([77, 10])])
   rig.library.addTrack(
     makeTracks([77])[0],
     to: rig.library.playlists[0],
@@ -492,7 +633,8 @@ private struct LibraryRig {
   )
   await rig.library.settleForTesting()
 
-  #expect(rig.library.tracksNeedReload)
+  #expect(!rig.library.tracksNeedReload)
+  #expect(rig.library.tracks.map(\.id) == [77, 10])
   #expect(!rig.library.canLoadMoreTracks)
   #expect(rig.library.selectedPlaylist?.trackCount == 2)
   #expect(rig.library.playlists[0].trackCount == 2)
@@ -508,6 +650,8 @@ private struct LibraryRig {
   rig.library.loadTracks(for: rig.library.playlists[0], session: rig.session)
   await rig.library.settleForTesting()
 
+  await rig.transport.setPlaylistDetail(
+    .success(PlaylistDetail(id: 2, name: "playlist-2", trackIDs: [20, 21, 22, 77])))
   rig.library.addTrack(
     makeTracks([77])[0],
     to: rig.library.playlists[1],
@@ -539,7 +683,7 @@ private struct LibraryRig {
   await rig.transport.gate.open()
   await rig.library.settleForTesting()
 
-  #expect(rig.arbiter.unresolvedOutcomes.map(\.name) == ["Remove track"])
+  #expect(rig.arbiter.unresolvedOutcomes.map(\.name) == ["Remove tracks"])
   #expect(rig.arbiter.unresolvedOutcomes.map(\.kind) == [.appliedRemotelyOnly])
   #expect(rig.library.status == "Session changed; validate again")
   // The removal is not applied as a local edit. The session changed, so the

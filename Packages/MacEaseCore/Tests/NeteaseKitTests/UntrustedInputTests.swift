@@ -4,10 +4,9 @@ import Testing
 
 @testable import NeteaseKit
 
-/// P0-02 regression suite: every untrusted boundary — a non-HTTP response,
-/// Keychain bytes, ciphertext and compressed bodies — must classify its
-/// failure and return, never terminate the process. Each test would have
-/// trapped on the pre-fix `as!`, `try!` or `precondition` paths.
+/// P0-02 regression suite: every untrusted boundary — transport responses,
+/// Keychain bytes and decoded payload shapes — must classify its failure and
+/// return, never terminate the process.
 
 // MARK: - Non-HTTP transport responses
 
@@ -37,7 +36,7 @@ private final class NonHTTPResponseProtocol: URLProtocol, @unchecked Sendable {
 private func stubbedSession() -> NeteaseSession {
   let configuration = URLSessionConfiguration.ephemeral
   configuration.protocolClasses = [NonHTTPResponseProtocol.self]
-  return NeteaseSession(configuration: configuration)
+  return NeteaseSession(configuration: configuration, checkToken: { "test-verification" })
 }
 
 private let boundaryCredential = testCredential(musicU: "music-u-test", csrf: "csrf-test")
@@ -71,11 +70,14 @@ private let boundaryCredential = testCredential(musicU: "music-u-test", csrf: "c
   }
 }
 
-@Test func nonHTTPResponseDoesNotBecomeALyricsNetworkError() async {
+@Test func nonHTTPResponseIsClassifiedOnTheLyricsPath() async throws {
   let session = stubbedSession()
-  let outcome = await session.probeLyrics(songID: 347_230)
-
-  #expect(outcome.status == .invalidResponse)
+  await #expect(throws: NeteaseTransportError.nonHTTPResponse) {
+    try await session.lyrics(
+      songID: 347_230,
+      credential: boundaryCredential
+    )
+  }
 }
 
 // MARK: - Keychain payloads
@@ -134,46 +136,7 @@ private func deleteRawKeychainItem(service: String, account: String) {
   }
 }
 
-// MARK: - AES / EAPI response bodies
-
-@Test func emptyEAPICiphertextIsClassified() throws {
-  #expect(throws: NeteaseCryptoError.invalidInput(field: "ciphertext")) {
-    try NeteaseCrypto.decodeEAPIResponse(Data(), gzipped: false)
-  }
-}
-
-@Test func misalignedEAPICiphertextIsClassified() throws {
-  #expect(throws: NeteaseCryptoError.invalidInput(field: "ciphertext")) {
-    try NeteaseCrypto.decodeEAPIResponse(
-      Data(repeating: 0x41, count: 17),
-      gzipped: false
-    )
-  }
-}
-
-/// CommonCrypto does not report bad PKCS7 padding in this mode, so the
-/// contract is only that the process survives and the caller gets bytes that
-/// fail the downstream JSON decode — never a trap and never trusted output.
-@Test func corruptEAPIPaddingDoesNotTerminateAndFailsDownstream() throws {
-  let decoded = try NeteaseCrypto.decodeEAPIResponse(
-    Data(repeating: 0x00, count: 32),
-    gzipped: false
-  )
-
-  #expect(throws: (any Error).self) {
-    try JSONDecoder().decode([String: String].self, from: decoded)
-  }
-}
-
-/// A body flagged as gzip but holding garbage must classify, not trap.
-@Test func corruptEAPIPaddingWithGzipFlagIsClassified() throws {
-  #expect(throws: NeteaseCryptoError.self) {
-    try NeteaseCrypto.decodeEAPIResponse(
-      Data(repeating: 0x00, count: 32),
-      gzipped: true
-    )
-  }
-}
+// MARK: - WeAPI inputs
 
 @Test func aWeAPISecretKeyOfTheWrongLengthIsRejectedNotTrapped() throws {
   #expect(throws: NeteaseCryptoError.invalidInput(field: "secretKey")) {
@@ -181,120 +144,6 @@ private func deleteRawKeychainItem(service: String, account: String) {
   }
   #expect(throws: NeteaseCryptoError.invalidInput(field: "secretKey")) {
     try NeteaseCrypto.weapi(json: #"{"a":1}"#, secretKey: String(repeating: "a", count: 512))
-  }
-}
-
-// MARK: - gzip bodies
-
-private let validGzip = Data(
-  base64Encoded: "H4sIAAAAAAAC/6tWSs5PSVWyMjIw0FFKSSxJVLKKVkqvyixQiq0FAPt+x84cAAAA"
-)!
-private let truncatedGzip = Data(
-  base64Encoded: "H4sIAAAAAAAC/6tWSs5PSVWyMjIw0FFK"
-)!
-private let zlibNotGzip = Data(
-  base64Encoded: "eJyrVkrOT0lVsjIyMNBRSkksSVSyilZKr8osUIqtBQB4vgie"
-)!
-/// 4096 identical bytes in a 40-byte stream: the expansion shape a zip bomb
-/// uses, small enough to keep the test cheap.
-private let expandingGzip = Data(
-  base64Encoded: "H4sIAAAAAAAC/+3BAQ0AAADCoGzvX8oeDigAAADg3QBANKb+ABAAAA=="
-)!
-
-@Test func validGzipStillInflates() throws {
-  #expect(
-    String(decoding: try NeteaseCrypto.gunzip(validGzip), as: UTF8.self)
-      == #"{"code":200,"data":["gzip"]}"#
-  )
-}
-
-@Test func emptyGzipBodyIsClassified() throws {
-  #expect(throws: NeteaseCryptoError.self) {
-    try NeteaseCrypto.gunzip(Data())
-  }
-}
-
-@Test func truncatedGzipBodyIsClassified() throws {
-  #expect(throws: NeteaseCryptoError.self) {
-    try NeteaseCrypto.gunzip(truncatedGzip)
-  }
-}
-
-@Test func nonGzipBodyIsClassified() throws {
-  #expect(throws: NeteaseCryptoError.self) {
-    try NeteaseCrypto.gunzip(zlibNotGzip)
-  }
-  #expect(throws: NeteaseCryptoError.self) {
-    try NeteaseCrypto.gunzip(Data(repeating: 0xff, count: 64))
-  }
-}
-
-@Test func overExpandingGzipBodyIsRefusedAtTheBound() throws {
-  #expect(throws: NeteaseCryptoError.decompressionLimitExceeded) {
-    try NeteaseCrypto.gunzip(expandingGzip, limit: 1024)
-  }
-  #expect(try NeteaseCrypto.gunzip(expandingGzip, limit: 4096).count == 4096)
-}
-
-// MARK: - xeapi inputs
-
-private let xeapiPublicKey = Data(
-  base64Encoded: "YFpyXSpK3+6xop4X7dYhwbdZPujNvESsbEq24vgF0jw="
-)!
-private let xeapiTransform = Data((0..<16).map { UInt8(15 - $0) })
-
-private func xeapiParameters(
-  publicKey: Data = xeapiPublicKey,
-  dynamicKey: Data = Data("0123456789abcdef".utf8),
-  transform: Data = xeapiTransform,
-  ephemeralPrivateKey: Data = Data((0..<32).map { UInt8($0) }),
-  nonce: Data = Data((0..<12).map { UInt8($0) })
-) throws -> XeAPIParameters {
-  try NeteaseCrypto.xeapi(
-    formBody: Data("ids=%5B347230%5D".utf8),
-    publicKey: publicKey,
-    version: "42",
-    sk: "test-sk",
-    os: "android",
-    dynamicKey: dynamicKey,
-    transform: transform,
-    ephemeralPrivateKey: ephemeralPrivateKey,
-    nonce: nonce
-  )
-}
-
-@Test func xeapiRejectsEveryWrongSizedInput() throws {
-  #expect(throws: NeteaseCryptoError.invalidInput(field: "publicKey")) {
-    try xeapiParameters(publicKey: Data(repeating: 1, count: 31))
-  }
-  #expect(throws: NeteaseCryptoError.invalidInput(field: "dynamicKey")) {
-    try xeapiParameters(dynamicKey: Data())
-  }
-  #expect(throws: NeteaseCryptoError.invalidInput(field: "transform")) {
-    try xeapiParameters(transform: Data(repeating: 0, count: 8))
-  }
-  #expect(throws: NeteaseCryptoError.invalidInput(field: "ephemeralPrivateKey")) {
-    try xeapiParameters(ephemeralPrivateKey: Data(repeating: 0, count: 64))
-  }
-  #expect(throws: NeteaseCryptoError.invalidInput(field: "nonce")) {
-    try xeapiParameters(nonce: Data(repeating: 0, count: 16))
-  }
-}
-
-/// An all-zero Curve25519 peer key is the canonical low-order point; key
-/// agreement must classify it rather than trap inside CryptoKit.
-@Test func xeapiClassifiesALowOrderPeerKey() throws {
-  #expect(throws: NeteaseCryptoError.keyAgreementFailed) {
-    try xeapiParameters(publicKey: Data(repeating: 0, count: 32))
-  }
-}
-
-@Test func malformedXeAPIPublicKeyPayloadsAreClassified() throws {
-  #expect(throws: NeteaseCryptoError.self) {
-    try NeteaseCrypto.decodeXeAPIPublicKeyState(Data())
-  }
-  #expect(throws: NeteaseCryptoError.self) {
-    try NeteaseCrypto.decodeXeAPIPublicKeyState(Data(repeating: 0x5a, count: 48))
   }
 }
 
@@ -364,31 +213,26 @@ private let okResponse = HTTPURLResponse(
   #expect(!asset.trial)
 }
 
-@Test func onlyAnObjectCountsAsLyricsContent() {
-  func status(_ lrc: String) -> LyricsProbeStatus {
-    NeteaseSession.classifyLyricsProbe(
+@Test func onlyAnObjectCountsAsLyricsContent() throws {
+  func lyrics(_ lrc: String) throws -> Lyrics {
+    try NeteaseSession.classifyLyrics(
       data: Data(#"{"code":200,"lrc":\#(lrc)}"#.utf8),
       response: okResponse
-    ).status
+    )
   }
 
-  // A scalar or array is a shape the probe has never seen; it must be
-  // reported as an invalid response, not as lyric content.
+  // Scalar and array shapes must fail instead of becoming lyric content.
   for body in ["1", #""null""#, "[]", "true"] {
-    #expect(status(body) == .invalidResponse, "\(body) must not read as content")
+    #expect(throws: DecodingError.self, "\(body) must not read as content") {
+      try lyrics(body)
+    }
   }
-  #expect(status("{}") == .invalidResponse)
-  #expect(status(#"{"lyric":""}"#) == .invalidResponse)
-  #expect(status(#"{"version":1,"lyric":"[00:00.00] hi"}"#) == .content)
-}
-
-@Test func aResponseWithNoLyricMarkersStillClassifies() {
-  let outcome = NeteaseSession.classifyLyricsProbe(
-    data: Data(#"{"code":200,"nolyric":true}"#.utf8),
-    response: okResponse
+  #expect(try lyrics("{}") == .none)
+  #expect(try lyrics(#"{"lyric":""}"#) == .none)
+  #expect(
+    try lyrics(#"{"version":1,"lyric":"[00:00.00] hi"}"#)
+      == .lines([LyricLine(timeSeconds: 0, text: "hi")])
   )
-
-  #expect(outcome.status == .noLyrics)
 }
 
 // MARK: - Timeout policy

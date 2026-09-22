@@ -7,6 +7,7 @@ import WebKit
 @main
 @MainActor
 struct MacEaseApp: App {
+  @Environment(\.scenePhase) private var scenePhase
   private enum MainTab: Hashable {
     case session
     case library
@@ -58,6 +59,11 @@ struct MacEaseApp: App {
   @State private var storageDiagnostic: String?
   @State private var selectedTab: MainTab = .session
   @State private var catalogPane: CatalogView.Pane = .newReleases
+  @State private var discoverPane: DiscoverView.Pane = .recommended
+  @State private var collectionPane: CollectionsView.Section = .albums
+  @State private var showsOpenLink = false
+  @State private var musicLinkText = ""
+  @State private var musicLinkError: String?
 
   init() {
     // One transport and one credential store for the whole app: every
@@ -129,8 +135,9 @@ struct MacEaseApp: App {
       arbiter: arbiter
     )
     playback.onLifecycleEvent = {
-      [weak scrobble, weak login, weak nativeNotifications] event in
+      [weak scrobble, weak login, weak nativeNotifications, weak discovery] event in
       nativeNotifications?.handle(event)
+      discovery?.recordPlayback(event)
       guard let login else { return }
       scrobble?.handle(event, session: login)
     }
@@ -163,7 +170,7 @@ struct MacEaseApp: App {
       snapshotProvider: { router.snapshot() },
       performIntent: { router.perform($0) },
       artworkProvider: { [weak artwork] url in
-        await artwork?.image(for: url)
+        await artwork?.image(for: url, variant: .display)
       }
     )
     nowPlaying.startObserving()
@@ -180,7 +187,13 @@ struct MacEaseApp: App {
     )
     let queuePersistence = storage.persistence
     let downloads = storage.downloads
+    lyrics.attach(store: queuePersistence?.store)
+    catalog.attach(store: queuePersistence?.store)
+    discovery.attach(store: queuePersistence?.store)
     if let downloads {
+      downloads.saveLyrics = { [weak lyrics] track, session in
+        await lyrics?.saveForOffline(track: track, session: session)
+      }
       playback.attach(downloads: downloads)
       downloads.attach(playback: playback)
       downloads.onTerminalEvent = { [weak nativeNotifications] event in
@@ -199,9 +212,11 @@ struct MacEaseApp: App {
     // A divergence found by any coordinator invalidates the identity for all
     // of them, so the session owner clears everything, not just the reporter.
     login.onIdentityChanged = {
-      [weak playback, weak library, weak discovery, weak collections, weak lyrics,
+      [
+        weak playback, weak library, weak discovery, weak collections, weak lyrics,
         weak catalog, weak radio, weak downloads, weak scrobble, weak nowPlaying,
-        weak nativeNotifications] in
+        weak nativeNotifications
+      ] in
       Self.clearSessionScopedState(
         playback: playback,
         scrobble: scrobble,
@@ -218,14 +233,17 @@ struct MacEaseApp: App {
     }
     // Every path that establishes or drops an account arrives here, so QR,
     // SMS, Import and Validate all bind the same per-account data and spend
-    // the same single launch-scoped Discover prefetch. None of them carries a
+    // the same account-scoped Discover prefetch. None of them carries a
     // copy of this decision, so none of them can be left out of it.
     login.onValidatedAccountChanged = {
-      [weak login, weak library, weak discovery, weak downloads,
-        weak nativeNotifications] account in
+      [
+        weak login, weak library, weak discovery, weak downloads,
+        weak nativeNotifications
+      ] account in
       // Binding and cancellation are synchronous with the identity commit;
       // an old CDN task cannot wait for a later SwiftUI scheduling turn.
       downloads?.bind(accountID: account?.userID)
+      discovery?.bindHistory(accountID: account?.userID)
       nativeNotifications?.bind(accountID: account?.userID)
       Task { @MainActor in
         guard let account else {
@@ -234,17 +252,18 @@ struct MacEaseApp: App {
         }
         // Another transition may have superseded this one; binding the account
         // it replaced would put the wrong queue back.
-        guard let login, login.account == account else { return }
-        discovery?.prefetch(session: login)
+        guard let login, login.account?.userID == account.userID else { return }
+        if login.isOnline { discovery?.prefetch(session: login) }
         // Binding the new account is what restores its queue; the previous
         // account's stored queue is left on disk untouched.
         await queuePersistence?.activate(accountID: account.userID)
-        guard login.account == account else { return }
+        guard login.account?.userID == account.userID else { return }
         library?.restore(
           playlists: await queuePersistence?.storedPlaylists(
             accountID: account.userID
           ) ?? []
         )
+        if login.isOnline { library?.load(reset: true, session: login) }
       }
     }
     _session = State(initialValue: login)
@@ -405,7 +424,8 @@ struct MacEaseApp: App {
             session: session,
             arbiter: arbiter,
             storageStatus: storageDiagnostic ?? queuePersistence?.lastFailure
-              ?? downloads?.lastFailure
+              ?? downloads?.lastFailure,
+            artwork: artwork
           )
           .tabItem { Label("Session", systemImage: "person.crop.circle") }
           .tag(MainTab.session)
@@ -425,7 +445,19 @@ struct MacEaseApp: App {
             collections: collections,
             playback: playback,
             arbiter: arbiter,
-            artwork: artwork
+            artwork: artwork,
+            openAlbum: { id in
+              catalog.openAlbum(id: id, session: session)
+              catalogPane = .album
+              selectedTab = .catalog
+            },
+            openArtist: { id in
+              catalog.openArtist(id: id, session: session)
+              catalogPane = .artist
+              selectedTab = .catalog
+            },
+            downloads: downloads,
+            section: $collectionPane
           )
           .tabItem { Label("Collections", systemImage: "square.stack") }
           .tag(MainTab.collections)
@@ -442,7 +474,9 @@ struct MacEaseApp: App {
               catalog.openArtist(id: artist.id, session: session)
               catalogPane = .artist
               selectedTab = .catalog
-            }
+            },
+            downloads: downloads,
+            pane: $discoverPane
           )
           .tabItem { Label("Discover", systemImage: "sparkles") }
           .tag(MainTab.discover)
@@ -463,7 +497,8 @@ struct MacEaseApp: App {
               catalog.openArtist(id: artistID, session: session)
               catalogPane = .artist
               selectedTab = .catalog
-            }
+            },
+            downloads: downloads
           )
           .tabItem { Label("Search", systemImage: "magnifyingglass") }
           .tag(MainTab.search)
@@ -475,8 +510,10 @@ struct MacEaseApp: App {
             playback: playback,
             arbiter: arbiter,
             artwork: artwork,
+            downloads: downloads,
             showSimilarArtists: { artist in
               discovery.loadSimilarArtists(seed: artist, session: session)
+              discoverPane = .recommended
               selectedTab = .discover
             },
             pane: $catalogPane
@@ -521,8 +558,8 @@ struct MacEaseApp: App {
             audioRanges: audioRanges,
             downloads: downloads
           )
-            .tabItem { Label("Settings", systemImage: "gearshape") }
-            .tag(MainTab.settings)
+          .tabItem { Label("Settings", systemImage: "gearshape") }
+          .tag(MainTab.settings)
         }
         Divider()
         UnresolvedOutcomeBanner(arbiter: arbiter)
@@ -554,11 +591,61 @@ struct MacEaseApp: App {
         Task { await queuePersistence?.save() }
       }
       .task {
+        appDelegate.configureRecentSources(
+          account: { session.account?.userID }, sources: { discovery.recentSources },
+          open: openRecentSource
+        )
         await session.start()
+        if session.account != nil {
+          selectedTab = session.isOnline ? .discover : .downloads
+        }
+      }
+      .onChange(of: scenePhase) {
+        if scenePhase == .active { session.applicationDidBecomeActive() }
+      }
+      .environment(
+        \.openURL,
+        OpenURLAction { url in
+          guard let link = NeteaseMusicLink(url: url) else { return .systemAction }
+          openMusicLink(link)
+          return .handled
+        }
+      )
+      .onOpenURL { url in
+        if let link = NeteaseMusicLink(url: url) { openMusicLink(link) }
+      }
+      .sheet(isPresented: $showsOpenLink) {
+        Form {
+          Text("Open NetEase Music Link").font(.headline)
+          TextField("Song, album, artist or playlist link", text: $musicLinkText)
+          if let musicLinkError { Text(musicLinkError).foregroundStyle(.red) }
+          HStack {
+            Button("Open") {
+              guard
+                let url = URL(
+                  string: musicLinkText.trimmingCharacters(in: .whitespacesAndNewlines)),
+                let link = NeteaseMusicLink(url: url)
+              else {
+                musicLinkError = "Enter a valid music.163.com music link"
+                return
+              }
+              showsOpenLink = false
+              openMusicLink(link)
+            }.keyboardShortcut(.defaultAction)
+            Button("Cancel") { showsOpenLink = false }
+          }
+        }.padding().frame(width: 500)
       }
     }
     .defaultSize(width: 980, height: 760)
     .commands {
+      CommandGroup(after: .newItem) {
+        Button("Open Music Link…") {
+          musicLinkError = nil
+          showsOpenLink = true
+        }
+        .keyboardShortcut("o", modifiers: .command)
+      }
       CommandGroup(after: .appInfo) {
         Button("Check for Updates…") {
           updater.checkForUpdates()
@@ -577,13 +664,13 @@ struct MacEaseApp: App {
         Button("Previous") {
           _ = mediaRouter.perform(AppPlaybackCommand.previous)
         }
-          .keyboardShortcut(.leftArrow, modifiers: [.command, .option])
-          .disabled(!mediaRouter.canPerform(.previous))
+        .keyboardShortcut(.leftArrow, modifiers: [.command, .option])
+        .disabled(!mediaRouter.canPerform(.previous))
         Button("Next") {
           _ = mediaRouter.perform(AppPlaybackCommand.next)
         }
-          .keyboardShortcut(.rightArrow, modifiers: [.command, .option])
-          .disabled(!mediaRouter.canPerform(.next))
+        .keyboardShortcut(.rightArrow, modifiers: [.command, .option])
+        .disabled(!mediaRouter.canPerform(.next))
 
         Divider()
 
@@ -636,6 +723,68 @@ struct MacEaseApp: App {
   /// library only ever replaces a row it already holds, so a playlist read
   /// this way never enters the account's own collection and is never written
   /// to its stored snapshot.
+  private func openMusicLink(_ link: NeteaseMusicLink) {
+    switch link {
+    case .song(let id):
+      catalog.openSong(id: id, session: session)
+      catalogPane = .song
+      selectedTab = .catalog
+    case .album(let id):
+      catalog.openAlbum(id: id, session: session)
+      catalogPane = .album
+      selectedTab = .catalog
+    case .artist(let id):
+      catalog.openArtist(id: id, session: session)
+      catalogPane = .artist
+      selectedTab = .catalog
+    case .playlist(let id): openDiscoveredPlaylist(DiscoveredPlaylist(id: id, name: "Playlist"))
+    }
+  }
+
+  private func openRecentSource(_ context: PlaybackContext) {
+    switch context {
+    case .song(let id, _): openMusicLink(.song(id))
+    case .playlist(let id, let name): openDiscoveredPlaylist(DiscoveredPlaylist(id: id, name: name))
+    case .album(let id, _): openMusicLink(.album(id))
+    case .artist(let id, _): openMusicLink(.artist(id))
+    case .downloads: selectedTab = .downloads
+    case .cloudDrive:
+      collectionPane = .cloud
+      selectedTab = .collections
+    case .searchResults(let keywords):
+      catalog.query = keywords
+      catalog.runSearch(session: session)
+      selectedTab = .search
+    case .dailyRecommendations:
+      discoverPane = .recommended
+      selectedTab = .discover
+      discovery.loadDailySongs(session: session)
+    case .recommendationHistory(let date):
+      discoverPane = .history
+      selectedTab = .discover
+      discovery.loadRecommendationHistory(date: date, session: session)
+    case .recommendedNewSongs:
+      discoverPane = .recommended
+      selectedTab = .discover
+      discovery.loadNewSongs(session: session)
+    case .personalFM:
+      discoverPane = .radio
+      selectedTab = .discover
+      radio.startPersonalFM(session: session)
+    case .heartbeatMode(let name, let playlistID, let songID):
+      discoverPane = .radio
+      selectedTab = .discover
+      if let playlistID, let songID {
+        radio.startHeartbeatMode(
+          seed: Track(id: songID, name: name), playlistID: playlistID, session: session)
+      }
+    case .unknown, .listeningRankings, .recentListening: selectedTab = .records
+    case .similarSongs:
+      discoverPane = .recommended
+      selectedTab = .discover
+    }
+  }
+
   private func openDiscoveredPlaylist(_ playlist: DiscoveredPlaylist) {
     library.loadTracks(
       for: UserPlaylist(

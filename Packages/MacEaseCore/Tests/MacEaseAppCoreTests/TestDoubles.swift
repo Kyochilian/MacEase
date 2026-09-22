@@ -94,6 +94,7 @@ actor RequestGate {
 /// never touches the network; an unprogrammed call is a test failure, not a
 /// silent empty result.
 actor FakeTransport: NeteaseTransporting {
+  func resetSessionContext() {}
   enum Call: Equatable, Sendable {
     case accountStatus
     case userPlaylists(offset: Int, limit: Int)
@@ -109,11 +110,29 @@ actor FakeTransport: NeteaseTransporting {
     case lyrics(Int64)
     case setSongLiked(Int64, Bool)
     case createPlaylist(String, isPrivate: Bool)
+    case updatePlaylistMetadata(Int64, PlaylistMetadataEdit)
+    case reorderPlaylists([Int64])
+    case reorderPlaylistTracks(Int64, [Int64])
+    case cloudSongDetail(Int64)
+    case cloudLyrics(Int64, Int64)
+    case matchCloudSong(Int64, Int64, Int64)
+    case resolveCloudURL(Int64, PlaybackQuality)
+    case uploadCloudFile(String)
+    case importCloudFile(String, Int64?)
+    case updatePlaylistCover(Int64)
+    case artistSongs(Int64, Int)
+    case artistBiography(Int64)
+    case playlistTags(PlaylistTagKind)
+    case hotSearches
+    case recommendationHistoryDates
+    case recommendationHistory(String)
+    case recentMusic(RecentMusicKind)
     case deletePlaylist(Int64)
     case editPlaylistTracks(PlaylistTrackEdit, Int64, [Int64])
     case renamePlaylist(Int64, String)
     case setPlaylistSubscribed(Bool, Int64)
     case resolveSongURL(Int64, PlaybackQuality)
+    case resolveDownloadURL(Int64, PlaybackQuality)
     case scrobbleStart(Int64, ScrobbleContext)
     case scrobbleFinish(Int64, ScrobbleContext, Int)
     case beginQRLogin
@@ -154,6 +173,8 @@ actor FakeTransport: NeteaseTransporting {
 
   private(set) var calls: [Call] = []
   let gate = RequestGate()
+  private var callGates: [(Call, RequestGate)] = []
+  func setGate(_ gate: RequestGate, for call: Call) { callGates.append((call, gate)) }
 
   var accountStatusResult: Result<AccountSessionState, any Error> = .success(
     .authenticated(testAccount)
@@ -187,6 +208,7 @@ actor FakeTransport: NeteaseTransporting {
   var albumPages: [CatalogPage<Album>] = []
   var artistPages: [CatalogPage<Artist>] = []
   var cloudPages: [CloudPage] = []
+  var cloudDetails: [Int64: CloudSong] = [:]
   var collectionError: (any Error)?
 
   func setQRSession(_ value: Result<QRLoginSession, any Error>) { qrSessionResult = value }
@@ -195,7 +217,10 @@ actor FakeTransport: NeteaseTransporting {
   func setRefresh(_ value: Result<NeteaseCredential, any Error>) { refreshResult = value }
   func setAlbumPages(_ value: [CatalogPage<Album>]) { albumPages = value }
   func setArtistPages(_ value: [CatalogPage<Artist>]) { artistPages = value }
-  func setCloudPages(_ value: [CloudPage]) { cloudPages = value }
+  func setCloudPages(_ value: [CloudPage]) {
+    cloudPages = value
+    for song in value.flatMap(\.songs) { cloudDetails[song.id] = song }
+  }
   func setCollectionError(_ value: (any Error)?) { collectionError = value }
 
   func beginQRLogin() async throws -> QRLoginSession {
@@ -328,6 +353,7 @@ actor FakeTransport: NeteaseTransporting {
 
   private func record(_ call: Call) async {
     calls.append(call)
+    if let selected = callGates.first(where: { $0.0 == call })?.1 { await selected.pass() }
     await gate.pass()
   }
 
@@ -340,6 +366,7 @@ actor FakeTransport: NeteaseTransporting {
   ) async throws -> Response {
     calls.append(call)
     let reserved = response()
+    if let selected = callGates.first(where: { $0.0 == call })?.1 { await selected.pass() }
     await gate.pass()
     return try reserved.get()
   }
@@ -454,9 +481,7 @@ actor FakeTransport: NeteaseTransporting {
   var similarArtistsResult: Result<[Artist], any Error> = .success([])
   var searchPages: [SearchPage] = []
   var searchError: (any Error)?
-  var searchResponsesByScope: [
-    SearchScope: [Result<SearchPage, NeteaseServiceError>]
-  ] = [:]
+  var searchResponsesByScope: [SearchScope: [Result<SearchPage, NeteaseServiceError>]] = [:]
   var suggestionsResult: Result<[SearchSuggestion], any Error> = .success([])
   var defaultKeywordResult: Result<String?, any Error> = .success(nil)
   var albumDetailResult: Result<AlbumDetail, any Error>?
@@ -699,9 +724,110 @@ actor FakeTransport: NeteaseTransporting {
     name: String,
     isPrivate: Bool,
     credential: NeteaseCredential
-  ) async throws {
+  ) async throws -> UserPlaylist {
     await record(.createPlaylist(name, isPrivate: isPrivate))
     try writeResult.get()
+    return UserPlaylist(id: 9999, name: name, trackCount: 0, owned: true, isPrivate: isPrivate)
+  }
+
+  func updatePlaylistMetadata(
+    playlistID: Int64, edit: PlaylistMetadataEdit, credential: NeteaseCredential
+  ) async throws {
+    await record(.updatePlaylistMetadata(playlistID, edit))
+    try writeResult.get()
+  }
+  func reorderPlaylists(ids: [Int64], credential: NeteaseCredential) async throws {
+    await record(.reorderPlaylists(ids))
+    try writeResult.get()
+  }
+  func reorderPlaylistTracks(playlistID: Int64, ids: [Int64], credential: NeteaseCredential)
+    async throws
+  {
+    await record(.reorderPlaylistTracks(playlistID, ids))
+    try writeResult.get()
+  }
+
+  func cloudSongDetail(songID: Int64, credential: NeteaseCredential) async throws -> CloudSong {
+    await record(.cloudSongDetail(songID))
+    guard let song = cloudDetails[songID] else { throw NeteaseCatalogError.invalidResponse }
+    return song
+  }
+  func cloudLyrics(userID: Int64, songID: Int64, credential: NeteaseCredential) async throws
+    -> Lyrics
+  {
+    await record(.cloudLyrics(userID, songID))
+    return try lyricsResult.get()
+  }
+  func matchCloudSong(
+    songID: Int64, matchedSongID: Int64, userID: Int64, credential: NeteaseCredential
+  ) async throws {
+    await record(.matchCloudSong(songID, matchedSongID, userID))
+    try writeResult.get()
+  }
+  func resolveCloudURL(songID: Int64, quality: PlaybackQuality, credential: NeteaseCredential)
+    async throws -> SongURLResolution
+  {
+    await record(.resolveCloudURL(songID, quality))
+    return try songURLResult.get()
+  }
+  func uploadCloudFile(
+    at fileURL: URL, credential: NeteaseCredential,
+    progress: @escaping @Sendable (CloudUploadProgress) async -> Void
+  ) async throws -> Int64 {
+    await record(.uploadCloudFile(fileURL.lastPathComponent))
+    try writeResult.get()
+    await progress(.publishing)
+    return 501
+  }
+  func importCloudFile(at fileURL: URL, matchedSongID: Int64?, credential: NeteaseCredential)
+    async throws
+  {
+    await record(.importCloudFile(fileURL.lastPathComponent, matchedSongID))
+    try writeResult.get()
+  }
+  func updatePlaylistCover(playlistID: Int64, fileURL: URL, credential: NeteaseCredential)
+    async throws
+  {
+    await record(.updatePlaylistCover(playlistID))
+    try writeResult.get()
+  }
+
+  var artistSongPages: [CatalogPage<Track>] = []
+  func setArtistSongPages(_ pages: [CatalogPage<Track>]) { artistSongPages = pages }
+  func artistSongs(artistID: Int64, limit: Int, offset: Int, credential: NeteaseCredential)
+    async throws -> CatalogPage<Track>
+  {
+    await record(.artistSongs(artistID, offset))
+    guard !artistSongPages.isEmpty else { throw Unprogrammed(call: "artistSongs") }
+    return artistSongPages.removeFirst()
+  }
+  func artistBiography(artistID: Int64, credential: NeteaseCredential) async throws -> String {
+    await record(.artistBiography(artistID))
+    return "Biography"
+  }
+  func playlistTags(kind: PlaylistTagKind, credential: NeteaseCredential) async throws
+    -> [PlaylistTag]
+  {
+    await record(.playlistTags(kind))
+    return [PlaylistTag(name: "华语")]
+  }
+  func hotSearches(credential: NeteaseCredential) async throws -> [HotSearch] {
+    await record(.hotSearches)
+    return [HotSearch(keyword: "Music")]
+  }
+  func recommendationHistoryDates(credential: NeteaseCredential) async throws -> [String] {
+    await record(.recommendationHistoryDates)
+    return ["2026-09-04"]
+  }
+  func recommendationHistory(date: String, credential: NeteaseCredential) async throws -> [Track] {
+    await record(.recommendationHistory(date))
+    return makeTracks([1, 2])
+  }
+  func recentMusic(kind: RecentMusicKind, credential: NeteaseCredential) async throws
+    -> [RecentMusicEntry]
+  {
+    await record(.recentMusic(kind))
+    return []
   }
 
   func deletePlaylist(playlistID: Int64, credential: NeteaseCredential) async throws {
@@ -749,6 +875,16 @@ actor FakeTransport: NeteaseTransporting {
     return try songURLResult.get()
   }
 
+  func resolveDownloadURL(
+    songID: Int64,
+    quality: PlaybackQuality,
+    credential: NeteaseCredential
+  ) async throws -> SongURLResolution {
+    await record(.resolveDownloadURL(songID, quality))
+    if !songURLResults.isEmpty { return try songURLResults.removeFirst().get() }
+    return try songURLResult.get()
+  }
+
   func scrobbleStart(
     songID: Int64,
     context: ScrobbleContext,
@@ -772,6 +908,7 @@ actor FakeTransport: NeteaseTransporting {
 // MARK: - Credential store
 
 actor FakeVault: CredentialStoring {
+  let saveGate = RequestGate()
   private var stored: NeteaseCredential?
   private var loadError: (any Error)?
   private var deleteError: (any Error)?
@@ -794,7 +931,10 @@ actor FakeVault: CredentialStoring {
     return stored
   }
 
-  func save(_ credential: NeteaseCredential) throws { stored = credential }
+  func save(_ credential: NeteaseCredential) async throws {
+    stored = credential
+    await saveGate.pass()
+  }
 
   func delete() throws {
     if let deleteError { throw deleteError }
@@ -814,6 +954,7 @@ actor FakeVault: CredentialStoring {
 @MainActor
 final class FakeSession: SessionProviding {
   var account: NeteaseAccount?
+  var isOnline = true
   var validatedCredential: NeteaseCredential?
   private(set) var divergences: [SessionDivergence] = []
   private(set) var invalidations: [NeteaseCredential] = []
@@ -828,7 +969,11 @@ final class FakeSession: SessionProviding {
     _ credential: NeteaseCredential,
     account: NeteaseAccount
   ) -> Bool {
-    self.account == account && validatedCredential == credential
+    isOnline && matchesLocalSession(credential, account: account)
+  }
+
+  func matchesLocalSession(_ credential: NeteaseCredential, account: NeteaseAccount) -> Bool {
+    self.account?.userID == account.userID && validatedCredential == credential
   }
 
   func reportDivergence(_ divergence: SessionDivergence) {
@@ -866,8 +1011,7 @@ final class FakeAudioOutput: AudioOutput {
   var currentPositionSeconds: Double?
 
   var onPositionUpdate: (@MainActor (Double) -> Void)?
-  var onPlaybackStateChanged:
-    (@MainActor (AudioOutputPlaybackState) -> Void)?
+  var onPlaybackStateChanged: (@MainActor (AudioOutputPlaybackState) -> Void)?
   var onPlayedToEnd: (@MainActor () -> Void)?
   var onFailure: (@MainActor (AudioOutputFailure) -> Void)?
 
@@ -913,9 +1057,7 @@ final class FakeAudioOutput: AudioOutput {
     }
     try Task.checkCancellation()
     guard self.generation == generation else { throw CancellationError() }
-    let result = try (
-      prepareResults.isEmpty ? prepareResult : prepareResults.removeFirst()
-    ).get()
+    let result = try (prepareResults.isEmpty ? prepareResult : prepareResults.removeFirst()).get()
     loadedURL = url
     return result
   }

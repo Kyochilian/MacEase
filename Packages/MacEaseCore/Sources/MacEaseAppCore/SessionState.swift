@@ -38,29 +38,35 @@ package struct SessionSnapshot: Equatable, Sendable {
     case storedUnvalidated
     /// A session is stored and the service confirmed this account for it.
     case validated(NeteaseAccount)
+    case offline(NeteaseAccount)
   }
 
   package var presence: Presence
   package var validatedCredential: NeteaseCredential?
+  package var offlineCredential: NeteaseCredential?
 
   package init(
     presence: Presence = .unknown,
-    validatedCredential: NeteaseCredential? = nil
+    validatedCredential: NeteaseCredential? = nil,
+    offlineCredential: NeteaseCredential? = nil
   ) {
     self.presence = presence
     self.validatedCredential = validatedCredential
+    self.offlineCredential = offlineCredential
   }
 
   package var account: NeteaseAccount? {
-    guard case .validated(let account) = presence else { return nil }
-    return account
+    switch presence {
+    case .validated(let account), .offline(let account): account
+    default: nil
+    }
   }
 
   package var storedSessionPresence: StoredSessionPresence {
     switch presence {
     case .unknown: .unknown
     case .absent: .absent
-    case .storedUnvalidated, .validated: .stored
+    case .storedUnvalidated, .validated, .offline: .stored
     }
   }
 }
@@ -73,6 +79,7 @@ package enum SessionEvent: Equatable, Sendable {
   case storedNewCredential
   /// The service confirmed this account for this exact credential.
   case validated(NeteaseAccount, NeteaseCredential)
+  case restoredOffline(NeteaseAccount, NeteaseCredential)
   /// The stored item was confirmed gone, either by the user or by a
   /// service answer that matched the credential in use.
   case signedOut
@@ -134,6 +141,12 @@ package enum SessionReducer {
       // carried over onto a credential nobody has validated.
       return (SessionSnapshot(presence: .storedUnvalidated), .storedUnvalidated)
 
+    case .restoredOffline(let account, let credential):
+      return (
+        SessionSnapshot(presence: .offline(account), offlineCredential: credential),
+        .credentialReplaced(account)
+      )
+
     case .validated(let account, let credential):
       let next = SessionSnapshot(
         presence: .validated(account),
@@ -141,7 +154,7 @@ package enum SessionReducer {
       )
       // Session-scoped data is scoped to the account, not to the cookie, so a
       // refreshed credential for the same user keeps everything loaded.
-      if snapshot.account == account {
+      if snapshot.account?.userID == account.userID {
         return (next, .unchangedValidated(account))
       }
       return (next, .credentialReplaced(account))

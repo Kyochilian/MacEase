@@ -63,9 +63,7 @@ private func makeQueue(
   #expect(try await store.playlists(accountID: bob).map(\.id) == [2])
 }
 
-/// The current schema predates privacy. Restoring it as unknown is safer than
-/// offering Make Public for a row whose state was never stored.
-@Test func aStoredPlaylistRestoresPrivacyAsUnknown() async throws {
+@Test func aStoredPlaylistPreservesItsConfirmedMetadata() async throws {
   let store = try makeStore()
   let playlist = UserPlaylist(
     id: 1,
@@ -77,7 +75,7 @@ private func makeQueue(
 
   try await store.savePlaylists([playlist], accountID: alice)
 
-  #expect(try await store.playlists(accountID: alice)[0].isPrivate == nil)
+  #expect(try await store.playlists(accountID: alice)[0] == playlist)
 }
 
 @Test func theQueueRoundTripsWithItsContextAndPosition() async throws {

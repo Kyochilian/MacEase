@@ -20,7 +20,7 @@ package final class QueuePersistence {
   /// enough that a crash loses seconds rather than minutes of position.
   package static let tickSeconds: Double = 15
 
-  @ObservationIgnored private let store: LibraryStore
+  @ObservationIgnored package let store: LibraryStore
   @ObservationIgnored private weak var playback: PlaybackController?
   @ObservationIgnored private var accountID: Int64?
   @ObservationIgnored private var bindingRevision: UInt64 = 0
@@ -72,7 +72,7 @@ package final class QueuePersistence {
     do {
       let stored = try await store.queue(accountID: accountID)
       guard isBound(to: accountID, revision: revision) else { return }
-      if let stored {
+      if let stored, playback?.queueTracks.isEmpty == true {
         playback?.restore(stored, accountID: accountID)
         lastWritten = stored
       }

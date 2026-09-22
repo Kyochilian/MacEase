@@ -143,10 +143,7 @@ private func makeCloudSongs(_ ids: [Int64], fileSize: Int64 = 1000) -> [CloudSon
   #expect(await rig.transport.callCount() == 1)
 }
 
-/// Deleting frees exactly the file's own size, which the listing already
-/// reported. Refetching the page to learn that would be a second request the
-/// button did not promise.
-@Test @MainActor func deletingACloudSongAppliesItsSizeWithoutAnotherRequest() async {
+@Test @MainActor func deletingACloudSongSynchronizesTheRemainingFilesAndCapacity() async {
   let rig = CollectionsRig()
   let songs = makeCloudSongs([1, 2], fileSize: 5_000_000)
   await rig.transport.setCloudPages([
@@ -159,6 +156,11 @@ private func makeCloudSongs(_ ids: [Int64], fileSize: Int64 = 1000) -> [CloudSon
   rig.collections.loadCloud(reset: true, session: rig.session)
   await rig.settle()
 
+  await rig.transport.setCloudPages([
+    CloudPage(
+      songs: [songs[1]], more: false,
+      capacity: CloudCapacity(usedBytes: 5_000_000, totalBytes: 60_000_000))
+  ])
   rig.collections.deleteCloudSong(songs[0], session: rig.session)
   await rig.settle()
 
@@ -166,7 +168,7 @@ private func makeCloudSongs(_ ids: [Int64], fileSize: Int64 = 1000) -> [CloudSon
   #expect(rig.collections.cloudCapacity?.usedBytes == 5_000_000)
   #expect(
     await rig.transport.recordedCalls() == [
-      .cloudSongs(offset: 0), .deleteCloudSong(1),
+      .cloudSongs(offset: 0), .deleteCloudSong(1), .cloudSongs(offset: 0),
     ]
   )
 }
@@ -360,7 +362,7 @@ private func makeCloudSongs(_ ids: [Int64], fileSize: Int64 = 1000) -> [CloudSon
   rig.collections.loadAlbums(reset: true, session: rig.session)
   await rig.settle()
 
-  #expect(rig.collections.status == "Validate the session before loading collections")
+  #expect(rig.collections.status == "Connect to load your collections")
   #expect(rig.arbiter.isBusy == false)
   #expect(rig.arbiter.activeReadCount == 0)
   #expect(await rig.transport.callCount() == 0)

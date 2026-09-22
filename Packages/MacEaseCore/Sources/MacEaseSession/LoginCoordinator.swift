@@ -45,6 +45,11 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
   /// The only mutable session state. The reducer replaces it whole; no path
   /// edits presence and the validated credential separately.
   private var snapshot = SessionSnapshot()
+  // The last verified same-account rotation spans the asynchronous Keychain
+  // save and reads already returning from it. Both cookies represent this
+  // identity; keeping one predecessor avoids turning renewal into sign-out.
+  @ObservationIgnored private var verifiedRenewal:
+    (accountID: Int64, previous: NeteaseCredential, next: NeteaseCredential)?
 
   /// Display only. No logic reads or compares it.
   package var status = "Ready"
@@ -65,6 +70,7 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
   package private(set) var codeWasSent = false
 
   package var account: NeteaseAccount? { snapshot.account }
+  package var isOnline: Bool { snapshot.validatedCredential != nil }
   package var storedSessionPresence: StoredSessionPresence {
     snapshot.storedSessionPresence
   }
@@ -72,7 +78,7 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
   /// Session actions share the exclusive slot with server writes, so this is
   /// derived rather than a fourth independent busy flag.
   package var isBusy: Bool {
-    arbiter.isBusy || identityMutationPreparationIsActive
+    !arbiter.canBegin(effect: .sessionMutation) || identityMutationPreparationIsActive
   }
 
   package init(
@@ -103,24 +109,8 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
 
   @discardableResult
   package func start() async -> SessionMutationResult {
-    guard beginOperation("Session start") else { return .rejected(.busy) }
-    defer { endOperation() }
     automaticRefreshEnabled = true
-
-    let result: SessionMutationResult
-    do {
-      let stored = try await vault.load()
-      result = commit(.observedStoredItem(present: stored != nil))
-      status =
-        stored != nil
-        ? "Stored API session loaded; validation pending"
-        : "Loading official login page"
-    } catch {
-      result = commit(.inconclusive(failure(error)))
-      status = keychainErrorMessage(error)
-    }
-    load(Self.loginURL)
-    return result
+    return await validateSession()
   }
 
   package func loadLoginPage() {
@@ -159,16 +149,7 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
       return commit(.inconclusive(.cookiesUnusable(diagnostic)))
     }
 
-    do {
-      try await vault.save(credential)
-      status = "Saved \(credential.cookies.count) approved cookie names"
-      // Storage is proven, identity is not: the previous account must not be
-      // carried over onto a credential nobody has validated.
-      return commit(.storedNewCredential)
-    } catch {
-      status = keychainErrorMessage(error)
-      return commit(.inconclusive(failure(error)))
-    }
+    return await adopt(credential, source: "Web")
   }
 
   package func clearSession() async -> SessionMutationResult {
@@ -178,6 +159,7 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
     defer { endOperation() }
 
     webView.stopLoading()
+    await transport.resetSessionContext()
 
     var keychainError: (any Error)?
     do {
@@ -190,7 +172,7 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
       ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(),
       modifiedSince: .distantPast
     )
-    load(Self.loginURL)
+    webView.loadHTMLString("", baseURL: Self.loginURL)
 
     if let keychainError {
       // WebKit data is gone but the Keychain item may not be. Say that rather
@@ -385,10 +367,22 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
     _ credential: NeteaseCredential,
     readToken: OperationToken
   ) async -> QRPollCycle {
-    guard let mutationToken = arbiter.promote(readToken, name: "QR sign-in") else {
-      arbiter.end(readToken, outcome: .failed)
+    let key = qrSession?.key
+    let token: OperationToken?
+    if let promoted = arbiter.promote(readToken, name: "QR sign-in") {
+      token = promoted
+    } else {
+      arbiter.end(readToken, outcome: .applied)
+      status = "Sign-in confirmed; finishing the current change"
+      token = await arbiter.beginWhenAvailable(name: "QR sign-in", effect: .sessionMutation)
+    }
+    guard let mutationToken = token else {
       clearQRSession()
-      status = "The stored session changed while the code was confirmed; sign in again"
+      status = "Sign-in could not finish; try again"
+      return .finished
+    }
+    guard qrSession?.key == key, key != nil, !Task.isCancelled else {
+      arbiter.end(mutationToken, outcome: .cancelled)
       return .finished
     }
     defer { arbiter.end(mutationToken, outcome: .applied) }
@@ -508,7 +502,7 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
       modifiedSince: .distantPast
     )
     resetSignInForms()
-    load(Self.loginURL)
+    webView.loadHTMLString("", baseURL: Self.loginURL)
 
     if let keychainError {
       status =
@@ -523,6 +517,7 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
       return commit(.storedItemPresenceUnknown)
     }
     status = serverMessage
+    await transport.resetSessionContext()
     return commit(.signedOut)
   }
 
@@ -545,20 +540,35 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
       snapshot.validatedCredential != nil,
       qrSession == nil,
       !codeWasSent,
-      !isBusy,
-      arbiter.activeReadCount == 0,
       !automaticRefreshWasAttemptedToday(for: account)
     else { return nil }
+    return await refreshSession(automaticFor: account)
+  }
 
-    let refreshed = await refreshSession(automaticFor: account)
-    guard refreshed == .storedUnvalidated else { return refreshed }
-    return await validateSession()
+  package func applicationDidBecomeActive() {
+    guard automaticRefreshEnabled, automaticRefreshTask == nil else { return }
+    automaticRefreshTask = Task { [weak self] in
+      guard let self else { return }
+      defer { self.automaticRefreshTask = nil }
+      if self.account != nil, !self.isOnline {
+        _ = await self.validateSession()
+      } else {
+        _ = await self.refreshSessionIfNeeded()
+      }
+    }
   }
 
   private func refreshSession(
     automaticFor expectedAccount: NeteaseAccount?
   ) async -> SessionMutationResult {
-    guard await beginIdentityOperation("Refresh session") else {
+    if expectedAccount != nil {
+      guard
+        let token = await arbiter.beginWhenAvailable(
+          name: "Refresh session", effect: .sessionRefresh, timeout: .seconds(600)
+        )
+      else { return .rejected(.busy) }
+      operationToken = token
+    } else if !beginOperation("Refresh session") {
       return .rejected(.busy)
     }
     defer { endOperation() }
@@ -577,7 +587,7 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
 
     if let expectedAccount {
       guard
-        snapshot.account == expectedAccount,
+        snapshot.account?.userID == expectedAccount.userID,
         snapshot.validatedCredential == stored,
         qrSession == nil,
         !codeWasSent,
@@ -586,6 +596,7 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
       refreshDefaults.set(now(), forKey: automaticRefreshKey(for: expectedAccount))
     }
 
+    let expectedSnapshot = snapshot
     do {
       let refreshed = try await transport.refreshSession(credential: stored)
       // The item may have been replaced while the request was in flight; the
@@ -595,15 +606,43 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
         status = "Stored session changed; validate again"
         return commit(.storedItemChanged(hasStoredItem: true))
       }
-      try await vault.save(refreshed)
-      // A refreshed cookie proves storage, not identity: the account is only
-      // re-established by a validate, so this does not claim one.
-      status = "Session refreshed; validate to confirm the account"
-      return commit(.storedNewCredential)
+      guard
+        case .authenticated(let account) = try await transport.accountStatus(
+          credential: refreshed
+        )
+      else {
+        return await deleteStoredSession(
+          matching: stored, message: "Session expired; sign in again",
+          expectedSnapshot: expectedSnapshot
+        ).result
+      }
+      let current = try await vault.load()
+      guard current == stored, snapshot == expectedSnapshot else {
+        return commit(.storedItemChanged(hasStoredItem: current != nil))
+      }
+      let previousRenewal = verifiedRenewal
+      if snapshot.account?.userID == account.userID {
+        verifiedRenewal = (account.userID, stored, refreshed)
+      }
+      do {
+        try await vault.save(refreshed)
+      } catch {
+        verifiedRenewal = previousRenewal
+        throw error
+      }
+      guard snapshot == expectedSnapshot else { return .rejected(.busy) }
+      status = "Session refreshed"
+      return commit(.validated(account, refreshed))
     } catch NeteaseAuthError.noSessionInResponse {
       status = "NetEase accepted the refresh but returned no new session"
       return commit(.inconclusive(.notAuthenticated))
     } catch let error as NeteaseServiceError {
+      if error.source == .service, error.statusCode == 301 {
+        return await deleteStoredSession(
+          matching: stored, message: "Session expired; sign in again",
+          expectedSnapshot: expectedSnapshot
+        ).result
+      }
       status = "Refresh \(error.source.rawValue) error \(error.statusCode)"
       return commit(.inconclusive(.service(error)))
     } catch let error as CredentialVaultError {
@@ -689,15 +728,19 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
   package func validateSession() async -> SessionMutationResult {
     guard beginOperation("Validate session") else { return .rejected(.busy) }
     defer { endOperation() }
-    let expectedSnapshot = snapshot
+    var expectedSnapshot = snapshot
 
     var credential: NeteaseCredential?
     do {
       guard let loaded = try await vault.load() else {
-        status = "No stored session to validate"
+        status = "Sign in to your music library"
         return commit(.storedItemChanged(hasStoredItem: false))
       }
       credential = loaded
+      if snapshot.account == nil {
+        commit(.observedStoredItem(present: true))
+        expectedSnapshot = snapshot
+      }
 
       switch try await transport.accountStatus(credential: loaded) {
       case .authenticated(let account):
@@ -731,6 +774,18 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
       status = keychainErrorMessage(error)
       return commit(.inconclusive(.keychain(error)))
     } catch {
+      if let error = error as? URLError,
+        [
+          .notConnectedToInternet, .networkConnectionLost, .timedOut,
+          .cannotConnectToHost, .cannotFindHost, .dnsLookupFailed,
+        ].contains(error.code),
+        snapshot.account == nil, let credential,
+        (try? await vault.load()) == credential,
+        let account = storedLocalAccount(matching: credential)
+      {
+        status = "Offline: your downloaded music is available"
+        return commit(.restoredOffline(account, credential))
+      }
       status = "Account status network or response error"
       return commit(.inconclusive(.transport))
     }
@@ -759,6 +814,9 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
     else {
       // The server disproved this credential. Keeping it validated until the
       // user happens to press Validate would let later requests use it.
+      let expected = snapshot
+      await transport.resetSessionContext()
+      guard snapshot == expected else { return .notCurrent }
       status = "Stored session expired while a write was in flight; sign in again"
       commit(.storedItemPresenceUnknown)
       return .failed
@@ -798,7 +856,32 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
     _ credential: NeteaseCredential,
     account: NeteaseAccount
   ) -> Bool {
-    snapshot.account == account && snapshot.validatedCredential == credential
+    guard snapshot.account?.userID == account.userID else { return false }
+    if snapshot.validatedCredential == credential { return true }
+    guard let renewal = verifiedRenewal, renewal.accountID == account.userID,
+      snapshot.validatedCredential == renewal.previous
+        || snapshot.validatedCredential == renewal.next
+    else { return false }
+    return credential == renewal.previous || credential == renewal.next
+  }
+
+  package func matchesLocalSession(
+    _ credential: NeteaseCredential,
+    account: NeteaseAccount
+  ) -> Bool {
+    matchesValidatedSession(credential, account: account)
+      || snapshot.account?.userID == account.userID
+        && (snapshot.validatedCredential ?? snapshot.offlineCredential) == credential
+  }
+
+  private static let localIdentityKey = "MacEase.LastVerifiedIdentity"
+
+  private func storedLocalAccount(matching credential: NeteaseCredential) -> NeteaseAccount? {
+    guard let stored = refreshDefaults.dictionary(forKey: Self.localIdentityKey),
+      stored["credential"] as? String == credential.fingerprint,
+      let userID = (stored["userID"] as? NSNumber)?.int64Value, userID > 0
+    else { return nil }
+    return NeteaseAccount(userID: userID)
   }
 
   /// Called by the app to clear every module's session-scoped data when the
@@ -810,10 +893,8 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
   /// takes the exclusive session-mutation slot. Validation and divergence do
   /// not use this hook: they discover an external identity fact rather than
   /// initiating a switch, and must not stop healthy playback speculatively.
-  @ObservationIgnored package var onPrepareIdentityMutation:
-    (@MainActor () async -> Void)?
-  @ObservationIgnored package var onFinishIdentityMutationPreparation:
-    (@MainActor () -> Void)?
+  @ObservationIgnored package var onPrepareIdentityMutation: (@MainActor () async -> Void)?
+  @ObservationIgnored package var onFinishIdentityMutationPreparation: (@MainActor () -> Void)?
   private var identityMutationPreparationIsActive = false
 
   /// Called by the app when the validated account itself changes, including to
@@ -822,8 +903,7 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
   /// copy of the decision — and none of them can be wired up and another left
   /// out. It runs after `onIdentityChanged`, so binding always follows
   /// clearing.
-  @ObservationIgnored package var onValidatedAccountChanged:
-    (@MainActor (NeteaseAccount?) -> Void)?
+  @ObservationIgnored package var onValidatedAccountChanged: (@MainActor (NeteaseAccount?) -> Void)?
 
   /// The single place a coordinator's observation of the stored item is
   /// committed to session state. Coordinators never write these fields.
@@ -883,7 +963,9 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
       return noLongerCurrentDeletion
     }
     status = message
-    load(Self.loginURL)
+    await transport.resetSessionContext()
+    guard deletionIsCurrent(expectedSnapshot) else { return noLongerCurrentDeletion }
+    webView.loadHTMLString("", baseURL: Self.loginURL)
     return (.deleted, commit(.signedOut))
   }
 
@@ -900,10 +982,22 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
   @discardableResult
   private func commit(_ event: SessionEvent) -> SessionMutationResult {
     let previousAccount = snapshot.account
+    let wasOnline = isOnline
+    switch event {
+    case .validated(let account, let credential):
+      refreshDefaults.set(
+        ["userID": account.userID, "credential": credential.fingerprint],
+        forKey: Self.localIdentityKey
+      )
+    case .storedNewCredential, .signedOut, .storedItemChanged, .storedItemPresenceUnknown:
+      refreshDefaults.removeObject(forKey: Self.localIdentityKey)
+    default: break
+    }
     let (next, result) = SessionReducer.reduce(snapshot, event)
     snapshot = next
     switch result {
     case .credentialReplaced, .signedOut, .storedUnvalidated, .storedPresenceUnknown:
+      verifiedRenewal = nil
       // Clear all session-scoped modules before the session operation releases
       // the arbiter, so no new request can observe half-transitioned app state.
       onIdentityChanged?()
@@ -913,14 +1007,11 @@ package final class LoginCoordinator: NSObject, SessionProviding, WKNavigationDe
     // Binding per-account local data follows from the account having actually
     // changed, not from which operation ran, so a path that establishes an
     // account cannot forget to bind it.
-    if snapshot.account != previousAccount {
+    if snapshot.account?.userID != previousAccount?.userID || (!wasOnline && isOnline) {
       onValidatedAccountChanged?(snapshot.account)
     }
     if automaticRefreshEnabled, case .validated = event {
-      automaticRefreshTask = Task { [weak self] in
-        guard let self else { return }
-        _ = await self.refreshSessionIfNeeded()
-      }
+      applicationDidBecomeActive()
     }
     return result
   }

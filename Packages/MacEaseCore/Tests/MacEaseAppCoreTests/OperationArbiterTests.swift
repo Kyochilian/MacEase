@@ -10,24 +10,15 @@ import Testing
 
 // MARK: - Arbiter semantics
 
-@Test @MainActor func onlyWritesAndSessionMutationsHoldTheExclusiveSlot() {
+@Test @MainActor func browsingPlaybackAndLibraryWritesRunTogether() throws {
   let arbiter = OperationArbiter()
-
-  let read = arbiter.begin(name: "Playlist", effect: .read)!
-  let playback = arbiter.begin(name: "Song URL", effect: .playbackResolution)!
-  #expect(arbiter.canStart())
-  #expect(arbiter.begin(name: "Like", effect: .write) == nil)
+  let read = try #require(arbiter.begin(name: "Playlist", effect: .read))
+  let playback = try #require(arbiter.begin(name: "Song URL", effect: .playbackResolution))
+  let write = try #require(arbiter.begin(name: "Like", effect: .write))
+  let nextRead = try #require(arbiter.begin(name: "Daily songs", effect: .read))
   #expect(arbiter.begin(name: "Validate session", effect: .sessionMutation) == nil)
-
-  #expect(arbiter.end(read, outcome: .applied) == .applied)
-  #expect(arbiter.end(read, outcome: .applied) == nil)
-  #expect(arbiter.begin(name: "Like", effect: .write) == nil)
-  #expect(arbiter.end(playback, outcome: .applied) == .applied)
-
-  let write = arbiter.begin(name: "Like", effect: .write)!
-  #expect(arbiter.begin(name: "Daily songs", effect: .read) == nil)
-  #expect(arbiter.begin(name: "Song URL", effect: .playbackResolution) == nil)
-  arbiter.end(write, outcome: .applied)
+  #expect(arbiter.begin(name: "Conflicting write", effect: .write) == nil)
+  for token in [read, playback, nextRead, write] { arbiter.end(token, outcome: .applied) }
   #expect(arbiter.begin(name: "Validate session", effect: .sessionMutation) != nil)
 }
 
@@ -53,7 +44,23 @@ import Testing
   #expect(arbiter.begin(name: "Like", effect: .write) != nil)
 }
 
-@Test @MainActor func feedbackSettlesBesideAnAdmittedReadButBlocksNewWork() {
+@Test @MainActor func localCredentialChecksReserveIdentityWithoutSpendingNetworkCapacity() throws {
+  let arbiter = OperationArbiter(maximumConcurrentReads: 1)
+  let local = try #require(arbiter.begin(name: "Local credential", effect: .localSessionAccess))
+  #expect(arbiter.activeReadCount == 0)
+  let network = try #require(arbiter.begin(name: "Lyrics", effect: .read))
+  #expect(arbiter.activeReadCount == 1)
+  arbiter.end(network, outcome: .applied)
+  #expect(arbiter.begin(name: "Refresh", effect: .sessionMutation) == nil)
+  let write = try #require(arbiter.begin(name: "Library write", effect: .write))
+  arbiter.end(write, outcome: .applied)
+  arbiter.end(local, outcome: .applied)
+  let mutation = try #require(arbiter.begin(name: "Refresh", effect: .sessionMutation))
+  #expect(arbiter.begin(name: "Local credential", effect: .localSessionAccess) == nil)
+  arbiter.end(mutation, outcome: .applied)
+}
+
+@Test @MainActor func feedbackAllowsReadsWhileSerializingWritesAndIdentityChanges() {
   let arbiter = OperationArbiter()
   let playback = arbiter.begin(name: "Next song URL", effect: .playbackResolution)!
 
@@ -61,7 +68,7 @@ import Testing
   #expect(feedback.kind == .exclusive)
   #expect(arbiter.active?.effect == .feedback)
   #expect(arbiter.activeReadCount == 1)
-  #expect(arbiter.begin(name: "Discovery", effect: .read) == nil)
+  let read = arbiter.begin(name: "Discovery", effect: .read)!
   #expect(arbiter.begin(name: "Like", effect: .write) == nil)
   #expect(arbiter.begin(name: "Sign out", effect: .sessionMutation) == nil)
 
@@ -69,6 +76,7 @@ import Testing
   #expect(arbiter.abandoningLosesTheOutcome(feedback))
   #expect(arbiter.end(feedback, outcome: .applied) == .applied)
   #expect(arbiter.end(playback, outcome: .applied) == .applied)
+  #expect(arbiter.end(read, outcome: .applied) == .applied)
 }
 
 @Test @MainActor func theCeilingNeverRefusesEveryRead() {
@@ -217,6 +225,75 @@ import Testing
 
 // MARK: - Cross-module exclusion
 
+@Test @MainActor func queuedFeedbackDoesNotBlockLyricsWhenAnUploadHoldsTheWriteSide() async throws {
+  let arbiter = OperationArbiter(maximumConcurrentReads: 1)
+  let upload = try #require(arbiter.begin(name: "Upload", effect: .upload))
+  let read = try #require(arbiter.begin(name: "Metadata", effect: .read))
+  var feedbackEntered = false
+  let feedback = Task { @MainActor in
+    feedbackEntered = true
+    return await arbiter.beginWhenAvailable(name: "Feedback", effect: .feedback)
+  }
+  while !feedbackEntered { await Task.yield() }
+  var lyricsEntered = false
+  let lyrics = Task { @MainActor in
+    lyricsEntered = true
+    return await arbiter.beginWhenAvailable(name: "Lyrics", effect: .read)
+  }
+  while !lyricsEntered { await Task.yield() }
+  arbiter.end(read, outcome: .applied)
+  #expect(arbiter.activeReadCount == 1)
+  let lyricToken = try #require(await lyrics.value)
+  #expect(arbiter.active?.id == upload.id)
+  arbiter.end(lyricToken, outcome: .applied)
+  arbiter.end(upload, outcome: .applied)
+  let feedbackToken = try #require(await feedback.value)
+  arbiter.end(feedbackToken, outcome: .applied)
+}
+
+@Test @MainActor func waitingIdentityChangeReservesTheDrainAndCancellationRechecksReads() async throws {
+  for cancel in [true, false] {
+    let arbiter = OperationArbiter(maximumConcurrentReads: 2)
+    let read = try #require(arbiter.begin(name: "Existing read", effect: .read))
+    var mutationEntered = false
+    let mutation = Task { @MainActor in
+      mutationEntered = true
+      return await arbiter.beginWhenAvailable(
+        name: "Refresh", effect: .sessionMutation,
+        timeout: cancel ? .seconds(30) : .milliseconds(10))
+    }
+    while !mutationEntered { await Task.yield() }
+    #expect(arbiter.begin(name: "New read", effect: .read) == nil)
+    var lyricsEntered = false
+    let lyrics = Task { @MainActor in
+      lyricsEntered = true
+      return await arbiter.beginWhenAvailable(name: "Lyrics", effect: .read)
+    }
+    while !lyricsEntered { await Task.yield() }
+    if cancel { mutation.cancel() }
+    #expect(await mutation.value == nil)
+    let lyricToken = try #require(await lyrics.value)
+    #expect(arbiter.activeReadCount == 2)
+    arbiter.end(read, outcome: .applied)
+    arbiter.end(lyricToken, outcome: .applied)
+  }
+}
+
+@Test @MainActor func aQueuedWriteDoesNotReserveTheReadSide() async throws {
+  let arbiter = OperationArbiter(maximumConcurrentReads: 2)
+  let existingWrite = try #require(arbiter.begin(name: "Existing write", effect: .write))
+  let writer = Task { @MainActor in
+    await arbiter.beginWhenAvailable(name: "Next write", effect: .write)
+  }
+  await Task.yield()
+  let read = try #require(arbiter.begin(name: "Browse", effect: .read))
+  arbiter.end(existingWrite, outcome: .applied)
+  let write = try #require(await writer.value)
+  #expect(arbiter.active?.id == write.id)
+  arbiter.end(read, outcome: .applied)
+  arbiter.end(write, outcome: .applied)
+}
+
 @MainActor
 private struct Rig {
   let transport = FakeTransport()
@@ -300,7 +377,8 @@ private struct Rig {
 
   rig.discovery.loadDailySongs(session: rig.session)
   await rig.waitForFirstRequest()
-  rig.playback.play(tracks: makeTracks([7]), startIndex: 0, context: .dailyRecommendations, session: rig.session)
+  rig.playback.play(
+    tracks: makeTracks([7]), startIndex: 0, context: .dailyRecommendations, session: rig.session)
 
   while await rig.transport.gate.arrivalCount() < 2 { await Task.yield() }
   #expect(await rig.transport.callCount() == 2)
@@ -351,7 +429,8 @@ private struct Rig {
   await rig.library.settleForTesting()
 
   #expect(rig.library.playlists.isEmpty)
-  #expect(rig.library.status == "Deleted playlist-11; Load Playlists before paging again")
+  #expect(rig.library.status.hasPrefix("Deleted playlist-11"))
+  #expect(rig.library.status.contains("could not be loaded"))
   #expect(rig.arbiter.unresolvedOutcomes.isEmpty)
 }
 
@@ -401,7 +480,8 @@ private struct Rig {
   rig.library.load(reset: true, session: rig.session)
   await rig.library.settleForTesting()
   #expect(rig.arbiter.canStart())
-  #expect(rig.library.status == "Playlist could not read the stored session (keychain status=-25300)")
+  #expect(
+    rig.library.status == "Playlist could not read the stored session (keychain status=-25300)")
 
   // Transport throws: released on the failure path.
   await rig.vault.setLoadError(nil)
@@ -420,7 +500,8 @@ private struct Rig {
   let rig = Rig()
   await rig.transport.gate.close()
 
-  rig.playback.play(tracks: makeTracks([9]), startIndex: 0, context: .dailyRecommendations, session: rig.session)
+  rig.playback.play(
+    tracks: makeTracks([9]), startIndex: 0, context: .dailyRecommendations, session: rig.session)
   await rig.waitForFirstRequest()
   #expect(rig.arbiter.canStart())
 

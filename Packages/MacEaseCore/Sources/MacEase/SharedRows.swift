@@ -41,7 +41,9 @@ struct Artwork: View {
     .task(id: url) {
       image = nil
       guard let url else { return }
-      image = await loader.image(for: url)
+      let loaded = await loader.image(for: url)
+      guard !Task.isCancelled else { return }
+      image = loaded
     }
     .accessibilityHidden(true)
   }
@@ -57,6 +59,9 @@ struct TrackLabel: View {
         Text(albumSuffixed(artists))
           .font(.caption)
           .foregroundStyle(.secondary)
+      }
+      if let notice = track.playbackNotice {
+        Text(notice).font(.caption2).foregroundStyle(.secondary)
       }
     }
   }
@@ -85,6 +90,30 @@ struct TrackRowLabel: View {
           .foregroundStyle(.tertiary)
       }
     }
+    .contextMenu {
+      if let id = track.catalogIdentity {
+        MusicLinkActions(link: .song(id))
+      }
+      if let album = track.album, let id = album.id {
+        MusicLinkActions(link: .album(id), title: album.name)
+      }
+      ForEach(track.artists, id: \.self) { artist in
+        if let id = artist.id { MusicLinkActions(link: .artist(id), title: artist.name) }
+      }
+    }
+  }
+}
+
+private struct MusicLinkActions: View {
+  @Environment(\.openURL) private var openURL
+  let link: NeteaseMusicLink
+  var title = "Details"
+  var body: some View {
+    Button("Open \(title)") { openURL(link.url) }
+    Button("Copy \(title == "Details" ? "Song Link" : title + " Link")") {
+      NSPasteboard.general.clearContents()
+      NSPasteboard.general.setString(link.url.absoluteString, forType: .string)
+    }
   }
 }
 
@@ -107,6 +136,7 @@ struct AlbumRowLabel: View {
         .foregroundStyle(.secondary)
       }
     }
+    .contextMenu { MusicLinkActions(link: .album(album.id), title: album.name) }
   }
 }
 
@@ -131,6 +161,7 @@ struct ArtistRowLabel: View {
           .foregroundStyle(.secondary)
       }
     }
+    .contextMenu { MusicLinkActions(link: .artist(artist.id), title: artist.name) }
   }
 }
 
@@ -163,7 +194,7 @@ struct LikeButton: View {
   let disabled: Bool
 
   var body: some View {
-    let state = library.liked.state(of: track.id)
+    let state = library.likedState(for: track)
     Button {
       library.setLiked(state != .liked, for: track, session: session)
     } label: {
@@ -173,8 +204,8 @@ struct LikeButton: View {
         )
     }
     .buttonStyle(.borderless)
-    .disabled(session.account == nil || disabled)
-    .help(help(for: state))
+    .disabled(!library.canLike(track, session: session) || disabled)
+    .help(track.catalogIdentity == nil ? "Match this cloud file before liking it" : help(for: state))
     .accessibilityLabel(accessibilityLabel(for: state))
   }
 
@@ -184,9 +215,9 @@ struct LikeButton: View {
 
   private func help(for state: LikedState) -> String {
     switch state {
-    case .liked: "Unlike · 1 request"
-    case .notLiked: "Like · 1 request"
-    case .unknown: "Liked state unknown; this likes the track · 1 request"
+    case .liked: "Unlike"
+    case .notLiked: "Like"
+    case .unknown: "Liked state unknown; this likes the track"
     }
   }
 
@@ -208,7 +239,7 @@ struct AddToPlaylistMenu: View {
 
   var body: some View {
     Menu {
-      ForEach(library.playlists.filter(\.owned), id: \.id) { target in
+      ForEach(library.playlists.filter(\.canEdit), id: \.id) { target in
         Button(target.name) {
           library.addTrack(track, to: target, session: session)
         }
@@ -218,8 +249,12 @@ struct AddToPlaylistMenu: View {
     }
     .menuStyle(.borderlessButton)
     .fixedSize()
-    .disabled(disabled || !library.playlists.contains(where: \.owned))
-    .help("Add to one of your playlists · 1 request")
+    .disabled(
+      disabled || track.catalogIdentity == nil || !library.canWrite(session: session)
+        || !library.playlists.contains(where: \.canEdit)
+    )
+    .help(track.catalogIdentity == nil
+      ? "Match this cloud file before adding it to a playlist" : "Add to one of your playlists")
     .accessibilityLabel("Add \(track.name) to a playlist")
   }
 }
@@ -237,29 +272,34 @@ struct QueueNextButton: View {
     let snapshot = playback.queueSnapshot
     let accountID = snapshot?.accountID ?? session.account?.userID
     let revision = snapshot?.revision ?? playback.queueRevision
-    let canQueue = accountID.map {
-      playback.canQueueNext(
-        context: context,
-        accountID: $0,
-        revision: revision,
-        session: session
-      )
-    } ?? false
-    Button {
-      guard let accountID else { return }
-      _ = playback.queueNext(
-        track,
-        context: context,
-        accountID: accountID,
-        revision: revision,
-        session: session
-      )
+    let canQueue =
+      accountID.map {
+        playback.canQueueNext(
+          context: context,
+          accountID: $0,
+          revision: revision,
+          session: session
+        )
+      } ?? false
+    Menu {
+      Button("Play Next") {
+        guard let accountID else { return }
+        _ = playback.queueNext(
+          track, context: context, accountID: accountID, revision: revision, session: session)
+      }
+      Button("Add to End of Queue") {
+        guard let accountID else { return }
+        _ = playback.enqueue(
+          [track], next: false, context: context, accountID: accountID, revision: revision,
+          session: session)
+      }
     } label: {
       Image(systemName: "text.line.first.and.arrowtriangle.forward")
     }
-    .buttonStyle(.borderless)
+    .menuStyle(.borderlessButton)
+    .fixedSize()
     .disabled(!canQueue || snapshot?.current.id == track.id)
-    .help("Play next · local queue edit, no request")
+    .help("Play next")
     .accessibilityLabel("Play \(track.name) next")
   }
 }
@@ -299,6 +339,50 @@ struct PlayTrackButton: View {
   }
 }
 
+struct TrackCollectionMenu: View {
+  let tracks: [Track]
+  let context: PlaybackContext
+  let playback: PlaybackController
+  let session: LoginCoordinator
+  let library: PlaylistLibraryCoordinator
+  let downloads: DownloadCoordinator?
+
+  var body: some View {
+    let accountID = session.account?.userID
+    let revision = playback.queueRevision
+    Menu("All Shown Songs (\(tracks.count))") {
+      Button("Play") {
+        guard session.account?.userID == accountID else { return }
+        _ = playback.play(tracks: tracks, startIndex: 0, context: context, session: session)
+      }
+      Button("Play Next") {
+        guard let accountID else { return }
+        _ = playback.enqueue(
+          tracks, next: true, context: context, accountID: accountID, revision: revision,
+          session: session)
+      }
+      Button("Add to Queue") {
+        guard let accountID else { return }
+        _ = playback.enqueue(
+          tracks, next: false, context: context, accountID: accountID, revision: revision,
+          session: session)
+      }
+      Button("Download") {
+        guard session.account?.userID == accountID else { return }
+        downloads?.enqueueDownloads(tracks: tracks, quality: playback.quality, session: session)
+      }.disabled(downloads == nil || !session.isOnline)
+      Menu("Add to Playlist") {
+        ForEach(library.playlists.filter(\.canEdit), id: \.id) { playlist in
+          Button(playlist.name) {
+            guard session.account?.userID == accountID else { return }
+            library.editTracks(.add, tracks: tracks, in: playlist, session: session)
+          }
+        }
+      }.disabled(!library.canWrite(session: session) || tracks.contains { $0.catalogIdentity == nil })
+    }.disabled(tracks.isEmpty || accountID == nil)
+  }
+}
+
 /// The single foreground-download control shared by track rows and Now
 /// Playing. It never starts automatically, and a running transfer exposes its
 /// progress and cancel action wherever the same track is shown.
@@ -323,7 +407,7 @@ struct DownloadTrackButton: View {
     guard let accountID = session.account?.userID else { return false }
     return downloads?.downloads.contains {
       $0.accountID == accountID && $0.track.id == track.id
-        && $0.requestedQuality == quality
+        && $0.requestedQuality == quality && $0.isVerifiedComplete
     } == true
   }
 
@@ -365,7 +449,7 @@ struct DownloadTrackButton: View {
         }
         .buttonStyle(.borderless)
         .disabled(
-          disabled || session.account == nil || downloads.isDownloading
+          disabled || !session.isOnline
             || downloads.isMaintaining || downloads.isLoading
             || !downloads.canCreateDownloads
         )

@@ -1,5 +1,7 @@
 import Foundation
 import NeteaseKit
+import Observation
+import Synchronization
 import Testing
 
 @testable import MacEaseAppCore
@@ -111,6 +113,40 @@ private struct SnapshotRig {
 
   #expect(rig.playback.seek(to: 7))
   #expect(rig.playback.presentationPositionSeconds == 7)
+}
+
+@Test @MainActor func lyricPresentationObservesProgressAndSeeksWithoutPausing() async {
+  let rig = SnapshotRig()
+  await rig.play()
+  rig.output.reportPosition(1)
+  let document = Lyrics.lines([
+    LyricLine(timeSeconds: 0, text: "First"),
+    LyricLine(timeSeconds: 10, text: "Second"),
+    LyricLine(timeSeconds: 20, text: "Third"),
+  ])
+
+  for (position, expectedLine) in [(12.0, 1), (25.0, 2), (3.0, 0)] {
+    let invalidated = Mutex(false)
+    withObservationTracking {
+      _ = document.lineIndex(at: rig.playback.presentationPositionSeconds)
+    } onChange: {
+      invalidated.withLock { $0 = true }
+    }
+    if position == 12 {
+      rig.output.reportPosition(position)
+    } else {
+      #expect(rig.playback.seek(to: position))
+    }
+    // SwiftUI must be invalidated by the tick or seek itself, before pause
+    // changes phase. Reading the getter afresh alone would miss this bug.
+    #expect(invalidated.withLock { $0 })
+    // Let AudioOutput finish the asynchronous seek before sampling its clock.
+    for _ in 0..<100 where rig.output.currentPositionSeconds != position {
+      await Task.yield()
+    }
+    #expect(document.lineIndex(at: rig.playback.presentationPositionSeconds) == expectedLine)
+    #expect(rig.playback.phase == .playing)
+  }
 }
 
 @Test @MainActor func queueBoundariesDisableTheStepsTheyShould() async {

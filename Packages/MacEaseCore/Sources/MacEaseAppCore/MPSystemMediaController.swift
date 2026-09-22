@@ -74,10 +74,8 @@ package final class MPSystemMediaController: SystemMediaControlling {
     if let albumTitle = snapshot.albumTitle {
       info[MPMediaItemPropertyAlbumTitle] = albumTitle
     }
-    if let artwork {
-      info[MPMediaItemPropertyArtwork] = MPMediaItemArtwork(
-        boundsSize: artwork.size
-      ) { _ in artwork }
+    if let image = artwork?.cgImage(forProposedRect: nil, context: nil, hints: nil) {
+      info[MPMediaItemPropertyArtwork] = Self.mediaArtwork(image)
     }
     if let duration = snapshot.durationSeconds {
       info[MPMediaItemPropertyPlaybackDuration] = duration
@@ -98,6 +96,14 @@ package final class MPSystemMediaController: SystemMediaControlling {
     infoCenter.nowPlayingInfo = nil
     infoCenter.playbackState = .stopped
     updateEnablement(for: nil)
+  }
+
+  // MediaPlayer requests images on its own queue. Build this callback outside
+  // MainActor isolation and capture only immutable pixels, not a UI NSImage.
+  nonisolated package static func mediaArtwork(_ image: CGImage) -> MPMediaItemArtwork {
+    MPMediaItemArtwork(boundsSize: CGSize(width: image.width, height: image.height)) { _ in
+      NSImage(cgImage: image, size: .zero)
+    }
   }
 
   private func playbackState(

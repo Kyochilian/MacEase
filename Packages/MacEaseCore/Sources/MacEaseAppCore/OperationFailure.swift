@@ -24,6 +24,7 @@ package enum OperationFailure: Error, Equatable, Sendable {
   case http(status: Int)
   /// The application answered with a code other than 200.
   case service(code: Int)
+  case serviceMessage(code: Int, message: String)
   /// A response arrived and did not parse into what the contract promises.
   case decode
   /// The Keychain refused, or held something that is not a usable credential.
@@ -31,6 +32,10 @@ package enum OperationFailure: Error, Equatable, Sendable {
   /// MacEase refused the resource before any request: a non-HTTPS media URL,
   /// or a host that is not on the approved list.
   case refusedResource
+  case invalidLocalFile
+  case uploadNotPublished
+  case cannotImport
+  case verificationUnavailable
 
   /// Classifies a thrown error. `cancelled` is checked first and separately,
   /// because a cancelled task can surface as almost anything underneath and
@@ -42,12 +47,21 @@ package enum OperationFailure: Error, Equatable, Sendable {
     if cancelled || error is CancellationError { return .cancelled }
 
     switch error {
+    case NeteaseUploadError.invalidFile: return .invalidLocalFile
+    case NeteaseUploadError.beforePublication: return .uploadNotPublished
+    case NeteaseUploadError.notImportable: return .cannotImport
+    case NeteaseUploadError.invalidResponse: return .decode
+    case is NeteaseWritePreparationError: return .verificationUnavailable
     case let error as OperationFailure:
       return error
     case let error as NeteaseServiceError:
       switch error.source {
       case .http: return .http(status: error.statusCode)
-      case .service: return .service(code: error.statusCode)
+      case .service:
+        if let message = error.message {
+          return .serviceMessage(code: error.statusCode, message: message)
+        }
+        return .service(code: error.statusCode)
       }
     case let error as CredentialVaultError:
       return .credential(error)
@@ -87,12 +101,19 @@ package enum OperationFailure: Error, Equatable, Sendable {
       "\(operation) failed; NetEase did not answer the request"
     case .service:
       "NetEase refused \(operation.lowercased())"
+    case .serviceMessage(_, let message): message
     case .decode:
       "\(operation) returned something MacEase does not understand"
     case .credential:
       "\(operation) could not read the stored session"
     case .refusedResource:
       "\(operation) returned an address MacEase will not load"
+    case .invalidLocalFile: "Choose a readable audio or image file supported by this action"
+    case .uploadNotPublished:
+      "The upload did not finish and the file was not published; you can try again"
+    case .cannotImport: "This file is not available for import; upload the file instead"
+    case .verificationUnavailable:
+      "The operation was not sent because verification could not be completed; try again"
     }
   }
 
@@ -105,9 +126,14 @@ package enum OperationFailure: Error, Equatable, Sendable {
     case .transport: "transport"
     case .http(let status): "http=\(status)"
     case .service(let code): "service=\(code)"
+    case .serviceMessage(let code, _): "service=\(code)"
     case .decode: "decode"
     case .credential(let error): "keychain \(error.diagnostic)"
     case .refusedResource: "refusedResource"
+    case .invalidLocalFile: "invalidLocalFile"
+    case .uploadNotPublished: "uploadNotPublished"
+    case .cannotImport: "cannotImport"
+    case .verificationUnavailable: "verificationUnavailable"
     }
   }
 

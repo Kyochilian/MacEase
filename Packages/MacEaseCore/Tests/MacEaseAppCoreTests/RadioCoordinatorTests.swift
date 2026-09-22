@@ -450,7 +450,9 @@ private struct RadioRig {
       .resolveSongURL(7, .standard),
     ]
   )
-  #expect(rig.playback.queueContext == .heartbeatMode(seedName: "track-7"))
+  #expect(
+    rig.playback.queueContext
+      == .heartbeatMode(seedName: "track-7", playlistID: 24_381_616, seedSongID: 7))
   #expect(rig.playback.queue?.count == 2)
   #expect(rig.playback.phase == .playing)
 }

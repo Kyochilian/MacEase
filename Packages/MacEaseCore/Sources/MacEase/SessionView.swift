@@ -3,13 +3,13 @@ import MacEaseSession
 import NeteaseKit
 import SwiftUI
 
-
 struct SessionView: View {
   @Bindable var session: LoginCoordinator
   let arbiter: OperationArbiter
   /// Non-nil when local storage is not doing its job, so a queue that is not
   /// being saved never looks like one that is.
   let storageStatus: String?
+  let artwork: ArtworkLoader
   @State private var showsWebLogin = false
 
   var body: some View {
@@ -25,28 +25,38 @@ struct SessionView: View {
 
         Spacer()
 
-        Button("Validate Session", systemImage: "checkmark.shield") {
+        Button("Reconnect", systemImage: "checkmark.shield") {
           mutateSession(session.validateSession)
         }
-        Button("Refresh Token · 1 request", systemImage: "arrow.triangle.2.circlepath") {
+        Button("Refresh Session", systemImage: "arrow.triangle.2.circlepath") {
           mutateSession(session.refreshSession)
         }
         .help("Exchanges the stored session for a fresh one")
-        Button("Sign Out · up to 2 requests", systemImage: "rectangle.portrait.and.arrow.right") {
+        Button("Sign Out", systemImage: "rectangle.portrait.and.arrow.right") {
           mutateSession(session.signOutEverywhere)
         }
         .help("Revokes the session on NetEase, then clears it here")
       }
       .padding(12)
-      .disabled(arbiter.isBusy)
+      .disabled(session.isBusy)
 
       Divider()
 
-      NativeSignInView(
-        session: session,
-        arbiter: arbiter,
-        mutate: mutateSession
-      )
+      if let account = session.account {
+        VStack(alignment: .leading, spacing: 8) {
+          Artwork(url: account.avatarURL, size: 64, symbol: "person.crop.circle", loader: artwork)
+          Text(account.nickname ?? "Account \(account.userID)").font(.title2)
+          Text(session.isOnline ? "Signed in" : "Offline — downloaded music is available")
+          if let vipType = account.vipType {
+            Text(vipType > 0 ? "Music membership: active" : "Standard account")
+              .foregroundStyle(.secondary)
+          }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding()
+      } else {
+        NativeSignInView(session: session, arbiter: arbiter, mutate: mutateSession)
+      }
 
       Divider()
 
@@ -127,5 +137,3 @@ struct SessionView: View {
     Task { _ = await operation() }
   }
 }
-
-

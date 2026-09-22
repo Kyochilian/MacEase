@@ -422,8 +422,7 @@ private func combinedResponses(
   #expect(rig.catalog.status == "Session changed; validate again")
 }
 
-/// A read the arbiter refuses sends nothing and leaves what is on screen.
-@Test @MainActor func aRefusedSearchSendsNothingAfterTheEditClearsOldResults() async {
+@Test @MainActor func aSearchWaitsForAWriteAndPublishesOnlyItsNewQuery() async {
   let rig = CatalogRig()
   await rig.transport.setSearchPages([songPage([1], total: 1)])
   rig.catalog.query = "canary"
@@ -431,15 +430,18 @@ private func combinedResponses(
   await rig.settle()
 
   let blocking = try! #require(rig.arbiter.begin(name: "write", effect: .write))
+  await rig.transport.setSearchPages([songPage([2], total: 1)])
   rig.catalog.query = "second"
   rig.catalog.runSearch(session: rig.session)
-  await rig.settle()
+  await Task.yield()
 
   #expect(await rig.transport.callCount() == 1)
   #expect(rig.catalog.results.isEmpty)
-  #expect(rig.catalog.resultsKeywords == nil)
   #expect(rig.catalog.resultsHaveMore == false)
   rig.arbiter.end(blocking, outcome: .applied)
+  await rig.settle()
+  #expect(rig.catalog.resultsKeywords == "second")
+  #expect(rig.catalog.results == .songs(makeTracks([2])))
 }
 
 // MARK: - Suggestions
@@ -612,9 +614,10 @@ private func combinedResponses(
   #expect(rig.catalog.album?.tracks.map(\.id) == [1, 2])
   #expect(rig.catalog.albumDynamic?.isCollected == true)
   #expect(collections.albumCollectionState(for: 5) == .confirmed(true))
-  #expect(
-    await rig.transport.recordedCalls() == [.albumDetail(5), .albumDynamic(5)]
-  )
+  let calls = await rig.transport.recordedCalls()
+  #expect(calls.count == 2)
+  #expect(calls.contains(.albumDetail(5)))
+  #expect(calls.contains(.albumDynamic(5)))
 }
 
 @Test @MainActor func openingAnArtistReadsTopSongsAndTheFirstAlbumPage() async {
@@ -640,14 +643,11 @@ private func combinedResponses(
 
   // The repeated row is dropped rather than listed twice.
   #expect(rig.catalog.artistAlbums.map(\.id) == [10, 11, 12, 13])
-  #expect(
-    await rig.transport.recordedCalls() == [
-      .artistDetail(3),
-      .artistAlbums(3, offset: 0),
-      .artistAlbums(3, offset: 2),
-      .artistAlbums(3, offset: 4),
-    ]
-  )
+  let calls = await rig.transport.recordedCalls()
+  #expect(calls.count == 4)
+  #expect(calls.prefix(2).contains(.artistDetail(3)))
+  #expect(calls.prefix(2).contains(.artistAlbums(3, offset: 0)))
+  #expect(Array(calls.dropFirst(2)) == [.artistAlbums(3, offset: 2), .artistAlbums(3, offset: 4)])
 }
 
 /// Opening a second thing supersedes the first: the old page must not appear
@@ -718,7 +718,7 @@ private func combinedResponses(
     CatalogPage(items: makeAlbums([2, 3, 3]), more: false),
   ])
   await rig.transport.setTopArtistPages([
-    CatalogPage(items: makeArtists([7, 7, 8, 9]), more: true),
+    CatalogPage(items: makeArtists([7, 7, 8, 9]), more: true)
   ])
 
   rig.catalog.loadNewAlbums(reset: true, session: rig.session)

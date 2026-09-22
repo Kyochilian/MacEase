@@ -19,6 +19,15 @@ struct DownloadsView: View {
           .font(.caption.monospacedDigit())
           .foregroundStyle(.secondary)
         Spacer()
+        Button("Play All", systemImage: "play.fill") {
+          if let first = downloads.downloads.first(where: \.isVerifiedComplete) {
+            playback.playDownloaded(first, session: session)
+          }
+        }.disabled(!downloads.downloads.contains(where: \.isVerifiedComplete))
+        if !downloads.failedDownloads.isEmpty {
+          Button("Retry Failed") { downloads.retryFailedDownloads(session: session) }.disabled(
+            !session.isOnline)
+        }
         Button("Delete All", systemImage: "trash", role: .destructive) {
           confirmsClear = true
         }
@@ -47,6 +56,15 @@ struct DownloadsView: View {
           HStack(spacing: 8) {
             TrackRowLabel(track: download.track, loader: artwork)
             Spacer()
+            if !download.isVerifiedComplete {
+              Button("Verify Download") {
+                downloads.startDownload(
+                  track: download.track, quality: download.requestedQuality, session: session
+                )
+              }
+              .disabled(!session.isOnline || downloads.isDownloading)
+              .help("This older file has not been checked against download permissions")
+            }
             Text(download.actualQuality)
               .font(.caption)
               .foregroundStyle(.secondary)
@@ -68,7 +86,7 @@ struct DownloadsView: View {
               Image(systemName: "play.fill")
             }
             .buttonStyle(.borderless)
-            .disabled(downloads.isMaintaining)
+            .disabled(downloads.isMaintaining || !download.isVerifiedComplete)
             .help("Play the saved \(download.actualQuality) file")
             .accessibilityLabel("Play downloaded \(download.track.name)")
             Button {
@@ -88,6 +106,20 @@ struct DownloadsView: View {
       Divider()
 
       HStack(spacing: 8) {
+        if !downloads.pendingDownloads.isEmpty {
+          Text("\(downloads.pendingDownloads.count) queued")
+          Button("Cancel All") { downloads.cancelAllDownloads() }
+        }
+        if !downloads.failedDownloads.isEmpty {
+          Menu("\(downloads.failedDownloads.count) failed") {
+            ForEach(downloads.failedDownloads) { job in
+              Button("Retry \(job.track.name)") {
+                downloads.startDownload(
+                  track: job.track, quality: job.id.requestedQuality, session: session)
+              }
+            }
+          }
+        }
         if downloads.isDownloading {
           if let progress = downloads.progress {
             ProgressView(value: progress)

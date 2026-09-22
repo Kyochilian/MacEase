@@ -45,9 +45,10 @@ package struct PlaylistCollection: Equatable, Sendable {
       playlists = []
       nextOffset = 0
     }
-    playlists.append(contentsOf: page.playlists)
+    var seen = Set(playlists.map(\.id))
+    playlists.append(contentsOf: page.playlists.filter { seen.insert($0.id).inserted })
     nextOffset += page.playlists.count
-    serverHasMore = page.more
+    serverHasMore = page.more && !page.playlists.isEmpty
     freshness = .current
   }
 
@@ -88,14 +89,13 @@ package struct PlaylistCollection: Equatable, Sendable {
     guard let index = playlists.firstIndex(where: { $0.id == playlistID }) else {
       return
     }
-    let existing = playlists[index]
-    playlists[index] = UserPlaylist(
-      id: existing.id,
-      name: existing.name,
-      trackCount: max(0, existing.trackCount + delta),
-      owned: existing.owned,
-      isPrivate: existing.isPrivate
-    )
+    playlists[index].trackCount = max(0, playlists[index].trackCount + delta)
+  }
+
+  package mutating func insertCreated(_ playlist: UserPlaylist) {
+    playlists.removeAll { $0.id == playlist.id }
+    playlists.insert(playlist, at: 0)
+    markStaleAfterMutation()
   }
 }
 
@@ -132,11 +132,23 @@ package struct PlaylistTrackCollection: Equatable, Sendable {
     freshness = .current
   }
 
+  /// Reuse the songs supplied with playlist detail. Only absent metadata
+  /// needs another request; rows can be displayed before that request finishes.
+  package mutating func begin(_ detail: PlaylistDetail) {
+    begin(trackIDs: detail.trackIDs)
+    let byID = Dictionary(
+      detail.tracks.map { ($0.id, $0) },
+      uniquingKeysWith: { first, _ in first })
+    tracks = trackIDs.compactMap { byID[$0] }
+    loadedIDCount = trackIDs.prefix { byID[$0] != nil }.count
+  }
+
   /// The id slice the next metadata batch should ask for.
   package func nextBatch(limit: Int) -> [Int64] {
     guard loadedIDCount < trackIDs.count else { return [] }
-    let end = min(loadedIDCount + limit, trackIDs.count)
-    return Array(trackIDs[loadedIDCount..<end])
+    let known = Set(tracks.map(\.id))
+    return Array(
+      trackIDs.dropFirst(loadedIDCount).lazy.filter { !known.contains($0) }.prefix(limit))
   }
 
   /// Records a resolved batch. `requestedCount` is how many ids were asked
@@ -146,8 +158,16 @@ package struct PlaylistTrackCollection: Equatable, Sendable {
     _ batch: [Track],
     requestedCount: Int
   ) {
-    tracks.append(contentsOf: batch)
-    loadedIDCount = min(loadedIDCount + requestedCount, trackIDs.count)
+    let requested = Set(nextBatch(limit: max(0, requestedCount)))
+    let byID = Dictionary(
+      (tracks + batch.filter { requested.contains($0.id) }).map { ($0.id, $0) },
+      uniquingKeysWith: { first, _ in first })
+    tracks = trackIDs.compactMap { byID[$0] }
+    while loadedIDCount < trackIDs.count,
+      byID[trackIDs[loadedIDCount]] != nil || requested.contains(trackIDs[loadedIDCount])
+    {
+      loadedIDCount += 1
+    }
   }
 
   /// Applies a confirmed server-side removal to every piece of local state at

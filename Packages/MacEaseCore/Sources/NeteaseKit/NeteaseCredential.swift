@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 public struct NeteaseCredential: Codable, Equatable, Sendable {
@@ -18,6 +19,12 @@ public struct NeteaseCredential: Codable, Equatable, Sendable {
       return [musicU, csrf]
     }
     return [musicU]
+  }
+
+  /// An association key for local identity, never an authentication token.
+  package var fingerprint: String {
+    SHA256.hash(data: Data((musicU.value + "\u{0}" + (csrf?.value ?? "")).utf8))
+      .map { String(format: "%02x", $0) }.joined()
   }
 
   package init?(cookieHeader: String) {
@@ -101,7 +108,7 @@ public struct NeteaseCookie: Codable, Equatable, Sendable {
   /// RFC 6265 `cookie-octet`: printable US-ASCII except space, `"`, `,`, `;`
   /// and `\`. This excludes CR, LF, NUL and every other control character,
   /// which are the bytes that would let a value inject or truncate a header.
-  private static func isValidValue(_ value: String) -> Bool {
+  package static func isValidValue(_ value: String) -> Bool {
     guard !value.isEmpty else { return false }
     return value.utf8.allSatisfy { byte in
       switch byte {

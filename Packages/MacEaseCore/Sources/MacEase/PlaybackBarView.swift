@@ -3,7 +3,6 @@ import MacEaseSession
 import NeteaseKit
 import SwiftUI
 
-
 struct PlaybackBarView: View {
   let session: LoginCoordinator
   @Bindable var playback: PlaybackController
@@ -14,7 +13,7 @@ struct PlaybackBarView: View {
   @State private var scrubPosition: Double?
   @State private var showsQueue = false
 
-  private var requestInFlight: Bool { arbiter.isBusy }
+  private var requestInFlight: Bool { !session.isOnline }
 
   var body: some View {
     VStack(spacing: 0) {
@@ -56,7 +55,7 @@ struct PlaybackBarView: View {
               }
             }
             .frame(width: 180)
-            .help("Seek (local, no request)")
+            .help("Seek")
             Text(TimeFormat.short(duration))
               .font(.caption.monospacedDigit())
               .foregroundStyle(.secondary)
@@ -76,12 +75,12 @@ struct PlaybackBarView: View {
           .help("Choose an AirPlay or system audio route")
         Picker("Quality", selection: $playback.quality) {
           ForEach(PlaybackQuality.allCases, id: \.self) { quality in
-            Text(quality.rawValue).tag(quality)
+            Text(quality.displayName).tag(quality)
           }
         }
         .fixedSize()
         .help("Applies to the next explicit Play")
-        .disabled(arbiter.isBusy)
+        .disabled(!playback.canStartNonSessionOperation)
         if playback.canPlayAgain {
           Button(
             playback.retryResumesPlayback
@@ -157,10 +156,10 @@ struct PlaybackBarView: View {
           )
         }
         .buttonStyle(.borderless)
-        .help("Mute (local, no request)")
+        .help("Mute")
         Slider(value: $playback.volume, in: 0...1)
           .frame(width: 100)
-          .help("Volume (local, no request)")
+          .help("Volume")
 
         Menu {
           ForEach([15, 30, 45, 60, 90], id: \.self) { minutes in
@@ -202,4 +201,3 @@ struct PlaybackBarView: View {
   }
 
 }
-

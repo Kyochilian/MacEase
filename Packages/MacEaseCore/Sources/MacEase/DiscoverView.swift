@@ -8,15 +8,12 @@ import SwiftUI
 /// radar family, recommended new songs, the two similar-to lists, and the two
 /// server-generated queues.
 ///
-/// Every control says how many requests it costs, and none of them runs on its
-/// own. The one exception is the launch-scoped prefetch of the four
-/// recommendation sections, which happens once per app run in the composition
-/// root, not here.
 struct DiscoverView: View {
-  private enum Pane: Hashable {
+  enum Pane: Hashable {
     case recommended
     case browse
     case radio
+    case history
   }
 
   let session: LoginCoordinator
@@ -28,12 +25,13 @@ struct DiscoverView: View {
   let artwork: ArtworkLoader
   let openPlaylist: (DiscoveredPlaylist) -> Void
   let openArtist: (Artist) -> Void
-  @State private var pane: Pane = .recommended
+  let downloads: DownloadCoordinator?
+  @Binding var pane: Pane
 
   private var requestInFlight: Bool {
-    discovery.isLoading || radio.isLoading || arbiter.isBusy
+    !session.isOnline
   }
-  private var loadDisabled: Bool { session.account == nil || requestInFlight }
+  private var loadDisabled: Bool { !session.isOnline }
 
   var body: some View {
     VStack(spacing: 0) {
@@ -42,6 +40,7 @@ struct DiscoverView: View {
           Text("Recommended").tag(Pane.recommended)
           Text("Browse").tag(Pane.browse)
           Text("Radio").tag(Pane.radio)
+          Text("Recommendation History").tag(Pane.history)
         }
         .pickerStyle(.segmented)
         .fixedSize()
@@ -55,6 +54,7 @@ struct DiscoverView: View {
       case .recommended: recommended
       case .browse: browse
       case .radio: radioPane
+      case .history: recommendationHistory
       }
 
       Divider()
@@ -70,6 +70,56 @@ struct DiscoverView: View {
       }
       .padding(12)
     }
+    .onChange(of: discovery.selectedCategory) { discovery.reloadCategory(session: session) }
+    .onChange(of: discovery.categoryOrder) { discovery.reloadCategory(session: session) }
+    .onChange(of: discovery.selectedHighQualityCategory) {
+      discovery.reloadHighQuality(session: session)
+    }
+    .task(id: "\(session.account?.userID ?? 0)-\(session.isOnline)-\(pane)") {
+
+      guard session.isOnline else { return }
+      if pane == .recommended {
+        discovery.prefetch(session: session)
+        if discovery.sectionStatuses["Radar playlists"] == nil {
+          discovery.loadRadarPlaylists(session: session)
+        }
+        if discovery.sectionStatuses["Recommended new songs"] == nil {
+          discovery.loadNewSongs(session: session)
+        }
+      }
+      if pane == .browse {
+        if discovery.sectionStatuses["Category playlists"] == nil {
+          discovery.loadCategoryPlaylists(reset: true, session: session)
+        }
+        if discovery.sectionStatuses["Highest-rated playlists"] == nil {
+          discovery.loadHighQualityPlaylists(reset: true, session: session)
+        }
+      }
+
+      if pane == .browse { await discovery.loadBrowsingTags(session: session) }
+      if pane == .history, discovery.recommendationDates.isEmpty {
+        discovery.loadRecommendationHistory(session: session)
+      }
+    }
+  }
+
+  private var recommendationHistory: some View {
+    VStack {
+      HStack {
+        Menu(discovery.recommendationDate ?? "Choose Date") {
+          ForEach(discovery.recommendationDates, id: \.self) { date in
+            Button(date) { discovery.loadRecommendationHistory(date: date, session: session) }
+          }
+        }
+        Button("Refresh Dates") { discovery.loadRecommendationHistory(session: session) }
+        Spacer()
+      }.padding(12)
+      List {
+        trackRows(
+          discovery.historicalRecommendations,
+          context: .recommendationHistory(date: discovery.recommendationDate ?? ""))
+      }
+    }
   }
 
   // MARK: - Recommended
@@ -79,7 +129,7 @@ struct DiscoverView: View {
       Section {
         trackRows(discovery.dailySongs, context: .dailyRecommendations)
       } header: {
-        sectionHeader("Daily Songs") {
+        sectionHeader("Daily Songs", operation: "Daily songs") {
           discovery.loadDailySongs(session: session)
         }
       }
@@ -87,7 +137,7 @@ struct DiscoverView: View {
       Section {
         playlistRows(discovery.dailyPlaylists)
       } header: {
-        sectionHeader("Daily Playlists") {
+        sectionHeader("Daily Playlists", operation: "Daily playlists") {
           discovery.loadDailyPlaylists(session: session)
         }
       }
@@ -95,7 +145,7 @@ struct DiscoverView: View {
       Section {
         playlistRows(discovery.personalized)
       } header: {
-        sectionHeader("Recommended Playlists") {
+        sectionHeader("Recommended Playlists", operation: "Recommended playlists") {
           discovery.loadPersonalized(session: session)
         }
       }
@@ -103,7 +153,7 @@ struct DiscoverView: View {
       Section {
         playlistRows(discovery.toplists)
       } header: {
-        sectionHeader("Toplists") {
+        sectionHeader("Toplists", operation: "Toplists") {
           discovery.loadToplists(session: session)
         }
       }
@@ -111,10 +161,7 @@ struct DiscoverView: View {
       Section {
         playlistRows(discovery.radarPlaylists)
       } header: {
-        sectionHeader(
-          "Radar Playlists",
-          cost: "up to \(DiscoveryCoordinator.radarPlaylistIDs.count) requests"
-        ) {
+        sectionHeader("Radar Playlists", operation: "Radar playlists") {
           discovery.loadRadarPlaylists(session: session)
         }
       }
@@ -122,7 +169,7 @@ struct DiscoverView: View {
       Section {
         trackRows(discovery.newSongs, context: .recommendedNewSongs)
       } header: {
-        sectionHeader("Recommended New Songs") {
+        sectionHeader("Recommended New Songs", operation: "Recommended new songs") {
           discovery.loadNewSongs(session: session)
         }
       }
@@ -141,7 +188,7 @@ struct DiscoverView: View {
               ?? "Similar Songs"
           )
           Spacer()
-          Button("Load · 1 request", systemImage: "arrow.clockwise") {
+          Button("Load", systemImage: "arrow.clockwise") {
             if let seed = playback.currentTrack {
               discovery.loadSimilarSongs(seed: seed, session: session)
             }
@@ -157,7 +204,7 @@ struct DiscoverView: View {
           HStack {
             ArtistRowLabel(artist: artist, loader: artwork)
             Spacer()
-            Button("Open · 2 requests", systemImage: "music.microphone") {
+            Button("Open", systemImage: "music.microphone") {
               openArtist(artist)
             }
             .buttonStyle(.borderless)
@@ -180,7 +227,8 @@ struct DiscoverView: View {
     VStack(spacing: 0) {
       HStack {
         Picker("Category", selection: $discovery.selectedCategory) {
-          ForEach(PlaylistCategory.browsable, id: \.self) { Text($0).tag($0) }
+          Text("全部").tag(PlaylistCategory.default)
+          ForEach(discovery.playlistTags) { Text($0.name).tag($0.name) }
         }
         .fixedSize()
         .disabled(requestInFlight)
@@ -191,23 +239,37 @@ struct DiscoverView: View {
         .pickerStyle(.segmented)
         .fixedSize()
         .disabled(requestInFlight)
-        Button("Load · 1 request", systemImage: "arrow.clockwise") {
+        Button("Load", systemImage: "arrow.clockwise") {
           discovery.loadCategoryPlaylists(reset: true, session: session)
         }
         .disabled(loadDisabled)
         Spacer()
         Picker("Highest rated", selection: $discovery.selectedHighQualityCategory) {
-          ForEach(PlaylistCategory.highQuality, id: \.self) { Text($0).tag($0) }
+          Text("全部").tag(PlaylistCategory.default)
+          ForEach(discovery.highQualityTags) { Text($0.name).tag($0.name) }
         }
         .fixedSize()
         .disabled(requestInFlight)
-        Button("Load Highest Rated · 1 request", systemImage: "star") {
+        Button("Load Highest Rated", systemImage: "star") {
           discovery.loadHighQualityPlaylists(reset: true, session: session)
         }
         .disabled(loadDisabled)
       }
       .padding(.horizontal, 12)
       .padding(.bottom, 12)
+
+      HStack {
+        Menu("Popular Categories") {
+          ForEach(discovery.popularTags) { tag in
+            Button(tag.name) {
+              discovery.selectedCategory = tag.name
+            }
+          }
+        }
+        Button("Refresh Categories") { Task { await discovery.loadBrowsingTags(session: session) } }
+          .disabled(loadDisabled)
+        Spacer()
+      }.padding(.horizontal, 12)
 
       if discovery.categoryPlaylists.isEmpty
         && discovery.highQualityPlaylists.isEmpty
@@ -220,7 +282,7 @@ struct DiscoverView: View {
           Section {
             playlistRows(discovery.categoryPlaylists)
             if discovery.categoryHasMore {
-              Button("Load More · 1 request", systemImage: "plus") {
+              Button("Load More", systemImage: "plus") {
                 discovery.loadCategoryPlaylists(reset: false, session: session)
               }
               .buttonStyle(.borderless)
@@ -233,7 +295,7 @@ struct DiscoverView: View {
           Section {
             playlistRows(discovery.highQualityPlaylists)
             if discovery.highQualityHasMore {
-              Button("Load More · 1 request", systemImage: "plus") {
+              Button("Load More", systemImage: "plus") {
                 discovery.loadHighQualityPlaylists(reset: false, session: session)
               }
               .buttonStyle(.borderless)
@@ -252,13 +314,13 @@ struct DiscoverView: View {
   @ViewBuilder private var radioPane: some View {
     VStack(alignment: .leading, spacing: 12) {
       HStack {
-        Button("Start Personal FM · 1 request", systemImage: "dot.radiowaves.left.and.right") {
+        Button("Start Personal FM", systemImage: "dot.radiowaves.left.and.right") {
           radio.startPersonalFM(session: session)
         }
         .disabled(loadDisabled)
         .help("Plays a queue NetEase generates for your account")
         if radio.isPlayingFM {
-          Button("Not Interested · 1 request", systemImage: "hand.thumbsdown") {
+          Button("Not Interested", systemImage: "hand.thumbsdown") {
             radio.trashCurrentFMSong(session: session)
           }
           .disabled(loadDisabled || radio.currentFMTrack == nil)
@@ -311,7 +373,7 @@ struct DiscoverView: View {
       let seed = heartbeatSeed(in: playlist)
     {
       HStack {
-        Button("Start Heartbeat Mode · 1 request", systemImage: "heart.circle") {
+        Button("Start Heartbeat Mode", systemImage: "heart.circle") {
           radio.startHeartbeatMode(
             seed: seed,
             playlistID: playlist.id,
@@ -349,45 +411,43 @@ struct DiscoverView: View {
 
   private func sectionHeader(
     _ title: String,
-    cost: String = "1 request",
+    operation: String,
     load: @escaping () -> Void
   ) -> some View {
-    HStack {
-      Text(title)
-      Spacer()
-      Button("Load · \(cost)", systemImage: "arrow.clockwise", action: load)
-        .buttonStyle(.borderless)
-        .disabled(loadDisabled)
+    VStack(alignment: .leading) {
+      HStack {
+        Text(title)
+        Spacer()
+        if discovery.isLoading(operation) { ProgressView().controlSize(.small) }
+        Button("Refresh", systemImage: "arrow.clockwise", action: load)
+          .buttonStyle(.borderless)
+          .disabled(!session.isOnline || discovery.isLoading(operation))
+      }
+      if let error = discovery.sectionErrors[operation] {
+        Text(error).font(.caption).foregroundStyle(.secondary)
+      }
     }
   }
 
-  private func trackRows(
+  @ViewBuilder private func trackRows(
     _ tracks: [Track],
     context: PlaybackContext
   ) -> some View {
+    if !tracks.isEmpty {
+      TrackCollectionMenu(
+        tracks: tracks, context: context, playback: playback, session: session, library: library,
+        downloads: downloads)
+    }
     ForEach(tracks) { track in
       HStack {
         TrackRowLabel(track: track, loader: artwork)
         Spacer()
         LikeButton(
-          track: track,
-          library: library,
-          session: session,
-          disabled: requestInFlight
-        )
+          track: track, library: library, session: session, disabled: requestInFlight)
         AddToPlaylistMenu(
-          track: track,
-          library: library,
-          session: session,
-          disabled: requestInFlight
-        )
+          track: track, library: library, session: session, disabled: requestInFlight)
         PlayTrackButton(
-          track: track,
-          tracks: tracks,
-          context: context,
-          playback: playback,
-          session: session
-        )
+          track: track, tracks: tracks, context: context, playback: playback, session: session)
       }
     }
   }
@@ -397,7 +457,7 @@ struct DiscoverView: View {
       HStack {
         PlaylistRowLabel(playlist: playlist, loader: artwork)
         Spacer()
-        Button("Open · up to 2 requests", systemImage: "music.note.list") {
+        Button("Open", systemImage: "music.note.list") {
           openPlaylist(playlist)
         }
         .buttonStyle(.borderless)
@@ -414,7 +474,7 @@ struct DiscoverView: View {
         }
         .buttonStyle(.borderless)
         .disabled(loadDisabled)
-        .help("Subscribe to this playlist · 1 request")
+        .help("Subscribe to this playlist")
       }
     }
   }

@@ -20,6 +20,12 @@ extension PlaybackController {
 
     var requestCredential: NeteaseCredential?
     do {
+      guard session.isOnline else {
+        phase = .failed
+        status = "This track is not downloaded; connect to play it"
+        playbackBecameInactive()
+        return
+      }
       guard
         let credential = try await currentCredential(
           account: account,
@@ -60,11 +66,14 @@ extension PlaybackController {
           attempt: attempt
         )
 
-        let resolution = try await transport.resolveSongURL(
-          songID: currentSongID,
-          quality: currentQuality,
-          credential: credential
-        )
+        let resolution: SongURLResolution
+        if let cloudID = currentTrack?.cloudFileID {
+          resolution = try await transport.resolveCloudURL(
+            songID: cloudID, quality: currentQuality, credential: credential)
+        } else {
+          resolution = try await transport.resolveSongURL(
+            songID: currentSongID, quality: currentQuality, credential: credential)
+        }
         try checkCurrent(token)
         guard
           try await sessionRemainsCurrent(
@@ -78,9 +87,11 @@ extension PlaybackController {
         outcome = .applied
         switch resolution {
         case .unavailable(let itemCode, let fee):
-          if advanceRecoveryQuality(
-            reason: "itemCode=\(itemCode), fee=\(fee.map(String.init) ?? "none")"
-          ) {
+          if currentTrack?.cloudFileID == nil,
+            advanceRecoveryQuality(
+              reason: "itemCode=\(itemCode), fee=\(fee.map(String.init) ?? "none")"
+            )
+          {
             continue
           }
           guard try await advanceRecoveryEntry(account: account, token: token) else {
@@ -90,7 +101,9 @@ extension PlaybackController {
           if try await openRecoveryDownloadIfPresent(
             account: account,
             token: token
-          ) { return }
+          ) {
+            return
+          }
 
         case .resolved(let resolved):
           do {
@@ -105,7 +118,8 @@ extension PlaybackController {
               continue
             }
           } catch AudioOutputFailure.resourceUnavailable(let statusCode)
-          where PlaybackExpiryPolicy.confirmsInvalidURL(statusCode: statusCode) {
+            where PlaybackExpiryPolicy.confirmsInvalidURL(statusCode: statusCode)
+          {
             releasePlayback()
             if beginFreshResolveForCurrentResource() {
               status = recoveryStatus(
@@ -128,7 +142,9 @@ extension PlaybackController {
           if try await openRecoveryDownloadIfPresent(
             account: account,
             token: token
-          ) { return }
+          ) {
+            return
+          }
         }
       }
     } catch {
@@ -162,7 +178,8 @@ extension PlaybackController {
       byteCount: resolved.byteCount,
       expiresAt: resolved.expiresIn.flatMap {
         $0 > 0 ? Date().addingTimeInterval(TimeInterval($0)) : nil
-      }
+      },
+      representationID: resolved.fileMD5.map { "md5:" + $0 }
     )
     return try await startPlayback(
       resource: resource,
@@ -186,6 +203,18 @@ extension PlaybackController {
       )
     }
     do {
+      guard
+        let access = await waitForPlaybackAdmission(effect: .localSessionAccess, token: token)
+      else { return }
+      let credential: NeteaseCredential?
+      do {
+        credential = try await currentCredential(account: account, session: session, token: token)
+        arbiter.end(access, outcome: .applied)
+      } catch {
+        arbiter.end(access, outcome: .cancelled)
+        throw error
+      }
+      guard credential != nil else { return }
       let quality = resource.actualQuality ?? resource.requestedQuality.rawValue
       let isPlayable = try await startPlayback(
         resource: resource,
@@ -350,7 +379,8 @@ extension PlaybackController {
     attempt = nil
     releasePlayback()
     phase = .failed
-    status = "No playable quality remained"
+    status =
+      "No playable quality remained"
       + failureQualitySummary(exhaustedAttempt)
       + "; automatic recovery stopped"
     playbackBecameInactive()

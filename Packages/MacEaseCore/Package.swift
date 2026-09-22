@@ -8,10 +8,8 @@ let package = Package(
   products: [
     .library(name: "NeteaseKit", targets: ["NeteaseKit"]),
     .executable(name: "MacEase", targets: ["MacEase"]),
-    .executable(name: "GateALyricsProbe", targets: ["GateALyricsProbe"]),
     .executable(name: "GateBLoginHarness", targets: ["GateBLoginHarness"]),
     .executable(name: "GateCPlaybackProbe", targets: ["GateCPlaybackProbe"]),
-    .executable(name: "GatePhase2PlaylistProbe", targets: ["GatePhase2PlaylistProbe"]),
   ],
   dependencies: [
     .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.9.6"),
@@ -46,19 +44,11 @@ let package = Package(
       ]
     ),
     .executableTarget(
-      name: "GateALyricsProbe",
-      dependencies: ["NeteaseKit"]
-    ),
-    .executableTarget(
       name: "GateBLoginHarness",
       dependencies: ["NeteaseKit", "MacEaseSession", "MacEaseAppCore"]
     ),
     .executableTarget(
       name: "GateCPlaybackProbe",
-      dependencies: ["NeteaseKit"]
-    ),
-    .executableTarget(
-      name: "GatePhase2PlaylistProbe",
       dependencies: ["NeteaseKit"]
     ),
     .testTarget(

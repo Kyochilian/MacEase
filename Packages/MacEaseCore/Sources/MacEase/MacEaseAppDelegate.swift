@@ -13,6 +13,23 @@ final class MacEaseAppDelegate: NSObject, NSApplicationDelegate {
   private var refreshNotificationAuthorization: (@MainActor () async -> Void)?
   private var prepareForTermination: (@MainActor () async -> Void)?
   private var terminationIsPending = false
+  private var sourceAccount: (@MainActor () -> Int64?)?
+  private var recentSources: (@MainActor () -> [PlaybackContext])?
+  private var openRecentSource: (@MainActor (PlaybackContext) -> Void)?
+  private struct RecentSourceSelection {
+    let accountID: Int64
+    let context: PlaybackContext
+  }
+
+  func configureRecentSources(
+    account: @escaping @MainActor () -> Int64?,
+    sources: @escaping @MainActor () -> [PlaybackContext],
+    open: @escaping @MainActor (PlaybackContext) -> Void
+  ) {
+    sourceAccount = account
+    recentSources = sources
+    openRecentSource = open
+  }
 
   func configure(
     router: SystemMediaRouter,
@@ -99,17 +116,32 @@ final class MacEaseAppDelegate: NSObject, NSApplicationDelegate {
     repeatItem.isEnabled = router.canPerform(.setMode(.sequential))
     menu.addItem(repeatItem)
     menu.addItem(.separator())
-    let likeTitle = switch snapshot.liked {
-    case .liked: "Unlike"
-    case .notLiked: "Like"
-    case .unknown: "Like/Unlike"
-    }
+    let likeTitle =
+      switch snapshot.liked {
+      case .liked: "Unlike"
+      case .notLiked: "Like"
+      case .unknown: "Like/Unlike"
+      }
     add(
       likeTitle,
       action: #selector(toggleLiked),
       command: .toggleLiked,
       to: menu
     )
+    if let accountID = sourceAccount?(), let sources = recentSources?(), !sources.isEmpty {
+      menu.addItem(.separator())
+      let parent = NSMenuItem(title: "Recent Sources", action: nil, keyEquivalent: "")
+      let recent = NSMenu(title: "Recent Sources")
+      for context in sources {
+        let item = NSMenuItem(
+          title: context.label, action: #selector(openRecent(_:)), keyEquivalent: "")
+        item.target = self
+        item.representedObject = RecentSourceSelection(accountID: accountID, context: context)
+        recent.addItem(item)
+      }
+      parent.submenu = recent
+      menu.addItem(parent)
+    }
     return menu
   }
 
@@ -128,6 +160,12 @@ final class MacEaseAppDelegate: NSObject, NSApplicationDelegate {
   }
 
   @objc private func togglePlayback() { _ = router?.perform(.togglePlayback) }
+  @objc private func openRecent(_ sender: NSMenuItem) {
+    guard let selection = sender.representedObject as? RecentSourceSelection,
+      selection.accountID == sourceAccount?()
+    else { return }
+    openRecentSource?(selection.context)
+  }
   @objc private func previous() { _ = router?.perform(AppPlaybackCommand.previous) }
   @objc private func next() { _ = router?.perform(AppPlaybackCommand.next) }
   @objc private func toggleLiked() { _ = router?.perform(.toggleLiked) }
@@ -145,8 +183,8 @@ final class MacEaseAppDelegate: NSObject, NSApplicationDelegate {
   }
 }
 
-private extension PlaybackMode {
-  var dockTitle: String {
+extension PlaybackMode {
+  fileprivate var dockTitle: String {
     switch self {
     case .sequential: "Off"
     case .repeatAll: "Repeat All"

@@ -20,27 +20,20 @@ package enum OfflineAudioValidation {
 
 private enum DownloadFailure: Error {
   case unavailable
+  case trial
   case invalidResource
   case expiredURL
   case unplayableFile
 }
 
-package enum DownloadTerminalFailure: Equatable, Sendable {
-  case unavailable
-  case connection
-  case invalidAudio
-  case storage
-  case other
+package enum DownloadTerminalFailure: String, Equatable, Sendable {
+  case unavailable = "This track is not available for download."
+  case connection = "The download could not be completed because of a connection problem."
+  case invalidAudio = "The downloaded audio could not be verified."
+  case storage = "MacEase could not save the downloaded audio."
+  case other = "The download could not be completed."
 
-  package var message: String {
-    switch self {
-    case .unavailable: "This track is not available for download."
-    case .connection: "The download could not be completed because of a connection problem."
-    case .invalidAudio: "The downloaded audio could not be verified."
-    case .storage: "MacEase could not save the downloaded audio."
-    case .other: "The download could not be completed."
-    }
-  }
+  package var message: String { rawValue }
 }
 
 package enum DownloadTerminalOutcome: Equatable, Sendable {
@@ -65,6 +58,12 @@ package struct DownloadTerminalEvent: Equatable, Sendable {
     self.track = track
     self.outcome = outcome
   }
+}
+
+package struct QueuedDownload: Identifiable, Equatable {
+  package let id: OfflineDownloadID
+  package let track: Track
+  package var failure: String?
 }
 
 /// Owns the one foreground download and the current account's completed
@@ -92,15 +91,20 @@ package final class DownloadCoordinator: SessionGuardedCoordinator {
   @ObservationIgnored package private(set) var generation = 0
   @ObservationIgnored private var operationToken: OperationToken?
   @ObservationIgnored private var downloadTask: Task<Void, Never>?
+  @ObservationIgnored private var batchTask: Task<Void, Never>?
+  @ObservationIgnored private var batchID: UUID?
+  @ObservationIgnored package var saveLyrics:
+    (@MainActor (Track, any SessionProviding) async -> String?)?
   @ObservationIgnored private var downloadTaskID: UUID?
   @ObservationIgnored private var loadTask: Task<Void, Never>?
   @ObservationIgnored private var maintenanceTask: Task<Void, Never>?
   @ObservationIgnored private var maintenanceTaskID: UUID?
   @ObservationIgnored private var localURLs: [OfflineDownloadID: URL] = [:]
-  @ObservationIgnored package var onTerminalEvent:
-    (@MainActor (DownloadTerminalEvent) -> Void)?
+  @ObservationIgnored package var onTerminalEvent: (@MainActor (DownloadTerminalEvent) -> Void)?
 
   package private(set) var downloads: [OfflineDownload] = []
+  package private(set) var pendingDownloads: [QueuedDownload] = []
+  package private(set) var failedDownloads: [QueuedDownload] = []
   package private(set) var activity: Activity = .idle
   package private(set) var progress: Double?
   package private(set) var lastFailure: String?
@@ -110,7 +114,7 @@ package final class DownloadCoordinator: SessionGuardedCoordinator {
     "No stored session to resolve the download"
   }
 
-  package var isDownloading: Bool { downloadTask != nil }
+  package var isDownloading: Bool { downloadTask != nil || batchTask != nil }
   package var isMaintaining: Bool { maintenanceTask != nil }
   package var isLoading: Bool { loadTask != nil }
   package var canCreateDownloads: Bool { ranges != nil }
@@ -152,6 +156,11 @@ package final class DownloadCoordinator: SessionGuardedCoordinator {
   package func bind(accountID: Int64?) {
     guard self.accountID != accountID else { return }
     generation &+= 1
+    batchTask?.cancel()
+    batchTask = nil
+    batchID = nil
+    pendingDownloads = []
+    failedDownloads = []
     loadTask?.cancel()
     loadTask = nil
     maintenanceTask?.cancel()
@@ -187,10 +196,86 @@ package final class DownloadCoordinator: SessionGuardedCoordinator {
     quality: PlaybackQuality,
     session: any SessionProviding
   ) {
+    enqueueDownloads(tracks: [track], quality: quality, session: session)
+  }
+
+  package func enqueueDownloads(
+    tracks: [Track], quality: PlaybackQuality, session: any SessionProviding
+  ) {
+    guard canCreateDownloads else {
+      status = Self.unavailablePipelineMessage
+      lastFailure = status
+      return
+    }
+    guard session.isOnline, let accountID, session.account?.userID == accountID else {
+      status = "Connect before downloading"
+      return
+    }
+    guard pendingDownloads.count + tracks.count <= 10_000 else {
+      status = "The download queue is full; wait for some files to finish"
+      return
+    }
+    for track in tracks {
+      let id = OfflineDownloadID(accountID: accountID, songID: track.id, requestedQuality: quality)
+      guard !pendingDownloads.contains(where: { $0.id == id }),
+        !downloads.contains(where: { $0.id == id && $0.isVerifiedComplete })
+      else { continue }
+      failedDownloads.removeAll { $0.id == id }
+      pendingDownloads.append(QueuedDownload(id: id, track: track))
+    }
+    guard batchTask == nil, !pendingDownloads.isEmpty else { return }
+    let id = UUID()
+    batchID = id
+    batchTask = Task { [weak self] in
+      guard let self else { return }
+      defer {
+        if self.batchID == id {
+          self.batchTask = nil
+          self.batchID = nil
+        }
+      }
+      await self.loadTask?.value
+      await self.maintenanceTask?.value
+      await self.downloadTask?.value
+      while self.batchID == id, self.accountID == accountID, !Task.isCancelled,
+        !self.pendingDownloads.isEmpty
+      {
+        var job = self.pendingDownloads.removeFirst()
+        self.beginDownload(track: job.track, quality: job.id.requestedQuality, session: session)
+        await self.downloadTask?.value
+        guard self.batchID == id, self.accountID == accountID, !Task.isCancelled else { return }
+        if let failure = self.lastFailure {
+          job.failure = failure
+          self.failedDownloads.append(job)
+        }
+      }
+    }
+  }
+
+  package func retryFailedDownloads(session: any SessionProviding) {
+    let jobs = failedDownloads
+    for job in jobs {
+      enqueueDownloads(tracks: [job.track], quality: job.id.requestedQuality, session: session)
+    }
+  }
+
+  package func cancelAllDownloads() {
+    batchTask?.cancel()
+    batchTask = nil
+    batchID = nil
+    pendingDownloads = []
+    cancelDownload()
+  }
+
+  private func beginDownload(
+    track: Track,
+    quality: PlaybackQuality,
+    session: any SessionProviding
+  ) {
     guard downloadTask == nil, maintenanceTask == nil, loadTask == nil else {
       return
     }
-    guard let account = session.account, account.userID == accountID else {
+    guard session.isOnline, let account = session.account, account.userID == accountID else {
       status = "Validate the session before downloading"
       return
     }
@@ -205,18 +290,10 @@ package final class DownloadCoordinator: SessionGuardedCoordinator {
       songID: track.id,
       requestedQuality: quality
     )
-    guard !downloads.contains(where: { $0.id == id }) else {
+    guard !downloads.contains(where: { $0.id == id && $0.isVerifiedComplete }) else {
       status = "This quality is already downloaded"
       return
     }
-    guard
-      let token = arbiter.begin(name: "Download URL", effect: .playbackResolution)
-    else {
-      status = "Another account operation is in progress"
-      return
-    }
-
-    operationToken = token
     let taskID = UUID()
     downloadTaskID = taskID
     let generation = generation
@@ -226,6 +303,21 @@ package final class DownloadCoordinator: SessionGuardedCoordinator {
     status = "Resolving download URL (1 request)"
     downloadTask = Task { [weak self] in
       guard let self else { return }
+      guard
+        let token = await self.arbiter.beginWhenAvailable(
+          name: "Download URL", effect: .playbackResolution)
+      else {
+        self.finishDownloadTask(
+          taskID, accountID: account.userID, generation: generation, track: track, outcome: nil)
+        return
+      }
+      guard self.isCurrent(accountID: account.userID, generation: generation, taskID: taskID) else {
+        self.arbiter.end(token, outcome: .cancelled)
+        self.finishDownloadTask(
+          taskID, accountID: account.userID, generation: generation, track: track, outcome: nil)
+        return
+      }
+      self.operationToken = token
       let outcome = await self.runDownload(
         track: track,
         quality: quality,
@@ -246,7 +338,11 @@ package final class DownloadCoordinator: SessionGuardedCoordinator {
   }
 
   package func cancelDownload() {
-    guard let downloadTask else { return }
+    guard let downloadTask else {
+      if !pendingDownloads.isEmpty { pendingDownloads.removeFirst() }
+      status = "Download canceled"
+      return
+    }
     downloadTask.cancel()
     if let operationToken {
       self.operationToken = nil
@@ -329,13 +425,14 @@ package final class DownloadCoordinator: SessionGuardedCoordinator {
       songID: songID,
       requestedQuality: requestedQuality
     )
-    guard let download = downloads.first(where: { $0.id == id }),
+    guard let download = downloads.first(where: { $0.id == id && $0.isVerifiedComplete }),
       let url = localURLs[id]
     else { return false }
     return Self.fileSize(url) == download.byteCount
   }
 
   package func playbackResource(for download: OfflineDownload) -> PlaybackResource? {
+    guard download.isVerifiedComplete else { return nil }
     guard download.accountID == accountID,
       downloads.contains(where: { $0.id == download.id }),
       let url = localURLs[download.id],
@@ -376,7 +473,21 @@ package final class DownloadCoordinator: SessionGuardedCoordinator {
   }
 
   package func settleDownloadForTesting() async {
+    await batchTask?.value
     await downloadTask?.value
+  }
+
+  package func preferredDownload(songID: Int64, accountID: Int64, quality: PlaybackQuality)
+    -> OfflineDownload?
+  {
+    let available = downloads.filter {
+      $0.track.id == songID && $0.accountID == accountID && $0.isVerifiedComplete
+    }
+    if let exact = available.first(where: { $0.requestedQuality == quality }) { return exact }
+    return available.max {
+      PlaybackQuality.allCases.firstIndex(of: $0.requestedQuality)! < PlaybackQuality.allCases
+        .firstIndex(of: $1.requestedQuality)!
+    }
   }
 
   package func settleMaintenanceForTesting() async {
@@ -420,11 +531,14 @@ package final class DownloadCoordinator: SessionGuardedCoordinator {
         taskID: taskID
       )
 
-      let resolution = try await transport.resolveSongURL(
-        songID: track.id,
-        quality: quality,
-        credential: credential
-      )
+      let resolution: SongURLResolution
+      if let cloudID = track.cloudFileID {
+        resolution = try await transport.resolveCloudURL(
+          songID: cloudID, quality: quality, credential: credential)
+      } else {
+        resolution = try await transport.resolveDownloadURL(
+          songID: track.id, quality: quality, credential: credential)
+      }
       guard
         try await sessionRemainsCurrent(
           account: account,
@@ -461,6 +575,11 @@ package final class DownloadCoordinator: SessionGuardedCoordinator {
         generation: generation,
         taskID: taskID
       )
+      if let message = await saveLyrics?(track, session),
+        isCurrent(accountID: account.userID, generation: generation, taskID: taskID)
+      {
+        status += "; " + message
+      }
       return .succeeded
     } catch is CancellationError {
       // Explicit cancel and account replacement already published the reason.
@@ -479,11 +598,13 @@ package final class DownloadCoordinator: SessionGuardedCoordinator {
           readToken: operation
         )
       }
-      guard isCurrent(
-        accountID: account.userID,
-        generation: generation,
-        taskID: taskID
-      ) else { return nil }
+      guard
+        isCurrent(
+          accountID: account.userID,
+          generation: generation,
+          taskID: taskID
+        )
+      else { return nil }
       var message = Self.diagnostic(for: error)
       if let cleanup = lastFailure, cleanup != message {
         message += "; " + cleanup
@@ -502,6 +623,7 @@ package final class DownloadCoordinator: SessionGuardedCoordinator {
     requestedQuality: PlaybackQuality,
     accountID: Int64
   ) throws -> PlaybackResource {
+    guard !asset.trial else { throw DownloadFailure.trial }
     guard asset.songID == expectedSongID,
       asset.requestedQuality == requestedQuality,
       asset.url.scheme?.lowercased() == "https",
@@ -522,7 +644,8 @@ package final class DownloadCoordinator: SessionGuardedCoordinator {
       actualQuality: actual,
       format: format,
       byteCount: byteCount,
-      expiresAt: expiresAt
+      expiresAt: expiresAt,
+      representationID: asset.fileMD5.map { "md5:" + $0 } ?? "download:" + UUID().uuidString
     )
   }
 
@@ -640,6 +763,11 @@ package final class DownloadCoordinator: SessionGuardedCoordinator {
       guard actualByteCount == byteCount else {
         throw AudioRangeError.storageFailure
       }
+      if let identity = resource.representationID, identity.hasPrefix("md5:") {
+        guard try await NeteaseCrypto.fileMD5(partial) == String(identity.dropFirst(4)) else {
+          throw DownloadFailure.unplayableFile
+        }
+      }
       let isPlayable = await validator(partial)
       try checkCurrent(
         accountID: accountID,
@@ -681,7 +809,8 @@ package final class DownloadCoordinator: SessionGuardedCoordinator {
             generation: generation,
             taskID: taskID
           ) {
-            lastFailure = "Download failed and its file cleanup also failed: "
+            lastFailure =
+              "Download failed and its file cleanup also failed: "
               + Self.diagnostic(for: cleanupError)
           }
         }
@@ -689,11 +818,13 @@ package final class DownloadCoordinator: SessionGuardedCoordinator {
         throw error
       }
 
-      guard isCurrent(
-        accountID: accountID,
-        generation: generation,
-        taskID: taskID
-      ) else {
+      guard
+        isCurrent(
+          accountID: accountID,
+          generation: generation,
+          taskID: taskID
+        )
+      else {
         await compensateLateCommit(download, generation: generation)
         committed = nil
         throw CancellationError()
@@ -710,7 +841,8 @@ package final class DownloadCoordinator: SessionGuardedCoordinator {
           try await files.removePartial(partial)
         } catch let cleanupError {
           if self.accountID == accountID, self.generation == generation {
-            lastFailure = "Download cleanup failed: "
+            lastFailure =
+              "Download cleanup failed: "
               + Self.diagnostic(for: cleanupError)
           }
         }
@@ -733,7 +865,8 @@ package final class DownloadCoordinator: SessionGuardedCoordinator {
     if accountID == download.accountID, self.generation == generation,
       !failures.isEmpty
     {
-      lastFailure = "Canceled download cleanup failed: "
+      lastFailure =
+        "Canceled download cleanup failed: "
         + failures.joined(separator: "; ")
     }
   }
@@ -792,11 +925,13 @@ package final class DownloadCoordinator: SessionGuardedCoordinator {
       localURLs = urls
       if cleanupFailures.isEmpty {
         lastFailure = nil
-        status = invalidCount == 0
+        status =
+          invalidCount == 0
           ? "Loaded downloads"
           : "Removed damaged download records"
       } else {
-        lastFailure = "Some damaged download data could not be cleaned up: "
+        lastFailure =
+          "Some damaged download data could not be cleaned up: "
           + cleanupFailures.joined(separator: "; ")
         status = lastFailure ?? "Download cleanup failed"
       }
@@ -861,7 +996,8 @@ package final class DownloadCoordinator: SessionGuardedCoordinator {
         if accountID == download.accountID, self.generation == generation,
           let rollbackFailure
         {
-          lastFailure = "Canceled deletion could not restore its file: "
+          lastFailure =
+            "Canceled deletion could not restore its file: "
             + rollbackFailure
         }
         return
@@ -968,7 +1104,8 @@ package final class DownloadCoordinator: SessionGuardedCoordinator {
         failures.append(Self.diagnostic(for: error))
       }
       if self.generation == generation, !failures.isEmpty {
-        self.lastFailure = "Damaged download cleanup failed: "
+        self.lastFailure =
+          "Damaged download cleanup failed: "
           + failures.joined(separator: "; ")
       }
       self.finishMaintenanceTask(taskID)
@@ -989,11 +1126,13 @@ package final class DownloadCoordinator: SessionGuardedCoordinator {
     taskID: UUID
   ) throws {
     try Task.checkCancellation()
-    guard isCurrent(
-      accountID: accountID,
-      generation: generation,
-      taskID: taskID
-    ) else { throw CancellationError() }
+    guard
+      isCurrent(
+        accountID: accountID,
+        generation: generation,
+        taskID: taskID
+      )
+    else { throw CancellationError() }
   }
 
   private func isCurrent(
@@ -1068,6 +1207,7 @@ package final class DownloadCoordinator: SessionGuardedCoordinator {
     if let error = error as? DownloadFailure {
       switch error {
       case .unavailable: return "Track is unavailable for download"
+      case .trial: return "Only a preview is available; it cannot be saved as a complete download"
       case .invalidResource: return "Resolved audio lacks safe download metadata"
       case .expiredURL: return "Download URL expired; click Download to try again"
       case .unplayableFile: return "Downloaded bytes are not playable audio"
@@ -1093,7 +1233,7 @@ package final class DownloadCoordinator: SessionGuardedCoordinator {
     }
     if let error = error as? DownloadFailure {
       switch error {
-      case .unavailable: return .unavailable
+      case .unavailable, .trial: return .unavailable
       case .expiredURL: return .connection
       case .invalidResource, .unplayableFile: return .invalidAudio
       }

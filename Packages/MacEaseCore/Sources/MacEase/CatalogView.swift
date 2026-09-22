@@ -20,8 +20,9 @@ struct SearchView: View {
   let openPlaylist: (DiscoveredPlaylist) -> Void
   let openAlbum: (Int64) -> Void
   let openArtist: (Int64) -> Void
+  let downloads: DownloadCoordinator?
 
-  private var requestInFlight: Bool { catalog.isSearching || arbiter.isBusy }
+  private var requestInFlight: Bool { catalog.isSearching }
   private var trimmedQuery: String {
     catalog.query.trimmingCharacters(in: .whitespacesAndNewlines)
   }
@@ -43,7 +44,7 @@ struct SearchView: View {
         .fixedSize()
         // Scope edits supersede a search already in flight, so the picker must
         // remain available while that read is running.
-        .disabled(session.account == nil || arbiter.isBusy)
+        .disabled(!session.isOnline)
         TextField(placeholder, text: $catalog.query)
           .onSubmit {
             if !searchDisabled { catalog.runSearch(session: session) }
@@ -54,10 +55,10 @@ struct SearchView: View {
         .disabled(searchDisabled)
         .help(
           catalog.scope == .all
-            ? "Searches songs, artists, albums, and playlists with 4 concurrent requests"
-            : "Searches the selected category with 1 request"
+            ? "Searches songs, artists, albums, and playlists"
+            : "Searches the selected category"
         )
-        Button("Suggested Search · 1 request", systemImage: "sparkle") {
+        Button("Suggested Search", systemImage: "sparkle") {
           catalog.loadDefaultKeyword(session: session)
         }
         .disabled(session.account == nil || requestInFlight)
@@ -69,11 +70,43 @@ struct SearchView: View {
       .onChange(of: catalog.query) {
         catalog.updateSuggestions(session: session)
       }
+      .onChange(of: catalog.scope) {
+        if !trimmedQuery.isEmpty { catalog.runSearch(session: session) }
+      }
       .onDisappear { catalog.cancelSuggestions() }
 
       if !catalog.suggestions.isEmpty {
         suggestions
       }
+      HStack {
+        if !catalog.searchHistory.isEmpty {
+          Menu("Search History") {
+            ForEach(catalog.searchHistory, id: \.self) { query in
+              Button(query) {
+                catalog.query = query
+                catalog.runSearch(session: session)
+              }
+            }
+            Divider()
+            Button("Clear History") { catalog.clearSearchHistory(session: session) }
+          }
+        }
+        TrackCollectionMenu(
+          tracks: shownSongs,
+          context: .searchResults(keywords: catalog.resultsKeywords ?? catalog.query),
+          playback: playback, session: session, library: library, downloads: downloads
+        )
+        Menu("Hot Searches") {
+          Button("Refresh") { catalog.loadHotSearches(session: session) }
+          ForEach(catalog.hotSearches) { item in
+            Button(item.keyword) {
+              catalog.query = item.keyword
+              catalog.runSearch(session: session)
+            }
+          }
+        }
+        Spacer()
+      }.padding(.horizontal, 12).padding(.bottom, 8)
 
       Divider()
 
@@ -88,7 +121,7 @@ struct SearchView: View {
           .lineLimit(2)
         Spacer()
         if catalog.resultsHaveMore {
-          Button("Load More · 1 request", systemImage: "plus") {
+          Button("Load More", systemImage: "plus") {
             catalog.loadMoreResults(session: session)
           }
           .disabled(session.account == nil || requestInFlight)
@@ -96,6 +129,19 @@ struct SearchView: View {
       }
       .padding(12)
     }
+    .task(id: session.account?.userID) {
+      await catalog.loadSearchHistory(session: session)
+      if session.isOnline, catalog.hotSearches.isEmpty, !catalog.isSearching, catalog.query.isEmpty
+      {
+        catalog.loadHotSearches(session: session)
+      }
+    }
+  }
+
+  private var shownSongs: [Track] {
+    if catalog.scope == .all { return catalog.combinedResults.songs }
+    if case .songs(let songs) = catalog.results { return songs }
+    return []
   }
 
   private var placeholder: String {
@@ -103,7 +149,7 @@ struct SearchView: View {
   }
 
   private var searchButtonTitle: String {
-    catalog.scope == .all ? "Search · 4 requests" : "Search · 1 request"
+    "Search"
   }
 
   @ViewBuilder private var suggestions: some View {
@@ -233,11 +279,11 @@ struct SearchView: View {
     HStack {
       AlbumRowLabel(album: album, loader: artwork)
       Spacer()
-      Button("Open · 2 requests", systemImage: "opticaldisc") {
+      Button("Open", systemImage: "opticaldisc") {
         openAlbum(album.id)
       }
       .buttonStyle(.borderless)
-      .disabled(session.account == nil || arbiter.isBusy)
+      .disabled(!session.isOnline)
     }
   }
 
@@ -245,11 +291,11 @@ struct SearchView: View {
     HStack {
       ArtistRowLabel(artist: artist, loader: artwork)
       Spacer()
-      Button("Open · 2 requests", systemImage: "music.microphone") {
+      Button("Open", systemImage: "music.microphone") {
         openArtist(artist.id)
       }
       .buttonStyle(.borderless)
-      .disabled(session.account == nil || arbiter.isBusy)
+      .disabled(!session.isOnline)
     }
   }
 
@@ -257,11 +303,11 @@ struct SearchView: View {
     HStack {
       PlaylistRowLabel(playlist: playlist, loader: artwork)
       Spacer()
-      Button("Open · up to 2 requests", systemImage: "music.note.list") {
+      Button("Open", systemImage: "music.note.list") {
         openPlaylist(playlist)
       }
       .buttonStyle(.borderless)
-      .disabled(session.account == nil || arbiter.isBusy)
+      .disabled(!session.isOnline)
       Button {
         library.setSubscribed(
           true,
@@ -273,8 +319,8 @@ struct SearchView: View {
         Image(systemName: "plus.circle")
       }
       .buttonStyle(.borderless)
-      .disabled(session.account == nil || arbiter.isBusy)
-      .help("Subscribe to this playlist · 1 request")
+      .disabled(!session.isOnline)
+      .help("Subscribe to this playlist")
     }
   }
 
@@ -301,6 +347,7 @@ struct SearchView: View {
 /// there is one place that owns those two mutations.
 struct CatalogView: View {
   enum Pane: Hashable {
+    case song
     case album
     case artist
     case newReleases
@@ -314,20 +361,20 @@ struct CatalogView: View {
   let playback: PlaybackController
   let arbiter: OperationArbiter
   let artwork: ArtworkLoader
+  let downloads: DownloadCoordinator?
   /// Wired by the composition root so the Discover tab's Similar Artists
   /// section stays the one place that list lives.
   let showSimilarArtists: (Artist) -> Void
   @Binding var pane: Pane
 
-  private var requestInFlight: Bool {
-    catalog.isLoadingDetail || collections.isLoading || arbiter.isBusy
-  }
-  private var loadDisabled: Bool { session.account == nil || requestInFlight }
+  private var requestInFlight: Bool { collections.isWriting || !arbiter.canBegin(effect: .write) }
+  private var loadDisabled: Bool { !session.isOnline }
 
   var body: some View {
     VStack(spacing: 0) {
       HStack {
         Picker("Pane", selection: $pane) {
+          Text("Song").tag(Pane.song)
           Text("Album").tag(Pane.album)
           Text("Artist").tag(Pane.artist)
           Text("New Releases").tag(Pane.newReleases)
@@ -342,6 +389,7 @@ struct CatalogView: View {
       Divider()
 
       switch pane {
+      case .song: songPane
       case .album: albumPane
       case .artist: artistPane
       case .newReleases: newReleasesPane
@@ -352,6 +400,7 @@ struct CatalogView: View {
 
       HStack {
         if catalog.isLoadingDetail { ProgressView().controlSize(.small) }
+        if catalog.isLoadingDetail { Button("Cancel") { catalog.cancelDetail() } }
         Text(catalog.detailStatus)
           .foregroundStyle(.secondary)
           .lineLimit(2)
@@ -359,9 +408,56 @@ struct CatalogView: View {
       }
       .padding(12)
     }
+    .onChange(of: catalog.newAlbumArea) {
+      if pane == .newReleases { catalog.loadNewAlbums(reset: true, session: session) }
+    }
+    .task(id: "\(session.account?.userID ?? 0)-\(session.isOnline)-\(pane)") {
+      guard session.isOnline else { return }
+      if pane == .newReleases, catalog.newAlbums.isEmpty {
+        catalog.loadNewAlbums(reset: true, session: session)
+      }
+      if pane == .topArtists, catalog.topArtists.isEmpty {
+        catalog.loadTopArtists(reset: true, session: session)
+      }
+    }
+
   }
 
   // MARK: - Album
+
+  @ViewBuilder private var songPane: some View {
+    if let track = catalog.song {
+      VStack(alignment: .leading, spacing: 12) {
+        TrackRowLabel(track: track, loader: artwork)
+        if let aliases = track.aliases, !aliases.isEmpty { Text(aliases.joined(separator: " / ")) }
+        if let translations = track.translations, !translations.isEmpty {
+          Text(translations.joined(separator: " / "))
+        }
+        if let notice = track.playbackNotice { Text(notice).foregroundStyle(.secondary) }
+        if let album = track.album, let id = album.id {
+          Button(album.name) {
+            catalog.openAlbum(id: id, session: session)
+            pane = .album
+          }
+        }
+        ForEach(track.artists, id: \.self) { artist in
+          if let id = artist.id {
+            Button(artist.name) {
+              catalog.openArtist(id: id, session: session)
+              pane = .artist
+            }
+          }
+        }
+        PlayTrackButton(
+          track: track, tracks: [track], context: .song(id: track.id, name: track.name),
+          playback: playback, session: session)
+        AddToPlaylistMenu(
+          track: track, library: library, session: session, disabled: requestInFlight)
+      }.padding().frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    } else {
+      placeholder("Open a song from a music link or a song's menu")
+    }
+  }
 
   @ViewBuilder private var albumPane: some View {
     if let detail = catalog.album {
@@ -375,6 +471,10 @@ struct CatalogView: View {
           )
           VStack(alignment: .leading, spacing: 3) {
             Text(detail.album.name).font(.headline)
+            if let date = detail.album.releaseDate { Text(date, style: .date).font(.caption) }
+            if let company = detail.album.company {
+              Text(company).font(.caption).foregroundStyle(.secondary)
+            }
             Text(
               (detail.album.artistDisplayName.map { $0 + " · " } ?? "")
                 + "\(detail.album.trackCount) tracks"
@@ -386,9 +486,17 @@ struct CatalogView: View {
           }
           Spacer()
           collectAlbumButton(detail.album)
+          TrackCollectionMenu(
+            tracks: detail.tracks, context: .album(id: detail.album.id, name: detail.album.name),
+            playback: playback, session: session, library: library, downloads: downloads)
         }
         .padding(12)
 
+        if let description = detail.album.description, !description.isEmpty {
+          DisclosureGroup("About this album") {
+            Text(description).textSelection(.enabled).padding(8)
+          }.padding(.horizontal, 12)
+        }
         Divider()
 
         if detail.tracks.isEmpty {
@@ -398,6 +506,10 @@ struct CatalogView: View {
         } else {
           List(detail.tracks) { track in
             HStack {
+              if let number = track.trackNumber, number > 0 {
+                Text((track.disc.map { $0 + "." } ?? "") + String(number))
+                  .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+              }
               TrackRowLabel(track: track, loader: artwork)
               Spacer()
               LikeButton(
@@ -450,10 +562,10 @@ struct CatalogView: View {
     .disabled(loadDisabled)
     .help(
       state == .unknown
-        ? "Collected state unknown; this collects the album · 1 request"
+        ? "Collected state unknown; this collects the album"
         : collected
-          ? "Remove from your collected albums · 1 request"
-          : "Add to your collected albums · 1 request"
+          ? "Remove from your collected albums"
+          : "Add to your collected albums"
     )
   }
 
@@ -479,7 +591,7 @@ struct CatalogView: View {
             .foregroundStyle(.secondary)
           }
           Spacer()
-          Button("Similar Artists · 1 request", systemImage: "person.2") {
+          Button("Similar Artists", systemImage: "person.2") {
             showSimilarArtists(detail.artist)
           }
           .disabled(loadDisabled)
@@ -487,7 +599,7 @@ struct CatalogView: View {
           let followed =
             collections.artistFollowState(for: detail.artist.id) == .confirmed(true)
           Button(
-            followed ? "Unfollow · 1 request" : "Follow · 1 request",
+            followed ? "Unfollow" : "Follow",
             systemImage: followed ? "person.badge.minus" : "person.badge.plus"
           ) {
             collections.setArtistFollowed(
@@ -503,6 +615,41 @@ struct CatalogView: View {
         Divider()
 
         List {
+          Section("About") {
+            if let biography = catalog.artistBiography ?? detail.artist.biography {
+              Text(biography).textSelection(.enabled)
+            }
+            Button("Load Biography") { catalog.loadArtistBiography(session: session) }.disabled(
+              loadDisabled)
+          }
+          Section("All Songs") {
+            HStack {
+              if catalog.artistSongsHaveMore {
+                Button("Load Songs") { catalog.loadArtistSongs(session: session) }.disabled(
+                  loadDisabled)
+              }
+              Button("Play All Songs") {
+                catalog.loadArtistSongs(all: true, playback: playback, session: session)
+              }.disabled(loadDisabled)
+              TrackCollectionMenu(
+                tracks: catalog.artistSongs,
+                context: .artist(id: detail.artist.id, name: detail.artist.name),
+                playback: playback, session: session, library: library, downloads: downloads)
+            }
+            ForEach(catalog.artistSongs) { track in
+              HStack {
+                TrackRowLabel(track: track, loader: artwork)
+                Spacer()
+                QueueNextButton(
+                  track: track, context: .artist(id: detail.artist.id, name: detail.artist.name),
+                  playback: playback, session: session)
+                Button("Play") {
+                  catalog.loadArtistSongs(
+                    all: true, playback: playback, startingAt: track.id, session: session)
+                }.disabled(loadDisabled)
+              }
+            }
+          }
           Section("Top Songs") {
             ForEach(detail.hotSongs) { track in
               HStack {
@@ -539,7 +686,7 @@ struct CatalogView: View {
               HStack {
                 AlbumRowLabel(album: album, loader: artwork)
                 Spacer()
-                Button("Open · 2 requests", systemImage: "opticaldisc") {
+                Button("Open", systemImage: "opticaldisc") {
                   catalog.openAlbum(id: album.id, session: session)
                   pane = .album
                 }
@@ -548,7 +695,7 @@ struct CatalogView: View {
               }
             }
             if catalog.artistAlbumsHaveMore {
-              Button("Load More · 1 request", systemImage: "plus") {
+              Button("Load More", systemImage: "plus") {
                 catalog.loadMoreArtistAlbums(session: session)
               }
               .buttonStyle(.borderless)
@@ -576,13 +723,13 @@ struct CatalogView: View {
         }
         .fixedSize()
         .disabled(requestInFlight)
-        Button("Load · 1 request", systemImage: "arrow.clockwise") {
+        Button("Load", systemImage: "arrow.clockwise") {
           catalog.loadNewAlbums(reset: true, session: session)
         }
         .disabled(loadDisabled)
         Spacer()
         if catalog.newAlbumsHaveMore {
-          Button("Load More · 1 request", systemImage: "plus") {
+          Button("Load More", systemImage: "plus") {
             catalog.loadNewAlbums(reset: false, session: session)
           }
           .disabled(loadDisabled)
@@ -598,7 +745,7 @@ struct CatalogView: View {
           HStack {
             AlbumRowLabel(album: album, loader: artwork)
             Spacer()
-            Button("Open · 2 requests", systemImage: "opticaldisc") {
+            Button("Open", systemImage: "opticaldisc") {
               catalog.openAlbum(id: album.id, session: session)
               pane = .album
             }
@@ -614,13 +761,13 @@ struct CatalogView: View {
   @ViewBuilder private var topArtistsPane: some View {
     VStack(spacing: 0) {
       HStack {
-        Button("Load · 1 request", systemImage: "arrow.clockwise") {
+        Button("Load", systemImage: "arrow.clockwise") {
           catalog.loadTopArtists(reset: true, session: session)
         }
         .disabled(loadDisabled)
         Spacer()
         if catalog.topArtistsHaveMore {
-          Button("Load More · 1 request", systemImage: "plus") {
+          Button("Load More", systemImage: "plus") {
             catalog.loadTopArtists(reset: false, session: session)
           }
           .disabled(loadDisabled)
@@ -636,7 +783,7 @@ struct CatalogView: View {
           HStack {
             ArtistRowLabel(artist: artist, loader: artwork)
             Spacer()
-            Button("Open · 2 requests", systemImage: "music.microphone") {
+            Button("Open", systemImage: "music.microphone") {
               catalog.openArtist(id: artist.id, session: session)
               pane = .artist
             }

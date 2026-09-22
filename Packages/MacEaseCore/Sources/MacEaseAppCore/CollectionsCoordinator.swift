@@ -52,13 +52,23 @@ private struct ConfirmedMembership {
 /// The account's own collections: albums it has saved, artists it follows and
 /// the cloud drive.
 ///
-/// Each section loads and pages from an explicit action, exactly like the
-/// playlist library, and nothing here refreshes itself. The cloud drive's
-/// capacity arrives with its first page, so showing how full the drive is
-/// costs no extra request.
+/// Navigation loads each section once per account; refresh and paging reuse
+/// that section's state independently of other sections. Cloud capacity
+/// arrives with its first page and needs no separate request.
 @MainActor
 @Observable
 package final class CollectionsCoordinator: SessionGuardedCoordinator {
+  package enum Section: String, Hashable { case albums, artists, cloud }
+  @ObservationIgnored private var reads: [String: Task<Void, Never>] = [:]
+  @ObservationIgnored private var readTokens: [String: OperationToken] = [:]
+  @ObservationIgnored private var readIDs: [String: UUID] = [:]
+  @ObservationIgnored private var readSections: [String: Section] = [:]
+  package private(set) var loadingReads: Set<String> = []
+  package private(set) var loadedSections: Set<Section> = []
+  package func isLoading(_ section: Section) -> Bool {
+    loadingReads.contains { readSections[$0] == section }
+  }
+
   private static let pageSize = 25
   private static let cloudPageSize = 30
 
@@ -70,6 +80,11 @@ package final class CollectionsCoordinator: SessionGuardedCoordinator {
   @ObservationIgnored private var operationToken: OperationToken?
   private var albumMembership = ConfirmedMembership()
   private var artistMembership = ConfirmedMembership()
+  private var albumOffset = 0
+  private var artistOffset = 0
+  private var cloudOffset = 0
+  private var albumsNeedReload = false
+  private var artistsNeedReload = false
 
   package var noStoredSessionStatus: String { "No stored session to load collections" }
 
@@ -77,10 +92,15 @@ package final class CollectionsCoordinator: SessionGuardedCoordinator {
   package private(set) var artists: [Artist] = []
   package private(set) var cloudSongs: [CloudSong] = []
   package private(set) var cloudCapacity: CloudCapacity?
+  package private(set) var selectedCloudSong: CloudSong?
+  package private(set) var uploadProgress: CloudUploadProgress?
+  @ObservationIgnored private var uploadID: UUID?
   package private(set) var albumsHaveMore = false
   package private(set) var artistsHaveMore = false
   package private(set) var cloudHasMore = false
-  package var isLoading = false
+  package private(set) var writingSection: Section?
+  package private(set) var isWriting = false
+  package var isLoading: Bool { isWriting || !loadingReads.isEmpty }
   package var status = "Validate the session, then load each collection"
 
   package func albumCollectionState(for albumID: Int64) -> ConfirmedMembershipState {
@@ -114,11 +134,12 @@ package final class CollectionsCoordinator: SessionGuardedCoordinator {
   // MARK: - Reads
 
   package func loadAlbums(reset: Bool, session: any SessionProviding) {
+    let reset = reset || albumsNeedReload
     guard reset || albumsHaveMore else { return }
-    let offset = reset ? 0 : albums.count
+    let offset = reset ? 0 : albumOffset
     read(
       loadingStatus: "Loading collected albums (1 request)",
-      operation: "Collected albums",
+      operation: "Collected albums", section: .albums,
       session: session
     ) { credential, _ in
       let page = try await self.transport.collectedAlbums(
@@ -127,8 +148,11 @@ package final class CollectionsCoordinator: SessionGuardedCoordinator {
         credential: credential
       )
       return {
-        self.albums = reset ? page.items : self.albums + page.items
-        self.albumsHaveMore = page.more
+        var seen = Set(reset ? [] : self.albums.map(\.id))
+        self.albums = (reset ? [] : self.albums) + page.items.filter { seen.insert($0.id).inserted }
+        self.albumOffset = offset + page.items.count
+        self.albumsNeedReload = false
+        self.albumsHaveMore = page.more && !page.items.isEmpty
         if reset && page.more { self.albumMembership.beginPartialReplacement() }
         if page.more {
           for album in page.items {
@@ -143,11 +167,12 @@ package final class CollectionsCoordinator: SessionGuardedCoordinator {
   }
 
   package func loadArtists(reset: Bool, session: any SessionProviding) {
+    let reset = reset || artistsNeedReload
     guard reset || artistsHaveMore else { return }
-    let offset = reset ? 0 : artists.count
+    let offset = reset ? 0 : artistOffset
     read(
       loadingStatus: "Loading followed artists (1 request)",
-      operation: "Followed artists",
+      operation: "Followed artists", section: .artists,
       session: session
     ) { credential, _ in
       let page = try await self.transport.followedArtists(
@@ -156,8 +181,12 @@ package final class CollectionsCoordinator: SessionGuardedCoordinator {
         credential: credential
       )
       return {
-        self.artists = reset ? page.items : self.artists + page.items
-        self.artistsHaveMore = page.more
+        var seen = Set(reset ? [] : self.artists.map(\.id))
+        self.artists =
+          (reset ? [] : self.artists) + page.items.filter { seen.insert($0.id).inserted }
+        self.artistOffset = offset + page.items.count
+        self.artistsNeedReload = false
+        self.artistsHaveMore = page.more && !page.items.isEmpty
         if reset && page.more { self.artistMembership.beginPartialReplacement() }
         if page.more {
           for artist in page.items {
@@ -173,10 +202,10 @@ package final class CollectionsCoordinator: SessionGuardedCoordinator {
 
   package func loadCloud(reset: Bool, session: any SessionProviding) {
     guard reset || cloudHasMore else { return }
-    let offset = reset ? 0 : cloudSongs.count
+    let offset = reset ? 0 : cloudOffset
     read(
       loadingStatus: "Loading the cloud drive (1 request)",
-      operation: "Cloud drive",
+      operation: "Cloud drive", section: .cloud,
       session: session
     ) { credential, _ in
       let page = try await self.transport.cloudSongs(
@@ -185,12 +214,83 @@ package final class CollectionsCoordinator: SessionGuardedCoordinator {
         credential: credential
       )
       return {
-        self.cloudSongs = reset ? page.songs : self.cloudSongs + page.songs
-        self.cloudHasMore = page.more
+        var seen = Set(reset ? [] : self.cloudSongs.map(\.id))
+        self.cloudSongs =
+          (reset ? [] : self.cloudSongs) + page.songs.filter { seen.insert($0.id).inserted }
+        self.cloudOffset = offset + page.songs.count
+        self.cloudHasMore = page.more && !page.songs.isEmpty
         self.cloudCapacity = page.capacity
         return "Loaded \(self.cloudSongs.count) cloud songs"
       }
     }
+  }
+
+  package func openCloudSong(_ song: CloudSong, session: any SessionProviding) {
+    read(
+      loadingStatus: "Loading cloud file", operation: "Cloud file", section: .cloud,
+      session: session
+    ) {
+      credential, _ in
+      let detail = try await self.transport.cloudSongDetail(songID: song.id, credential: credential)
+      return {
+        self.selectedCloudSong = detail
+        return "Cloud file loaded"
+      }
+    }
+  }
+
+  package func matchCloudSong(_ song: CloudSong, to songID: Int64, session: any SessionProviding) {
+    guard songID >= 0, let account = session.account,
+      cloudSongs.contains(where: { $0.id == song.id }) || selectedCloudSong?.id == song.id
+    else { return }
+    write(
+      loadingStatus: "Updating song match", operation: "Match cloud song", session: session,
+      syncCloud: true
+    ) { credential in
+      try await self.transport.matchCloudSong(
+        songID: song.id, matchedSongID: songID, userID: account.userID, credential: credential)
+      return { return "Song match updated" }
+    }
+  }
+
+  package func uploadCloudFile(
+    at url: URL, importOnly: Bool, matchedSongID: Int64? = nil, session: any SessionProviding
+  ) async {
+    let id = UUID()
+    let started = write(
+      loadingStatus: "Preparing cloud file",
+      operation: importOnly ? "Import cloud file" : "Upload cloud file", session: session,
+      effect: .upload, syncCloud: true
+    ) { credential in
+      self.uploadID = id
+      self.uploadProgress = .preparing
+      if importOnly {
+        try await self.transport.importCloudFile(
+          at: url, matchedSongID: matchedSongID, credential: credential)
+      } else {
+        _ = try await self.transport.uploadCloudFile(at: url, credential: credential) {
+          [weak self] progress in
+          await MainActor.run {
+            guard let self, self.uploadID == id, self.isLoading else { return }
+            if self.uploadProgress == .publishing { return }
+            self.uploadProgress = progress
+          }
+        }
+      }
+      return { "Cloud file saved" }
+    }
+    if started { await loadTask?.value }
+    if uploadID == id {
+      uploadID = nil
+      uploadProgress = nil
+    }
+  }
+
+  package func cancelCloudUpload() {
+    guard uploadProgress != nil else { return }
+    loadTask?.cancel()
+    status =
+      "Cloud upload cancelled; check the cloud drive before retrying if publication had started"
   }
 
   // MARK: - Writes
@@ -204,7 +304,7 @@ package final class CollectionsCoordinator: SessionGuardedCoordinator {
       loadingStatus: collected
         ? "Collecting the album (1 request)"
         : "Removing the album (1 request)",
-      operation: collected ? "Collect album" : "Remove album",
+      operation: collected ? "Collect album" : "Remove album", section: .albums,
       session: session
     ) { credential in
       try await self.transport.setAlbumCollected(
@@ -223,6 +323,7 @@ package final class CollectionsCoordinator: SessionGuardedCoordinator {
           self.albums.removeAll { $0.id == album.id }
         }
         self.albumMembership.confirm(collected, id: album.id)
+        self.albumsNeedReload = true
         return
           (collected ? "Collected " : "Removed ") + album.name
           + "; reload to see the server's order"
@@ -239,7 +340,7 @@ package final class CollectionsCoordinator: SessionGuardedCoordinator {
       loadingStatus: followed
         ? "Following the artist (1 request)"
         : "Unfollowing the artist (1 request)",
-      operation: followed ? "Follow artist" : "Unfollow artist",
+      operation: followed ? "Follow artist" : "Unfollow artist", section: .artists,
       session: session
     ) { credential in
       try await self.transport.setArtistFollowed(
@@ -256,6 +357,7 @@ package final class CollectionsCoordinator: SessionGuardedCoordinator {
           self.artists.removeAll { $0.id == artist.id }
         }
         self.artistMembership.confirm(followed, id: artist.id)
+        self.artistsNeedReload = true
         return
           (followed ? "Followed " : "Unfollowed ") + artist.name
           + "; reload to see the server's order"
@@ -275,7 +377,8 @@ package final class CollectionsCoordinator: SessionGuardedCoordinator {
     write(
       loadingStatus: "Deleting from the cloud drive (1 request)",
       operation: "Delete cloud song",
-      session: session
+      session: session,
+      syncCloud: true
     ) { credential in
       try await self.transport.deleteCloudSong(
         songID: song.id,
@@ -286,6 +389,7 @@ package final class CollectionsCoordinator: SessionGuardedCoordinator {
           return "Deleted \(song.track.name) from the cloud drive"
         }
         self.cloudSongs.removeAll { $0.id == song.id }
+        if self.selectedCloudSong?.id == song.id { self.selectedCloudSong = nil }
         self.cloudCapacity = self.cloudCapacity.map {
           CloudCapacity(
             usedBytes: max(0, $0.usedBytes - song.fileSize),
@@ -299,10 +403,13 @@ package final class CollectionsCoordinator: SessionGuardedCoordinator {
 
   package func settleForTesting() async {
     await loadTask?.value
+    for task in reads.values { await task.value }
   }
 
   package func reset() {
     generation += 1
+    for section in [Section.albums, .artists, .cloud] { cancelReads(section) }
+    if case .transferring(_)? = uploadProgress { loadTask?.cancel() }
     if !arbiter.activeWriteIsInFlight {
       loadTask?.cancel()
       loadTask = nil
@@ -312,7 +419,8 @@ package final class CollectionsCoordinator: SessionGuardedCoordinator {
       }
     }
     clearAll()
-    isLoading = false
+    writingSection = nil
+    isWriting = false
     status = "Validate the session, then load each collection"
   }
 
@@ -328,65 +436,86 @@ package final class CollectionsCoordinator: SessionGuardedCoordinator {
       effect: effect,
       session: session,
       arbiter: arbiter,
-      isLoading: isLoading,
+      isLoading: isWriting,
       noAccountStatus: "Validate the session before loading collections",
       status: &status,
       operationToken: &operationToken
     )
   }
 
+  package func loadIfNeeded(_ section: Section, session: any SessionProviding) {
+    guard !loadedSections.contains(section), !isLoading(section) else { return }
+    switch section {
+    case .albums: loadAlbums(reset: true, session: session)
+    case .artists: loadArtists(reset: true, session: session)
+    case .cloud: loadCloud(reset: true, session: session)
+    }
+  }
+
+  private func cancelReads(_ section: Section) {
+    for operation in Array(readSections.keys) where readSections[operation] == section {
+      reads.removeValue(forKey: operation)?.cancel()
+      if let token = readTokens.removeValue(forKey: operation) {
+        arbiter.end(token, outcome: .cancelled)
+      }
+      readIDs[operation] = nil
+      readSections[operation] = nil
+      loadingReads.remove(operation)
+    }
+  }
+
   private func read(
     loadingStatus: String,
     operation: String,
+    section: Section,
     session: any SessionProviding,
-    body: @escaping @MainActor (NeteaseCredential, NeteaseAccount) async throws ->
-      @MainActor () -> String
+    body: @escaping @MainActor (NeteaseCredential, NeteaseAccount) async throws -> @MainActor () ->
+      String
   ) {
-    guard let claim = claim(operation, effect: .read, session: session) else {
+    guard reads[operation] == nil, writingSection != section else { return }
+    guard session.isOnline, let account = session.account else {
+      status = "Connect to load your collections"
       return
     }
     let currentGeneration = generation
-    let account = claim.account
-    isLoading = true
+    let id = UUID()
+    readIDs[operation] = id
+    readSections[operation] = section
+    loadingReads.insert(operation)
     status = loadingStatus
-    loadTask = Task {
+    reads[operation] = Task {
+      let token = await arbiter.beginWhenAvailable(name: operation, effect: .read)
       var outcome = OperationOutcome.failed
       defer {
-        releaseSessionOperation(
-          claim.token,
-          currentToken: &self.operationToken,
-          arbiter: self.arbiter,
-          outcome: outcome
-        )
-        finishSessionOperation(
-          generation: currentGeneration,
-          currentGeneration: self.generation,
-          isLoading: &self.isLoading,
-          task: &self.loadTask
-        )
+        if let token { arbiter.end(token, outcome: outcome) }
+        if self.readIDs[operation] == id {
+          self.reads[operation] = nil
+          self.readTokens[operation] = nil
+          self.readIDs[operation] = nil
+          self.readSections[operation] = nil
+          self.loadingReads.remove(operation)
+        }
       }
+      guard let token, self.generation == currentGeneration, !Task.isCancelled else { return }
+      self.readTokens[operation] = token
       do {
         guard
           let credential = try await currentCredential(
-            account: account,
-            generation: currentGeneration,
-            session: session
-          )
+            account: account, generation: currentGeneration, session: session)
         else { return }
+        try Task.checkCancellation()
         let apply = try await body(credential, account)
-        guard
+        guard !Task.isCancelled, self.readIDs[operation] == id,
           try await sessionRemainsCurrent(
-            account: account,
-            credential: credential,
-            generation: currentGeneration,
-            session: session
-          )
+            account: account, credential: credential,
+            generation: currentGeneration, session: session),
+          !Task.isCancelled
         else {
-          // A read that could not be published changed nothing on the server.
           outcome = .cancelled
           return
         }
         status = apply()
+        if operation != "Cloud file" { loadedSections.insert(section) }
         outcome = .applied
       } catch {
         outcome = Task.isCancelled ? .cancelled : .failed
@@ -395,18 +524,24 @@ package final class CollectionsCoordinator: SessionGuardedCoordinator {
     }
   }
 
+  @discardableResult
   private func write(
     loadingStatus: String,
     operation: String,
+    section: Section = .cloud,
     session: any SessionProviding,
+    effect: OperationEffect = .write,
+    syncCloud: Bool = false,
     body: @escaping @MainActor (NeteaseCredential) async throws -> @MainActor () -> String
-  ) {
-    guard let claim = claim(operation, effect: .write, session: session) else {
-      return
+  ) -> Bool {
+    guard let claim = claim(operation, effect: effect, session: session) else {
+      return false
     }
+    cancelReads(section)
     let currentGeneration = generation
     let account = claim.account
-    isLoading = true
+    writingSection = section
+    isWriting = true
     status = loadingStatus
     loadTask = Task {
       var outcome = OperationOutcome.failed
@@ -420,9 +555,10 @@ package final class CollectionsCoordinator: SessionGuardedCoordinator {
         finishSessionOperation(
           generation: currentGeneration,
           currentGeneration: self.generation,
-          isLoading: &self.isLoading,
+          isLoading: &self.isWriting,
           task: &self.loadTask
         )
+        if self.generation == currentGeneration { self.writingSection = nil }
       }
       do {
         guard
@@ -448,15 +584,42 @@ package final class CollectionsCoordinator: SessionGuardedCoordinator {
         else { return }
         status = apply()
         outcome = .applied
+        if syncCloud {
+          do {
+            let page = try await self.transport.cloudSongs(
+              limit: Self.cloudPageSize, offset: 0, credential: credential)
+            guard
+              try await self.sessionRemainsCurrent(
+                account: account, credential: credential, generation: currentGeneration,
+                session: session)
+            else { return }
+            self.cloudSongs = page.songs
+            self.cloudOffset = page.songs.count
+            self.cloudHasMore = page.more
+            self.cloudCapacity = page.capacity
+            if let selected = self.selectedCloudSong {
+              let detail = try await self.transport.cloudSongDetail(
+                songID: selected.id, credential: credential)
+              guard
+                try await self.sessionRemainsCurrent(
+                  account: account, credential: credential, generation: currentGeneration,
+                  session: session)
+              else { return }
+              self.selectedCloudSong = detail
+            }
+          } catch {
+            if self.generation == currentGeneration {
+              self.status += "; saved, but the cloud drive could not be refreshed"
+            }
+          }
+        }
       } catch is CancellationError {
         outcome = .cancelled
       } catch {
-        if Task.isCancelled {
-          outcome = .cancelled
-        } else if let service = error as? NeteaseServiceError,
-          service.provesWriteDidNotRun
-        {
+        if error.provesWriteDidNotRun {
           outcome = .failed
+        } else if Task.isCancelled {
+          outcome = .cancelled
         } else if arbiter.abandoningLosesTheOutcome(claim.token) {
           // Sent, and nothing came back that says what the server did with it.
           outcome = .outcomeUnknown
@@ -464,6 +627,7 @@ package final class CollectionsCoordinator: SessionGuardedCoordinator {
         report(error, operation: operation, generation: currentGeneration)
       }
     }
+    return true
   }
 
   private func report(_ error: any Error, operation: String, generation: Int) {
@@ -474,13 +638,22 @@ package final class CollectionsCoordinator: SessionGuardedCoordinator {
   }
 
   private func clearAll() {
+    loadedSections.removeAll()
     albums = []
     artists = []
     cloudSongs = []
     cloudCapacity = nil
+    selectedCloudSong = nil
+    uploadProgress = nil
+    uploadID = nil
     albumsHaveMore = false
     artistsHaveMore = false
     cloudHasMore = false
+    albumOffset = 0
+    artistOffset = 0
+    cloudOffset = 0
+    albumsNeedReload = false
+    artistsNeedReload = false
     albumMembership = ConfirmedMembership()
     artistMembership = ConfirmedMembership()
   }

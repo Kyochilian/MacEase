@@ -1,6 +1,25 @@
 import AppKit
 import Foundation
+import ImageIO
 import NeteaseKit
+import UniformTypeIdentifiers
+
+/// The two sizes artwork is ever drawn at. Each is one address on the CDN and
+/// one entry in each cache tier, so thirty rows and one header showing the
+/// same album share a single request and a single decoded bitmap.
+package enum ArtworkVariant: Sendable {
+  /// Rows and headers, drawn at up to 64 points.
+  case thumbnail
+  /// The system Now Playing surface and notification attachments.
+  case display
+
+  package var pixels: Int {
+    switch self {
+    case .thumbnail: 128
+    case .display: 512
+    }
+  }
+}
 
 /// Loads and caches artwork.
 ///
@@ -18,24 +37,27 @@ import NeteaseKit
 /// which is the only thing that makes artwork a request the user implied.
 ///
 /// It lives on the main actor rather than in an actor of its own: `NSImage` is
-/// not `Sendable`, so a background actor could only ever hand back bytes, and
-/// every caller would then decode the same cover again on the main thread. The
-/// only genuinely concurrent part — the transfer — is already off-thread
-/// inside `URLSession`.
+/// not `Sendable`, so a background actor could only ever hand back bytes. The
+/// transfer is off-thread inside `URLSession` and the decode is off-thread in
+/// ImageIO; only the finished `CGImage`, which is `Sendable`, comes back here.
 @MainActor
 package final class ArtworkLoader {
   /// Cheap for artwork, which is a few tens of kilobytes per cover, and small
   /// enough that the decoded tier is never the reason memory grows.
   private static let memoryCapacityBytes = 32 * 1024 * 1024
+  /// Decoded bitmaps: 128-pixel thumbnails are 64 KB each, so this holds a
+  /// whole library's worth of rows while bounding the larger display tier.
+  private static let decodedCostLimitBytes = 64 * 1024 * 1024
 
   private let urlSession: URLSession
   private let urlCache: URLCache
-  private let decoder: @MainActor (Data) async -> NSImage?
+  private let decoder: @Sendable (Data, ArtworkVariant) async -> CGImage?
   private let decoded = NSCache<NSURL, NSImage>()
   private final class InFlightTask {
-    let task: Task<Data?, Never>
+    let task: Task<CGImage?, Never>
+    var waiters = 0
 
-    init(_ task: Task<Data?, Never>) { self.task = task }
+    init(_ task: Task<CGImage?, Never>) { self.task = task }
   }
 
   private var inFlight: [URL: InFlightTask] = [:]
@@ -44,7 +66,8 @@ package final class ArtworkLoader {
     diskCapacityBytes: Int,
     directory: URL? = ArtworkLoader.defaultCacheDirectory(),
     urlSession: URLSession? = nil,
-    decoder: @escaping @MainActor (Data) async -> NSImage? = { NSImage(data: $0) }
+    decoder: @escaping @Sendable (Data, ArtworkVariant) async -> CGImage? =
+      ArtworkLoader.decode
   ) {
     let cache = URLCache(
       memoryCapacity: Self.memoryCapacityBytes,
@@ -69,6 +92,7 @@ package final class ArtworkLoader {
     }
     self.decoder = decoder
     decoded.countLimit = 512
+    decoded.totalCostLimit = Self.decodedCostLimitBytes
   }
 
   package static func defaultCacheDirectory() -> URL? {
@@ -83,22 +107,19 @@ package final class ArtworkLoader {
   /// Artwork is decoration: a failure returns nil so the row shows its
   /// placeholder. It is not reported as an app failure, because the user did
   /// not ask for a cover — they asked for a list, and they have it.
-  package func image(for url: URL) async -> NSImage? {
-    guard url.scheme?.lowercased() == "https", let host = url.host,
-      NeteaseResourceHost.isApproved(host)
-    else {
-      return nil
-    }
+  package func image(
+    for url: URL,
+    variant: ArtworkVariant = .thumbnail
+  ) async -> NSImage? {
+    guard !Task.isCancelled else { return nil }
+    guard let url = Self.request(for: url, variant: variant) else { return nil }
     if let cached = decoded.object(forKey: url as NSURL) {
       return cached
     }
-    // The shared task yields bytes, not an image: `Task.value` is nonisolated,
-    // so what crosses it has to be `Sendable` and `NSImage` is not. Decoding
-    // happens below, on the main actor, and the cache check is repeated there
-    // — every waiter resumes in turn, so the first decodes and the rest find
-    // the result already cached.
+    // Share both transfer and decode. CGImage can cross Task.value safely;
+    // NSImage is created and cached only after returning to the main actor.
     let entry = inFlight[url] ?? {
-      let task = Task<Data?, Never> { [urlSession] in
+      let task = Task<CGImage?, Never> { [urlSession, decoder] in
         var request = URLRequest(url: url)
         request.httpShouldHandleCookies = false
         guard
@@ -106,36 +127,39 @@ package final class ArtworkLoader {
           let http = response as? HTTPURLResponse,
           (200..<300).contains(http.statusCode)
         else { return nil }
-        return data
+        guard !Task.isCancelled else { return nil }
+        return await decoder(data, variant)
       }
       let entry = InFlightTask(task)
       inFlight[url] = entry
       return entry
     }()
 
-    let data = await entry.task.value
+    entry.waiters += 1
     defer {
-      if inFlight[url] === entry { inFlight[url] = nil }
+      entry.waiters -= 1
+      if entry.waiters == 0, inFlight[url] === entry { inFlight[url] = nil }
     }
+    let bitmap = await entry.task.value
+    guard !Task.isCancelled, inFlight[url] === entry else { return nil }
     if let cached = decoded.object(forKey: url as NSURL) {
       return cached
     }
-    guard let data, let image = await decoder(data) else { return nil }
-    decoded.setObject(image, forKey: url as NSURL)
+    guard let bitmap else { return nil }
+    let image = NSImage(cgImage: bitmap, size: .zero)
+    decoded.setObject(image, forKey: url as NSURL, cost: Self.bitmapCost(image))
     return image
   }
 
   /// Returns only bytes already present in this loader's URLCache. Native
   /// notifications use it to prepare an optional temporary attachment without
-  /// creating a second cover request or a second permanent image cache.
+  /// creating a second cover request or a second permanent image cache. It
+  /// looks for the display size, which is what Now Playing fetched for the
+  /// same track moments earlier.
   package func cachedNotificationArtwork(
     for url: URL
   ) -> NativeNotificationArtwork? {
-    guard url.scheme?.lowercased() == "https", let host = url.host,
-      NeteaseResourceHost.isApproved(host)
-    else {
-      return nil
-    }
+    guard let url = Self.request(for: url, variant: .display) else { return nil }
     var request = URLRequest(url: url)
     request.httpShouldHandleCookies = false
     guard let response = urlCache.cachedResponse(for: request),
@@ -156,6 +180,8 @@ package final class ArtworkLoader {
   package var diskUsageBytes: Int { urlCache.currentDiskUsage }
 
   package func clear() {
+    for entry in inFlight.values { entry.task.cancel() }
+    inFlight.removeAll()
     urlCache.removeAllCachedResponses()
     decoded.removeAllObjects()
   }
@@ -173,16 +199,57 @@ package final class ArtworkLoader {
     urlCache.diskCapacity = bytes
   }
 
-  private static func imageExtension(for mimeType: String) -> String? {
-    switch mimeType {
-    case "image/jpeg": "jpg"
-    case "image/png": "png"
-    case "image/gif": "gif"
-    case "image/webp": "webp"
-    case "image/heic": "heic"
-    case "image/heif": "heif"
-    case "image/avif": "avif"
-    default: nil
+  /// The address actually fetched: the server-supplied URL, approved, scaled
+  /// to the variant. nil for anything MacEase will not load.
+  package static func request(for url: URL, variant: ArtworkVariant) -> URL? {
+    guard url.scheme?.lowercased() == "https", let host = url.host,
+      NeteaseResourceHost.isApproved(host)
+    else { return nil }
+    return NeteaseArtworkURL.sized(url, pixels: variant.pixels)
+  }
+
+  /// Decodes off the main thread and never larger than the variant asked for.
+  /// The CDN is expected to have scaled already; if it did not, the cap is
+  /// what keeps a 3000-pixel original from becoming a 36-megabyte bitmap in
+  /// the cache and a stall on the thread that draws the list.
+  nonisolated package static func decode(
+    _ data: Data,
+    variant: ArtworkVariant
+  ) async -> CGImage? {
+    let pixels = variant.pixels
+    let task = Task.detached(priority: .userInitiated) {
+      Self.downsampled(data, maxPixels: pixels)
     }
+    return await withTaskCancellationHandler {
+      await task.value
+    } onCancel: {
+      task.cancel()
+    }
+  }
+
+  nonisolated static func downsampled(_ data: Data, maxPixels: Int) -> CGImage? {
+    guard !Task.isCancelled else { return nil }
+    let sourceOptions = [kCGImageSourceShouldCache: false] as CFDictionary
+    guard let source = CGImageSourceCreateWithData(data as CFData, sourceOptions)
+    else { return nil }
+    let options =
+      [
+        kCGImageSourceCreateThumbnailFromImageAlways: true,
+        kCGImageSourceCreateThumbnailWithTransform: true,
+        kCGImageSourceShouldCacheImmediately: true,
+        kCGImageSourceThumbnailMaxPixelSize: maxPixels,
+      ] as CFDictionary
+    return CGImageSourceCreateThumbnailAtIndex(source, 0, options)
+  }
+
+  private static func bitmapCost(_ image: NSImage) -> Int {
+    guard let representation = image.representations.first else { return 0 }
+    return representation.pixelsWide * representation.pixelsHigh * 4
+  }
+
+  private static func imageExtension(for mimeType: String) -> String? {
+    guard let type = UTType(mimeType: mimeType), type.conforms(to: .image)
+    else { return nil }
+    return type.preferredFilenameExtension
   }
 }

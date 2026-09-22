@@ -42,6 +42,24 @@ private struct LyricsRig {
 
 private let document = Lyrics.lines([LyricLine(timeSeconds: 1, text: "One")])
 
+@Test @MainActor func busyTrackChangesClearOldLyricsAndLoadOnlyTheLatestIntent() async {
+  let rig = LyricsRig()
+  await rig.transport.setLyrics(.success(document))
+  let tracks = makeTracks([1, 2, 3])
+  await rig.open(tracks[0])
+  let blocker = rig.arbiter.begin(name: "Playlist edit", effect: .write)!
+  rig.lyrics.load(track: tracks[1], session: rig.session)
+  await Task.yield()
+  #expect(rig.lyrics.content == .loading)
+  rig.lyrics.load(track: tracks[2], session: rig.session)
+  await Task.yield()
+  #expect(await rig.transport.recordedCalls() == [.lyrics(1)])
+  rig.arbiter.end(blocker, outcome: .applied)
+  await rig.lyrics.settleForTesting()
+  #expect(await rig.transport.recordedCalls() == [.lyrics(1), .lyrics(3)])
+  #expect(rig.lyrics.content == .document(document))
+}
+
 @Test @MainActor func aClosedPanelNeverRequestsLyrics() async {
   let rig = LyricsRig()
   await rig.transport.setLyrics(.success(document))
@@ -173,8 +191,9 @@ private let document = Lyrics.lines([LyricLine(timeSeconds: 1, text: "One")])
 
   await rig.open(makeTracks([1])[0])
 
-  #expect(rig.lyrics.content == .idle)
-  #expect(rig.lyrics.status == "Lyrics timed out; try again when the connection is better (timeout)")
+  #expect(rig.lyrics.content == .failed)
+  #expect(
+    rig.lyrics.status == "Lyrics timed out; try again when the connection is better (timeout)")
   #expect(await rig.transport.callCount() == 1)
 }
 
@@ -226,7 +245,7 @@ private let document = Lyrics.lines([LyricLine(timeSeconds: 1, text: "One")])
 
   await rig.open(makeTracks([1])[0])
 
-  #expect(rig.lyrics.status == "Validate the session before loading lyrics")
+  #expect(rig.lyrics.status == "Sign in before loading lyrics")
   #expect(await rig.transport.callCount() == 0)
   #expect(rig.arbiter.isBusy == false)
   #expect(rig.arbiter.activeReadCount == 0)

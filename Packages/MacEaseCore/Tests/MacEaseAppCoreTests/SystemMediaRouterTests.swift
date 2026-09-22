@@ -42,7 +42,8 @@ private final class RouterRig {
 
   func play(_ ids: [Int64] = [101, 102]) async {
     await transport.setSongURL(.success(makeResolvedAsset(songID: ids[0])))
-    playback.play(tracks: makeTracks(ids), startIndex: 0, context: .dailyRecommendations, session: session)
+    playback.play(
+      tracks: makeTracks(ids), startIndex: 0, context: .dailyRecommendations, session: session)
     await playback.settleForTesting()
   }
 }
@@ -75,12 +76,11 @@ private final class RouterRig {
   #expect(!rig.router.perform(AppPlaybackCommand.previous))
 }
 
-@Test @MainActor func steppingIsRefusedWhileAWriteOwnsTheArbiter() async {
+@Test @MainActor func steppingIsRefusedWhileTheAccountIsChanging() async {
   let rig = RouterRig()
   await rig.play()
 
-  // A write holds the exclusive slot, so a playback resolution cannot claim.
-  let write = rig.arbiter.begin(name: "Like", effect: .write)
+  let write = rig.arbiter.begin(name: "Change account", effect: .sessionMutation)
   #expect(write != nil)
 
   #expect(!rig.router.canPerform(AppPlaybackCommand.next))
@@ -111,6 +111,40 @@ private final class RouterRig {
 }
 
 // MARK: - Like
+
+@Test @MainActor func matchedCloudHeartUsesOneCatalogIdentityAcrossLibraryAndSystemControls() async {
+  let rig = RouterRig()
+  let track = Track(id: 9001, name: "Cloud file", cloudFileID: 9001, catalogSongID: 42)
+  await rig.transport.setSongURL(.success(makeResolvedAsset(songID: 9001)))
+  rig.playback.play(tracks: [track], startIndex: 0, context: .cloudDrive, session: rig.session)
+  await rig.playback.settleForTesting()
+  await rig.transport.setLikedIDs(.success([42]))
+  rig.library.loadLikedIDs(session: rig.session)
+  await rig.library.settleForTesting()
+  #expect(rig.library.likedState(for: track) == .liked)
+  #expect(rig.router.snapshot().liked == .liked)
+  #expect(rig.router.snapshot().trackID == 9001)
+  #expect(rig.router.perform(.setLiked(false)))
+  await rig.library.settleForTesting()
+  #expect(rig.library.likedState(for: makeTracks([42])[0]) == .notLiked)
+  #expect(rig.router.snapshot().liked == .notLiked)
+  #expect(await rig.transport.recordedCalls().contains(.resolveCloudURL(9001, .standard)))
+  #expect(await rig.transport.recordedCalls().contains(.setSongLiked(42, false)))
+  #expect(!((await rig.transport.recordedCalls()).contains(.setSongLiked(9001, false))))
+}
+
+@Test @MainActor func unmatchedCloudFilesRefuseCatalogWritesAtTheSharedBoundary() async {
+  let rig = RouterRig()
+  let track = Track(id: 9001, name: "Cloud file", cloudFileID: 9001)
+  await rig.transport.setSongURL(.success(makeResolvedAsset(songID: 9001)))
+  rig.playback.play(tracks: [track], startIndex: 0, context: .cloudDrive, session: rig.session)
+  await rig.playback.settleForTesting()
+  #expect(!rig.library.canLike(track, session: rig.session))
+  #expect(!rig.router.perform(.setLiked(true)))
+  #expect(!rig.router.canPerform(.toggleLiked))
+  #expect(rig.router.snapshot().liked == .unknown)
+  #expect(await rig.transport.recordedCalls() == [.resolveCloudURL(9001, .standard)])
+}
 
 @Test @MainActor func likingIsRefusedWhileAnotherWriteIsInFlight() async {
   let rig = RouterRig()
@@ -170,8 +204,7 @@ private final class RouterRig {
     performIntent: { rig.router.perform($0) }
   )
 
-  // A write owns the arbiter, so the real Next entry point refuses.
-  _ = rig.arbiter.begin(name: "Like", effect: .write)
+  _ = rig.arbiter.begin(name: "Change account", effect: .sessionMutation)
 
   #expect(surface.onCommand?(.next) == .failed)
   withExtendedLifetime(coordinator) {}

@@ -243,8 +243,18 @@ preflight() {
   print -r -- "Release material names are present; no external action ran."
 }
 
+# Existing artifacts still have to match the intended team and update configuration.
+require_artifact_materials() {
+  local team_pattern='^[A-Z0-9]{10}$'
+  [[ "${MACEASE_TEAM_ID:-}" =~ $team_pattern ]] \
+    || die "MACEASE_TEAM_ID must be a 10-character Team ID"
+  [[ -n "${MACEASE_SPARKLE_FEED_URL:-}" ]] || die "MACEASE_SPARKLE_FEED_URL is required"
+  [[ -n "${MACEASE_SPARKLE_PUBLIC_KEY:-}" ]] || die "MACEASE_SPARKLE_PUBLIC_KEY is required"
+  validate_https_url "Sparkle appcast URL" "$MACEASE_SPARKLE_FEED_URL"
+}
+
 sign_app() {
-  preflight >/dev/null
+  verify_config >/dev/null
   local app=${1:A}
   validate_app "$app"
   local identity=${MACEASE_SIGNING_IDENTITY:-}
@@ -298,7 +308,7 @@ sign_app() {
 }
 
 archive_app() {
-  preflight >/dev/null
+  require_artifact_materials
   local app=${1:A}
   local archive=${2:A}
   validate_app "$app"
@@ -346,7 +356,7 @@ validate_release_archive() {
 }
 
 notarize_archive() {
-  preflight >/dev/null
+  require_artifact_materials
   local archive=${1:A}
   local profile=${MACEASE_NOTARY_PROFILE:-}
   [[ -n "$profile" ]] || die "MACEASE_NOTARY_PROFILE is required"
@@ -362,7 +372,7 @@ notarize_archive() {
 }
 
 wait_for_notarization() {
-  preflight >/dev/null
+  require_command xcrun
   local submission_id=$1
   local profile=${MACEASE_NOTARY_PROFILE:-}
   uuid_pattern='^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$'
@@ -372,7 +382,7 @@ wait_for_notarization() {
 }
 
 staple_app() {
-  preflight >/dev/null
+  require_artifact_materials
   local app=${1:A}
   validate_app "$app"
   verify_distribution_signature "$app" "$MACEASE_TEAM_ID"
@@ -384,7 +394,7 @@ staple_app() {
 }
 
 generate_appcast() {
-  preflight >/dev/null
+  require_artifact_materials
   local updates_directory=${1:A}
   local account=${MACEASE_SPARKLE_KEYCHAIN_ACCOUNT:-}
   local download_prefix=${MACEASE_RELEASE_DOWNLOAD_PREFIX:-}
@@ -422,7 +432,7 @@ generate_appcast() {
 }
 
 generate_metadata() {
-  preflight >/dev/null
+  require_artifact_materials
   local app=${1:A}
   local archive=${2:A}
   validate_app "$app"

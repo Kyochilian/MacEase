@@ -25,6 +25,13 @@ struct UpNextView: View {
                 ForEach(snapshot.upcoming) { track in
                   row(track, current: false, snapshot: snapshot)
                 }
+                .onMove { offsets, destination in
+                  var ids = snapshot.upcoming.map(\.id)
+                  ids.move(fromOffsets: offsets, toOffset: destination)
+                  _ = router.perform(
+                    .reorderUpcoming(
+                      songIDs: ids, accountID: snapshot.accountID, revision: snapshot.revision))
+                }
               }
             }
           }

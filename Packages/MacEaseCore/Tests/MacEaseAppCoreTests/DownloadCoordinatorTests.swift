@@ -1,7 +1,10 @@
+@preconcurrency import AVFoundation
+import CryptoKit
 import Foundation
 import Testing
 
 @testable import MacEaseAppCore
+@testable import MacEaseSession
 @testable import NeteaseKit
 
 private actor DownloadByteFetcher: AudioByteFetching {
@@ -69,7 +72,8 @@ private struct DownloadRig {
     fetchMode: DownloadByteFetcher.Mode = .success,
     validator: @escaping OfflineAudioValidating = { _ in true },
     arbiter: OperationArbiter = OperationArbiter(),
-    rangePipelineAvailable: Bool = true
+    rangePipelineAvailable: Bool = true,
+    storeOnDisk: Bool = false
   ) throws {
     root = FileManager.default.temporaryDirectory.appendingPathComponent(
       "MacEase-download-\(UUID().uuidString)",
@@ -79,7 +83,10 @@ private struct DownloadRig {
     self.arbiter = arbiter
     vault = FakeVault(stored: credential)
     session = FakeSession(credential: credential)
-    store = try LibraryStore(path: LibraryStore.inMemoryPath)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    store = try LibraryStore(
+      path: storeOnDisk
+        ? root.appendingPathComponent("library.sqlite").path : LibraryStore.inMemoryPath)
     files = try OfflineAudioFiles(
       directory: root.appendingPathComponent("Downloads", isDirectory: true)
     )
@@ -118,7 +125,9 @@ private struct DownloadRig {
 
   func resolved(
     songID: Int64,
-    quality: PlaybackQuality = .standard
+    quality: PlaybackQuality = .standard,
+    checksum: String? = nil,
+    trial: Bool = false
   ) -> SongURLResolution {
     .resolved(
       ResolvedAudioAsset(
@@ -132,13 +141,15 @@ private struct DownloadRig {
         byteCount: Int64(bytes.count),
         expiresIn: 1200,
         fee: 0,
-        trial: false
+        trial: trial,
+        fileMD5: checksum
       )
     )
   }
 
-  func program(songID: Int64, quality: PlaybackQuality = .standard) async {
-    await transport.setSongURL(.success(resolved(songID: songID, quality: quality)))
+  func program(songID: Int64, quality: PlaybackQuality = .standard, checksum: String? = nil) async {
+    await transport.setSongURL(
+      .success(resolved(songID: songID, quality: quality, checksum: checksum)))
   }
 
   func cleanup() {
@@ -153,21 +164,22 @@ private func seedDownload(
   accountID: Int64,
   track: Track,
   quality: PlaybackQuality = .standard,
-  bytes: Data = Data([1, 2, 3, 4])
+  bytes: Data = Data([1, 2, 3, 4]),
+  format: String = "mp3"
 ) async throws -> OfflineDownload {
-  let partial = try await files.makePartialFile(accountID: accountID, format: "mp3")
+  let partial = try await files.makePartialFile(accountID: accountID, format: format)
   try await files.append(bytes, to: partial, expectedOffset: 0)
   let final = try await files.commit(
     partial: partial,
     accountID: accountID,
-    format: "mp3"
+    format: format
   )
   let download = OfflineDownload(
     accountID: accountID,
     track: track,
     requestedQuality: quality,
     actualQuality: quality.rawValue,
-    format: "mp3",
+    format: format,
     byteCount: Int64(bytes.count),
     relativePath: final.relativePath,
     createdAt: Date(timeIntervalSince1970: 10)
@@ -194,7 +206,7 @@ private func seedDownload(
   await rig.coordinator.settleDownloadForTesting()
 
   #expect(
-    await rig.transport.recordedCalls() == [.resolveSongURL(track.id, .standard)]
+    await rig.transport.recordedCalls() == [.resolveDownloadURL(track.id, .standard)]
   )
   #expect(await rig.fetcher.callCount() == 1)
 }
@@ -339,6 +351,90 @@ private func seedDownload(
   #expect(events.first?.outcome == .failed(.connection))
 }
 
+@Test @MainActor func aPreviewNeverBecomesAnOfflineDownload() async throws {
+  let rig = try DownloadRig()
+  defer { rig.cleanup() }
+  await rig.activate()
+  await rig.transport.setSongURL(.success(rig.resolved(songID: 9, trial: true)))
+  rig.coordinator.startDownload(track: makeTracks([9])[0], quality: .standard, session: rig.session)
+  await rig.coordinator.settleDownloadForTesting()
+  #expect(rig.coordinator.downloads.isEmpty)
+  #expect(await rig.fetcher.callCount() == 0)
+  #expect(rig.coordinator.status.contains("preview"))
+}
+
+@Test @MainActor func aColdOfflineLoginOpensARealSavedAudioFileWithoutResolvingOnline() async throws
+{
+  let rig = try DownloadRig(validator: OfflineAudioValidation.isPlayable, storeOnDisk: true)
+  defer { rig.cleanup() }
+  let source = rig.root.appendingPathComponent("fixture.wav")
+  let format = AVAudioFormat(standardFormatWithSampleRate: 8000, channels: 1)!
+  let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 8000)!
+  buffer.frameLength = 8000
+  for index in 0..<8000 { buffer.floatChannelData![0][index] = 0 }
+  var file: AVAudioFile? = try AVAudioFile(forWriting: source, settings: format.settings)
+  try file?.write(from: buffer)
+  file = nil
+  let download = try await seedDownload(
+    store: rig.store, files: rig.files, accountID: testAccount.userID,
+    track: makeTracks([501])[0], bytes: Data(contentsOf: source), format: "wav"
+  )
+  let suite = "MacEaseTests.OfflineBoot.\(UUID().uuidString)"
+  let defaults = UserDefaults(suiteName: suite)!
+  defer { defaults.removePersistentDomain(forName: suite) }
+  let firstLogin = LoginCoordinator(
+    transport: rig.transport, vault: rig.vault, arbiter: rig.arbiter, refreshDefaults: defaults)
+  _ = await firstLogin.validateSession()
+
+  let reopenedStore = try LibraryStore(path: rig.root.appendingPathComponent("library.sqlite").path)
+  let downloads = DownloadCoordinator(
+    transport: rig.transport, vault: rig.vault, arbiter: rig.arbiter, ranges: nil,
+    store: reopenedStore, files: rig.files)
+  let login = LoginCoordinator(
+    transport: rig.transport, vault: rig.vault, arbiter: rig.arbiter, refreshDefaults: defaults)
+  login.onValidatedAccountChanged = { downloads.bind(accountID: $0?.userID) }
+  rig.playback.attach(session: login)
+  rig.playback.attach(downloads: downloads)
+  await rig.transport.setAccountStatus(.failure(URLError(.notConnectedToInternet)))
+  _ = await login.start()
+  await downloads.settleLoadingForTesting()
+  #expect(!login.isOnline)
+  #expect(downloads.downloads.count == 1)
+  let callsBeforePlayback = await rig.transport.callCount()
+  rig.playback.playDownloaded(download, session: login)
+  await rig.playback.settleForTesting()
+  #expect(rig.playback.phase == .playing)
+  #expect(rig.playback.activeOfflineDownloadID == download.id)
+  #expect(await rig.transport.callCount() == callsBeforePlayback)
+  #expect(rig.playback.seek(to: 0.5))
+  await rig.playback.settleForTesting()
+  #expect(await rig.transport.callCount() == callsBeforePlayback)
+}
+
+@Test @MainActor func aBatchContinuesPastOneFailureAndRetriesOnlyOnExplicitIntent() async throws {
+  let rig = try DownloadRig()
+  defer { rig.cleanup() }
+  await rig.activate()
+  await rig.transport.setSongURLs([
+    .success(.unavailable(itemCode: 403, fee: 1)),
+    .success(rig.resolved(songID: 2)),
+  ])
+  rig.coordinator.enqueueDownloads(
+    tracks: makeTracks([1, 2]), quality: .standard, session: rig.session)
+  await rig.coordinator.settleDownloadForTesting()
+  #expect(rig.coordinator.downloads.map { $0.track.id } == [2])
+  #expect(rig.coordinator.failedDownloads.map { $0.track.id } == [1])
+  #expect(
+    await rig.transport.recordedCalls() == [
+      .resolveDownloadURL(1, .standard), .resolveDownloadURL(2, .standard),
+    ])
+  await rig.program(songID: 1)
+  rig.coordinator.retryFailedDownloads(session: rig.session)
+  await rig.coordinator.settleDownloadForTesting()
+  #expect(Set(rig.coordinator.downloads.map { $0.track.id }) == [1, 2])
+  #expect(rig.coordinator.failedDownloads.isEmpty)
+}
+
 @Test @MainActor func aFailedDownloadRetriesOnlyAfterAnotherUserTrigger() async throws {
   let rig = try DownloadRig()
   defer { rig.cleanup() }
@@ -357,7 +453,7 @@ private func seedDownload(
   await Task.yield()
 
   #expect(
-    await rig.transport.recordedCalls() == [.resolveSongURL(track.id, .standard)]
+    await rig.transport.recordedCalls() == [.resolveDownloadURL(track.id, .standard)]
   )
   #expect(rig.coordinator.downloads.isEmpty)
 
@@ -372,8 +468,8 @@ private func seedDownload(
   #expect(
     await rig.transport.recordedCalls()
       == [
-        .resolveSongURL(track.id, .standard),
-        .resolveSongURL(track.id, .standard),
+        .resolveDownloadURL(track.id, .standard),
+        .resolveDownloadURL(track.id, .standard),
       ]
   )
   #expect(rig.coordinator.downloads.count == 1)
@@ -399,10 +495,11 @@ private func seedDownload(
   let accountDirectory = rig.root
     .appendingPathComponent("Downloads", isDirectory: true)
     .appendingPathComponent(String(testAccount.userID), isDirectory: true)
-  let files = (try? FileManager.default.contentsOfDirectory(
-    at: accountDirectory,
-    includingPropertiesForKeys: nil
-  )) ?? []
+  let files =
+    (try? FileManager.default.contentsOfDirectory(
+      at: accountDirectory,
+      includingPropertiesForKeys: nil
+    )) ?? []
   #expect(files.isEmpty)
 }
 
@@ -465,7 +562,8 @@ private func seedDownload(
   defer { rig.cleanup() }
   await rig.activate()
   let track = makeTracks([8])[0]
-  await rig.program(songID: track.id)
+  let checksum = Insecure.MD5.hash(data: rig.bytes).map { String(format: "%02x", $0) }.joined()
+  await rig.program(songID: track.id, checksum: checksum)
   guard case .resolved(let asset) = rig.resolved(songID: track.id) else {
     Issue.record("Expected resolved fixture")
     return
@@ -478,7 +576,8 @@ private func seedDownload(
     actualQuality: "standard",
     format: "mp3",
     byteCount: Int64(rig.bytes.count),
-    expiresAt: Date(timeIntervalSince1970: 1_000)
+    expiresAt: Date(timeIntervalSince1970: 1_000),
+    representationID: "md5:" + checksum
   )
   _ = try await rig.pipeline.data(
     for: resource,
@@ -641,9 +740,11 @@ private func seedDownload(
 
   #expect(rig.coordinator.downloads == [download])
   #expect(await rig.transport.recordedCalls().isEmpty)
-  #expect(rig.output.preparedResources.first?.location == .local(
-    await rig.files.fileURL(for: download)!
-  ))
+  #expect(
+    rig.output.preparedResources.first?.location
+      == .local(
+        await rig.files.fileURL(for: download)!
+      ))
 }
 
 @Test @MainActor func downloadedTrackBypassesAFullReadCeilingFromAnOrdinaryList() async throws {
@@ -700,7 +801,8 @@ private func seedDownload(
   #expect(rig.arbiter.end(write, outcome: .applied) == .applied)
 }
 
-@Test @MainActor func downloadedTrackFailsClosedForSessionMutationAndAccountMismatch() async throws {
+@Test @MainActor func downloadedTrackFailsClosedForSessionMutationAndAccountMismatch() async throws
+{
   let rig = try DownloadRig()
   defer { rig.cleanup() }
   let track = makeTracks([38])[0]
@@ -882,9 +984,11 @@ private func seedDownload(
 
   #expect(await rig.transport.recordedCalls().isEmpty)
   #expect(rig.output.preparedResources.count == 1)
-  #expect(rig.output.preparedResources[0].location == .local(
-    await rig.files.fileURL(for: download)!
-  ))
+  #expect(
+    rig.output.preparedResources[0].location
+      == .local(
+        await rig.files.fileURL(for: download)!
+      ))
   #expect(rig.playback.activeOfflineDownloadID == download.id)
 }
 
@@ -1034,9 +1138,10 @@ private func seedDownload(
     try await rig.store.downloads(accountID: otherAccount.userID).downloads
       == [otherDownload]
   )
-  #expect(await rig.files.fileURL(for: otherDownload).map {
-    FileManager.default.fileExists(atPath: $0.path)
-  } == true)
+  #expect(
+    await rig.files.fileURL(for: otherDownload).map {
+      FileManager.default.fileExists(atPath: $0.path)
+    } == true)
 }
 
 @Test @MainActor func deletingThePlayingDownloadStopsBeforeRemovingIt() async throws {
@@ -1060,9 +1165,10 @@ private func seedDownload(
   #expect(rig.playback.phase == .idle)
   #expect(rig.playback.activeOfflineDownloadID == nil)
   #expect(try await rig.store.downloads(accountID: testAccount.userID).downloads.isEmpty)
-  #expect(await rig.files.fileURL(for: download).map {
-    FileManager.default.fileExists(atPath: $0.path)
-  } == false)
+  #expect(
+    await rig.files.fileURL(for: download).map {
+      FileManager.default.fileExists(atPath: $0.path)
+    } == false)
 }
 
 @Test @MainActor func activationDropsAFileThatFailsPlaybackValidation() async throws {

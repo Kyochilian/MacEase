@@ -152,7 +152,7 @@ private let eapiHeader =
   }
 }
 
-@Test func renamePlaylistSendsOnlyTheNameSubRequest() throws {
+@Test func renamePlaylistUsesTheDirectEndpointWithoutChangingOtherFields() throws {
   let request = try NeteaseSession.renamePlaylistRequest(
     playlistID: 24_381_616,
     name: "Renamed",
@@ -162,16 +162,12 @@ private let eapiHeader =
     requestID: "1722945678123_0042"
   )
 
-  // Body equality is the real guard: the reference implementation also sends
-  // desc and tags defaulted to empty, which wipes them. If MacEase ever added
-  // those sub-requests, this expected body would no longer match.
-  let inner = #"{"id":24381616,"name":"Renamed"}"#
-  let encodedInner = String(decoding: try JSONEncoder().encode(inner), as: UTF8.self)
   let json =
-    #"{"/api/playlist/update/name":\#(encodedInner),"e_r":false,"header":\#(eapiHeader)}"#
+    #"{"id":24381616,"name":"Renamed","e_r":false,"header":\#(eapiHeader)}"#
 
-  #expect(request.url?.absoluteString == "https://interfacepc.music.163.com/eapi/batch")
-  let batchParams = try NeteaseCrypto.eapi(path: "/api/batch", json: json)
+  #expect(
+    request.url?.absoluteString == "https://interfacepc.music.163.com/eapi/playlist/update/name")
+  let batchParams = try NeteaseCrypto.eapi(path: "/api/playlist/update/name", json: json)
   #expect(
     String(decoding: request.httpBody!, as: UTF8.self) == "params=\(batchParams)"
   )
@@ -184,22 +180,21 @@ private let eapiHeader =
     credential: writeCredential,
     osVersion: "15.5",
     buildVersion: "1722945678",
-    requestID: "1722945678123_0042"
+    requestID: "1722945678123_0042",
+    checkToken: "fresh-verification"
   )
-  let json = #"{"id":24381616,"e_r":false,"header":\#(eapiHeader)}"#
 
   #expect(
     subscribe.url?.absoluteString
       == "https://interfacepc.music.163.com/eapi/playlist/subscribe"
   )
-  let subscribeParams = try NeteaseCrypto.eapi(
-    path: "/api/playlist/subscribe",
-    json: json
-  )
+  let body = try decryptedBody(subscribe)
+  #expect(body["id"] as? Int == 24_381_616)
+  #expect((body["checkToken"] as? String)?.hasPrefix("9ca17ae2") == true)
+  #expect((body["header"] as? [String: String])?["X-antiCheatToken"] == "fresh-verification")
   #expect(
-    String(decoding: subscribe.httpBody!, as: UTF8.self)
-      == "params=\(subscribeParams)"
-  )
+    subscribe.value(forHTTPHeaderField: "Cookie")?.contains("X-antiCheatToken=fresh-verification")
+      == true)
 
   let unsubscribe = try NeteaseSession.subscribePlaylistRequest(
     false,
@@ -213,6 +208,7 @@ private let eapiHeader =
     unsubscribe.url?.absoluteString
       == "https://interfacepc.music.163.com/eapi/playlist/unsubscribe"
   )
+  #expect(try decryptedBody(unsubscribe)["checkToken"] == nil)
 }
 
 @Test func writeAcknowledgementAcceptsOnlyCode200() throws {

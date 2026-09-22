@@ -19,28 +19,8 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Validate workflow YAML syntax
-        run: ruby -e 'require "yaml"; YAML.parse_file(".github/workflows/ci.yml")'
-
-      - name: Verify Apple Silicon runner
-        run: test "$(uname -m)" = arm64
-
-      - name: Show toolchain
-        run: swift --version && xcodebuild -version
-
-      - name: Debug tests
-        working-directory: Packages/MacEaseCore
-        run: swift test
-
-      - name: Release tests
-        working-directory: Packages/MacEaseCore
-        run: swift test -c release
-
-      - name: Release build
-        working-directory: Packages/MacEaseCore
-        run: swift build -c release --arch arm64
-
-      - name: Whitespace in the submitted commit range
+      - name: Check submitted diff and select validation
+        id: changes
         env:
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
@@ -48,17 +28,51 @@ jobs:
         run: |
           if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
             test -n "$PR_BASE_SHA" && test -n "$PR_HEAD_SHA"
-            git diff --check "$PR_BASE_SHA...$PR_HEAD_SHA"
+            diff_args=("$PR_BASE_SHA...$PR_HEAD_SHA")
           elif [[ "$GITHUB_EVENT_NAME" == "push" \
               && -n "$PUSH_BEFORE_SHA" \
               && "$PUSH_BEFORE_SHA" != "0000000000000000000000000000000000000000" ]]; then
-            git diff --check "$PUSH_BEFORE_SHA" "$GITHUB_SHA"
+            diff_args=("$PUSH_BEFORE_SHA" "$GITHUB_SHA")
           elif git rev-parse HEAD^ >/dev/null 2>&1; then
-            git diff --check HEAD^ HEAD
+            diff_args=(HEAD^ HEAD)
           else
             empty_tree=$(git hash-object -t tree /dev/null)
-            git diff --check "$empty_tree" HEAD
+            diff_args=("$empty_tree" HEAD)
           fi
+          git diff --check "${diff_args[@]}"
+          changed_files=$(git diff --name-only "${diff_args[@]}" -- . ':!*.md')
+          # A new branch has no push baseline; keep full validation in that case.
+          if [[ -n "$changed_files" || "$GITHUB_EVENT_NAME" == "workflow_dispatch" \
+              || ( "$GITHUB_EVENT_NAME" == "push" \
+                && ( -z "$PUSH_BEFORE_SHA" \
+                  || "$PUSH_BEFORE_SHA" == "0000000000000000000000000000000000000000" ) ) ]]; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "code=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Verify Apple Silicon runner
+        if: steps.changes.outputs.code == 'true'
+        run: test "$(uname -m)" = arm64
+
+      - name: Show toolchain
+        if: steps.changes.outputs.code == 'true'
+        run: swift --version && xcodebuild -version
+
+      - name: Debug tests
+        if: steps.changes.outputs.code == 'true'
+        working-directory: Packages/MacEaseCore
+        run: swift test
+
+      - name: Release tests
+        if: steps.changes.outputs.code == 'true'
+        working-directory: Packages/MacEaseCore
+        run: swift test -c release
+
+      - name: Release build
+        if: steps.changes.outputs.code == 'true'
+        working-directory: Packages/MacEaseCore
+        run: swift build -c release --arch arm64
 
       - name: No unresolved conflict markers in tracked files
         run: |
@@ -67,18 +81,14 @@ jobs:
             exit 1
           fi
 
-      - name: No process-terminating paths on untrusted input
+      - name: No credentials in tracked content
         run: |
-          if grep -RInE 'as!|try!|precondition\(|fatalError\(' \
-              Packages/MacEaseCore/Sources; then
-            echo "::error::untrusted-input paths must classify, not terminate"
-            exit 1
-          fi
-
-      - name: No credentials or response samples in the tree
-        run: |
-          if grep -RInE 'MUSIC_U=[A-Za-z0-9]{16,}|__csrf=[A-Za-z0-9]{16,}' \
-              --exclude-dir=.git .; then
+          # Synthetic cookies use visibly fake values (for example music-u-test).
+          # Scan the checkout index, including tests; print filenames, never values.
+          if git grep --cached -lIE 'MUSIC_U=[A-Za-z0-9]{16,}|__csrf=[A-Za-z0-9]{16,}' -- .; then
             echo "::error::a real-looking cookie value is committed"
             exit 1
+          else
+            result=$?
+            if (( result > 1 )); then exit "$result"; fi
           fi

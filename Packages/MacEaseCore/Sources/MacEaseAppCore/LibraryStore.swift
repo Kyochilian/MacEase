@@ -112,8 +112,8 @@ package actor LibraryStore {
         try run(
           """
           INSERT INTO playlist
-            (account_id, playlist_id, name, track_count, owned, position)
-          VALUES (?, ?, ?, ?, ?, ?)
+            (account_id, playlist_id, name, track_count, owned, position, metadata)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
           """,
           bind: { statement in
             try bind(int: accountID, at: 1, to: statement)
@@ -122,6 +122,7 @@ package actor LibraryStore {
             try bind(int: Int64(playlist.trackCount), at: 4, to: statement)
             try bind(int: playlist.owned ? 1 : 0, at: 5, to: statement)
             try bind(int: Int64(position), at: 6, to: statement)
+            try bind(blob: JSONEncoder().encode(playlist), at: 7, to: statement)
           }
         )
       }
@@ -132,11 +133,19 @@ package actor LibraryStore {
     var result: [UserPlaylist] = []
     try query(
       """
-      SELECT playlist_id, name, track_count, owned FROM playlist
+      SELECT playlist_id, name, track_count, owned, metadata FROM playlist
       WHERE account_id = ? ORDER BY position ASC
       """,
       bind: { try bind(int: accountID, at: 1, to: $0) },
       row: { statement in
+        if let data = Self.data(statement, column: 4) {
+          let playlist = try JSONDecoder().decode(UserPlaylist.self, from: data)
+          guard playlist.id == sqlite3_column_int64(statement, 0), playlist.id > 0,
+            playlist.trackCount >= 0
+          else { throw LibraryStoreError.corruptRow }
+          result.append(playlist)
+          return
+        }
         guard let name = Self.text(statement, column: 1) else {
           throw LibraryStoreError.corruptRow
         }
@@ -235,15 +244,16 @@ package actor LibraryStore {
       """
       INSERT INTO download (
         account_id, song_id, requested_quality, actual_quality, format,
-        byte_count, relative_path, track, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        byte_count, relative_path, track, created_at, verified_complete
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(account_id, song_id, requested_quality) DO UPDATE SET
         actual_quality = excluded.actual_quality,
         format = excluded.format,
         byte_count = excluded.byte_count,
         relative_path = excluded.relative_path,
         track = excluded.track,
-        created_at = excluded.created_at
+        created_at = excluded.created_at,
+        verified_complete = excluded.verified_complete
       """,
       bind: { statement in
         try bind(int: download.accountID, at: 1, to: statement)
@@ -259,6 +269,7 @@ package actor LibraryStore {
           at: 9,
           to: statement
         )
+        try bind(int: download.isVerifiedComplete ? 1 : 0, at: 10, to: statement)
       }
     )
   }
@@ -269,7 +280,7 @@ package actor LibraryStore {
     try query(
       """
       SELECT rowid, song_id, requested_quality, actual_quality, format,
-             byte_count, relative_path, track, created_at
+             byte_count, relative_path, track, created_at, verified_complete
       FROM download WHERE account_id = ? ORDER BY created_at DESC
       """,
       bind: { try bind(int: accountID, at: 1, to: $0) },
@@ -304,7 +315,8 @@ package actor LibraryStore {
               timeIntervalSince1970: TimeInterval(
                 sqlite3_column_int64(statement, 8)
               )
-            )
+            ),
+            isVerifiedComplete: sqlite3_column_int64(statement, 9) == 1
           )
         )
       }
@@ -387,6 +399,185 @@ package actor LibraryStore {
       """,
       on: handle
     )
+    try ensureColumn(
+      "verified_complete", definition: "INTEGER NOT NULL DEFAULT 0", table: "download", on: handle)
+    try ensureColumn("metadata", definition: "BLOB", table: "playlist", on: handle)
+    try execute(
+      "CREATE TABLE IF NOT EXISTS lyric (account_id INTEGER NOT NULL, song_id INTEGER NOT NULL, "
+        + "payload BLOB, offset_ms INTEGER NOT NULL DEFAULT 0, version INTEGER NOT NULL DEFAULT 1, "
+        + "PRIMARY KEY(account_id, song_id))", on: handle
+    )
+    try execute(
+      "CREATE TABLE IF NOT EXISTS listening_history (account_id INTEGER NOT NULL, event_id TEXT NOT NULL, played_at INTEGER NOT NULL, payload BLOB NOT NULL, PRIMARY KEY(account_id, event_id))",
+      on: handle)
+    try execute(
+      "CREATE TABLE IF NOT EXISTS search_history (account_id INTEGER NOT NULL, query TEXT NOT NULL, used_at INTEGER NOT NULL, PRIMARY KEY(account_id, query))",
+      on: handle)
+  }
+
+  private static func ensureColumn(
+    _ column: String, definition: String, table: String, on handle: OpaquePointer
+  ) throws {
+    var exists = false
+    var statement: OpaquePointer?
+    guard
+      sqlite3_prepare_v2(handle, "PRAGMA table_info(\(table))", -1, &statement, nil) == SQLITE_OK
+    else { throw LibraryStoreError.sqlite(sqlite3_errcode(handle)) }
+    while sqlite3_step(statement) == SQLITE_ROW {
+      if let name = sqlite3_column_text(statement, 1), String(cString: name) == column {
+        exists = true
+      }
+    }
+    sqlite3_finalize(statement)
+    if !exists {
+      try execute("ALTER TABLE \(table) ADD COLUMN \(column) \(definition)", on: handle)
+    }
+  }
+
+  package func saveLyrics(_ lyrics: Lyrics, accountID: Int64, songID: Int64) throws {
+    let payload = try JSONEncoder().encode(lyrics)
+    guard payload.count <= LyricsParser.maximumResponseBytes else {
+      throw LibraryStoreError.corruptRow
+    }
+    try run(
+      "INSERT INTO lyric(account_id, song_id, payload) VALUES (?, ?, ?) "
+        + "ON CONFLICT(account_id, song_id) DO UPDATE SET payload = excluded.payload, version = 1",
+      bind: {
+        try bind(int: accountID, at: 1, to: $0)
+        try bind(int: songID, at: 2, to: $0)
+        try bind(blob: payload, at: 3, to: $0)
+      }
+    )
+  }
+
+  package func savedLyrics(accountID: Int64, songID: Int64) throws -> (
+    document: Lyrics?, offset: Double
+  ) {
+    var result: (document: Lyrics?, offset: Double) = (nil, 0)
+    try query(
+      "SELECT payload, offset_ms, version FROM lyric WHERE account_id = ? AND song_id = ?",
+      bind: {
+        try bind(int: accountID, at: 1, to: $0)
+        try bind(int: songID, at: 2, to: $0)
+      },
+      row: { statement in
+        let offset = sqlite3_column_int64(statement, 1)
+        guard (-30_000...30_000).contains(offset), sqlite3_column_int64(statement, 2) == 1 else {
+          throw LibraryStoreError.corruptRow
+        }
+        result.offset = Double(offset) / 1000
+        if let data = Self.data(statement, column: 0) {
+          guard data.count <= LyricsParser.maximumResponseBytes else {
+            throw LibraryStoreError.corruptRow
+          }
+          let document = try JSONDecoder().decode(Lyrics.self, from: data)
+          let lines = document.lines
+          guard lines.count <= 10_000,
+            zip(lines, lines.dropFirst()).allSatisfy({ $0.timeSeconds <= $1.timeSeconds }),
+            lines.allSatisfy({ line in
+              line.timeSeconds.isFinite && line.timeSeconds >= 0 && line.words.count <= 100_000
+                && line.words.allSatisfy {
+                  $0.startSeconds.isFinite && $0.startSeconds >= line.timeSeconds
+                    && $0.durationSeconds.isFinite && $0.durationSeconds >= 0
+                }
+                && zip(line.words, line.words.dropFirst()).allSatisfy {
+                  $0.endSeconds <= $1.startSeconds
+                }
+            })
+          else { throw LibraryStoreError.corruptRow }
+          result.document = document
+        }
+      }
+    )
+    return result
+  }
+
+  package func saveLyricOffset(_ offset: Double, accountID: Int64, songID: Int64) throws {
+    guard offset.isFinite, (-30...30).contains(offset) else { throw LibraryStoreError.corruptRow }
+    try run(
+      "INSERT INTO lyric(account_id, song_id, offset_ms) VALUES (?, ?, ?) "
+        + "ON CONFLICT(account_id, song_id) DO UPDATE SET offset_ms = excluded.offset_ms",
+      bind: {
+        try bind(int: accountID, at: 1, to: $0)
+        try bind(int: songID, at: 2, to: $0)
+        try bind(int: Int64((offset * 1000).rounded()), at: 3, to: $0)
+      }
+    )
+  }
+
+  package func saveListeningHistory(_ entry: ListeningHistoryEntry, accountID: Int64) throws {
+    let data = try JSONEncoder().encode(entry)
+    try transaction {
+      try run(
+        "INSERT OR IGNORE INTO listening_history(account_id, event_id, played_at, payload) VALUES (?, ?, ?, ?)",
+        bind: {
+          try bind(int: accountID, at: 1, to: $0)
+          try bind(text: entry.id.uuidString, at: 2, to: $0)
+          try bind(int: Int64(entry.playedAt.timeIntervalSince1970 * 1000), at: 3, to: $0)
+          try bind(blob: data, at: 4, to: $0)
+        })
+      try run(
+        "DELETE FROM listening_history WHERE account_id = ? AND rowid NOT IN (SELECT rowid FROM listening_history WHERE account_id = ? ORDER BY played_at DESC, rowid DESC LIMIT 1000)",
+        bind: {
+          try bind(int: accountID, at: 1, to: $0)
+          try bind(int: accountID, at: 2, to: $0)
+        })
+    }
+  }
+
+  package func listeningHistory(accountID: Int64) throws -> [ListeningHistoryEntry] {
+    var entries: [ListeningHistoryEntry] = []
+    try query(
+      "SELECT payload FROM listening_history WHERE account_id = ? ORDER BY played_at DESC, rowid DESC LIMIT 1000",
+      bind: {
+        try bind(int: accountID, at: 1, to: $0)
+      },
+      row: {
+        guard let data = Self.data($0, column: 0), data.count <= 1_000_000 else {
+          throw LibraryStoreError.corruptRow
+        }
+        let entry = try JSONDecoder().decode(ListeningHistoryEntry.self, from: data)
+        guard entry.track.id > 0, entry.playedAt.timeIntervalSince1970.isFinite else {
+          throw LibraryStoreError.corruptRow
+        }
+        entries.append(entry)
+      })
+    return entries
+  }
+
+  package func saveSearch(_ query: String, accountID: Int64) throws {
+    guard !query.isEmpty, query.count <= 1000 else { return }
+    try transaction {
+      try run(
+        "INSERT INTO search_history(account_id, query, used_at) VALUES (?, ?, ?) ON CONFLICT(account_id, query) DO UPDATE SET used_at = excluded.used_at",
+        bind: {
+          try bind(int: accountID, at: 1, to: $0)
+          try bind(text: query, at: 2, to: $0)
+          try bind(int: Int64(Date().timeIntervalSince1970 * 1_000_000), at: 3, to: $0)
+        })
+      try run(
+        "DELETE FROM search_history WHERE account_id = ? AND rowid NOT IN (SELECT rowid FROM search_history WHERE account_id = ? ORDER BY used_at DESC LIMIT 50)",
+        bind: {
+          try bind(int: accountID, at: 1, to: $0)
+          try bind(int: accountID, at: 2, to: $0)
+        })
+    }
+  }
+
+  package func searchHistory(accountID: Int64) throws -> [String] {
+    var queries: [String] = []
+    try query(
+      "SELECT query FROM search_history WHERE account_id = ? ORDER BY used_at DESC LIMIT 50",
+      bind: {
+        try bind(int: accountID, at: 1, to: $0)
+      }, row: { if let query = Self.text($0, column: 0) { queries.append(query) } })
+    return queries
+  }
+
+  package func clearSearchHistory(accountID: Int64) throws {
+    try run(
+      "DELETE FROM search_history WHERE account_id = ?",
+      bind: { try bind(int: accountID, at: 1, to: $0) })
   }
 
   // MARK: - SQLite plumbing

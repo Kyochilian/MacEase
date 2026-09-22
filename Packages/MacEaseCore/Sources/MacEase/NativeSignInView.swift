@@ -51,7 +51,7 @@ struct NativeSignInView: View {
           .foregroundStyle(.secondary)
           .multilineTextAlignment(.center)
           .frame(height: 32)
-        Button("Get a Code · 1 request", systemImage: "qrcode") {
+        Button("Get a Code", systemImage: "qrcode") {
           mutate(session.startQRLogin)
         }
       }
@@ -78,20 +78,19 @@ struct NativeSignInView: View {
           .frame(width: 64)
         TextField("Phone number", text: $session.phoneNumber)
       }
-      Button("Send Code · 1 request", systemImage: "message") {
+      Button("Send Code", systemImage: "message") {
         mutate(session.sendVerificationCode)
       }
       .disabled(session.phoneNumber.isEmpty)
 
       SecureField("Code from the text", text: $session.verificationCode)
-      Button("Sign In · up to 2 requests", systemImage: "person.crop.circle.badge.checkmark") {
+      Button("Sign In", systemImage: "person.crop.circle.badge.checkmark") {
         mutate(session.signInWithVerificationCode)
       }
       .disabled(!session.codeWasSent || session.verificationCode.isEmpty)
 
       Text(
-        "MacEase never asks for your NetEase password. Signing in takes one "
-          + "request for the code exchange and one to confirm which account it is."
+        "Enter the code sent to your phone to sign in."
       )
       .font(.caption)
       .foregroundStyle(.secondary)

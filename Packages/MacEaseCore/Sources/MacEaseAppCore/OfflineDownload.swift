@@ -27,6 +27,7 @@ package struct OfflineDownload: Equatable, Sendable, Identifiable {
   package let byteCount: Int64
   package let relativePath: String
   package let createdAt: Date
+  package let isVerifiedComplete: Bool
 
   package init(
     accountID: Int64,
@@ -36,7 +37,8 @@ package struct OfflineDownload: Equatable, Sendable, Identifiable {
     format: String,
     byteCount: Int64,
     relativePath: String,
-    createdAt: Date
+    createdAt: Date,
+    isVerifiedComplete: Bool = true
   ) {
     id = OfflineDownloadID(
       accountID: accountID,
@@ -49,6 +51,7 @@ package struct OfflineDownload: Equatable, Sendable, Identifiable {
     self.byteCount = byteCount
     self.relativePath = relativePath
     self.createdAt = createdAt
+    self.isVerifiedComplete = isVerifiedComplete
   }
 
   package var requestedQuality: PlaybackQuality { id.requestedQuality }

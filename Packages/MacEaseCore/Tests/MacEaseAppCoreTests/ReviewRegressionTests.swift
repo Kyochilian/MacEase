@@ -145,10 +145,12 @@ private struct Rig {
   await transport.setSongURL(.success(makeResolvedAsset(songID: 202)))
   await transport.gate.close()
 
-  playback.play(tracks: makeTracks([101]), startIndex: 0, context: .dailyRecommendations, session: session)
+  playback.play(
+    tracks: makeTracks([101]), startIndex: 0, context: .dailyRecommendations, session: session)
   while await transport.gate.arrivalCount() == 0 { await Task.yield() }
 
-  playback.play(tracks: makeTracks([202]), startIndex: 0, context: .dailyRecommendations, session: session)
+  playback.play(
+    tracks: makeTracks([202]), startIndex: 0, context: .dailyRecommendations, session: session)
   #expect(playback.phase == .resolving)
 
   await transport.gate.open()
@@ -191,15 +193,16 @@ private struct Rig {
   let feedback = try #require(
     arbiter.begin(name: "Scrobble finish", effect: .feedback)
   )
-  #expect(!playback.playNext(session: session))
+  await transport.setSongURL(.success(makeResolvedAsset(songID: 202)))
+  #expect(playback.playNext(session: session))
   #expect(playback.phase == .resolving)
-  #expect(playback.currentTrack?.id == 101)
+  #expect(playback.currentTrack?.id == 202)
 
   await transport.gate.open()
   await playback.settleForTesting()
 
   #expect(playback.phase == .playing)
-  #expect(playback.currentTrack?.id == 101)
+  #expect(playback.currentTrack?.id == 202)
   #expect(arbiter.end(feedback, outcome: .applied) == .applied)
 }
 

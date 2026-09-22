@@ -62,6 +62,25 @@ private func stored(
   #expect(rig.arbiter.isBusy == false)
 }
 
+@Test @MainActor func legacyQueueDoesNotInventPerTrackProvenance() throws {
+  let data = try JSONEncoder().encode(stored())
+  var row = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+  row.removeValue(forKey: "trackContexts")
+  let legacy = try JSONDecoder().decode(
+    PersistedQueue.self, from: JSONSerialization.data(withJSONObject: row))
+  let rig = RestoreRig()
+  rig.playback.restore(legacy)
+  #expect(rig.playback.queueContext == .playlist(id: 7, name: "Evening"))
+  #expect(rig.playback.currentTrackContext == .unknown)
+  #expect(rig.playback.persistedQueue()?.trackContexts == [.unknown, .unknown, .unknown])
+
+  row["trackContexts"] = []
+  let corrupt = try JSONSerialization.data(withJSONObject: row)
+  #expect(throws: DecodingError.self) {
+    try JSONDecoder().decode(PersistedQueue.self, from: corrupt)
+  }
+}
+
 @Test @MainActor func restoringRebuildsTheQueueItWasGiven() async {
   let rig = RestoreRig()
 

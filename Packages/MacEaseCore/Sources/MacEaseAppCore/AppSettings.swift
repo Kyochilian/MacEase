@@ -7,13 +7,7 @@ package enum ThemePreference: String, CaseIterable, Sendable {
   case light
   case dark
 
-  package var label: String {
-    switch self {
-    case .system: "System"
-    case .light: "Light"
-    case .dark: "Dark"
-    }
-  }
+  package var label: String { rawValue.capitalized }
 }
 
 /// App-wide preferences.

@@ -6,6 +6,7 @@ import Foundation
 /// capability; exact paths, encryption and fields live beside the endpoint
 /// implementation and its contract tests.
 package protocol NeteaseTransporting: Sendable {
+  func resetSessionContext() async
   func accountStatus(
     credential: NeteaseCredential
   ) async throws -> AccountSessionState
@@ -69,7 +70,13 @@ package protocol NeteaseTransporting: Sendable {
     name: String,
     isPrivate: Bool,
     credential: NeteaseCredential
-  ) async throws
+  ) async throws -> UserPlaylist
+
+  func updatePlaylistMetadata(
+    playlistID: Int64, edit: PlaylistMetadataEdit, credential: NeteaseCredential) async throws
+  func reorderPlaylists(ids: [Int64], credential: NeteaseCredential) async throws
+  func reorderPlaylistTracks(playlistID: Int64, ids: [Int64], credential: NeteaseCredential)
+    async throws
 
   func deletePlaylist(playlistID: Int64, credential: NeteaseCredential) async throws
 
@@ -93,6 +100,12 @@ package protocol NeteaseTransporting: Sendable {
   ) async throws
 
   func resolveSongURL(
+    songID: Int64,
+    quality: PlaybackQuality,
+    credential: NeteaseCredential
+  ) async throws -> SongURLResolution
+
+  func resolveDownloadURL(
     songID: Int64,
     quality: PlaybackQuality,
     credential: NeteaseCredential
@@ -164,6 +177,21 @@ package protocol NeteaseTransporting: Sendable {
   ) async throws -> CloudPage
 
   func deleteCloudSong(songID: Int64, credential: NeteaseCredential) async throws
+  func cloudSongDetail(songID: Int64, credential: NeteaseCredential) async throws -> CloudSong
+  func cloudLyrics(userID: Int64, songID: Int64, credential: NeteaseCredential) async throws
+    -> Lyrics
+  func matchCloudSong(
+    songID: Int64, matchedSongID: Int64, userID: Int64, credential: NeteaseCredential) async throws
+  func resolveCloudURL(songID: Int64, quality: PlaybackQuality, credential: NeteaseCredential)
+    async throws -> SongURLResolution
+  func uploadCloudFile(
+    at fileURL: URL, credential: NeteaseCredential,
+    progress: @escaping @Sendable (CloudUploadProgress) async -> Void
+  ) async throws -> Int64
+  func importCloudFile(at fileURL: URL, matchedSongID: Int64?, credential: NeteaseCredential)
+    async throws
+  func updatePlaylistCover(playlistID: Int64, fileURL: URL, credential: NeteaseCredential)
+    async throws
 
   /// Publishes a private playlist. There is no verified reverse, so there is
   /// no member for one.
@@ -264,6 +292,16 @@ package protocol NeteaseTransporting: Sendable {
   func topArtists(
     credential: NeteaseCredential
   ) async throws -> CatalogPage<Artist>
+  func artistSongs(artistID: Int64, limit: Int, offset: Int, credential: NeteaseCredential)
+    async throws -> CatalogPage<Track>
+  func artistBiography(artistID: Int64, credential: NeteaseCredential) async throws -> String
+  func playlistTags(kind: PlaylistTagKind, credential: NeteaseCredential) async throws
+    -> [PlaylistTag]
+  func hotSearches(credential: NeteaseCredential) async throws -> [HotSearch]
+  func recommendationHistoryDates(credential: NeteaseCredential) async throws -> [String]
+  func recommendationHistory(date: String, credential: NeteaseCredential) async throws -> [Track]
+  func recentMusic(kind: RecentMusicKind, credential: NeteaseCredential) async throws
+    -> [RecentMusicEntry]
 }
 
 extension NeteaseSession: NeteaseTransporting {}

@@ -55,6 +55,16 @@ package struct PlaybackQueue: Equatable, Sendable {
     }
   }
 
+  package init?(count: Int, startIndex: Int, mode: PlaybackMode, shuffleOrder: [Int]) {
+    guard count > 0, (0..<count).contains(startIndex),
+      mode != .shuffle || (shuffleOrder.count == count && Set(shuffleOrder) == Set(0..<count))
+    else { return nil }
+    self.count = count
+    self.currentIndex = startIndex
+    self.mode = mode
+    self.shuffleOrder = mode == .shuffle ? shuffleOrder : []
+  }
+
   /// Commits a transition; the caller resolves the entry it names.
   package mutating func moveTo(_ index: Int) -> Bool {
     guard (0..<count).contains(index) else { return false }
@@ -89,11 +99,12 @@ package struct PlaybackQueue: Equatable, Sendable {
   package mutating func remove(at index: Int) -> Bool {
     guard count > 1, (0..<count).contains(index) else { return false }
 
-    let replacement: Int? = if index == currentIndex {
-      nextIndex().flatMap { $0 == index ? nil : $0 }
-    } else {
-      nil
-    }
+    let replacement: Int? =
+      if index == currentIndex {
+        nextIndex().flatMap { $0 == index ? nil : $0 }
+      } else {
+        nil
+      }
 
     count -= 1
     if mode == .shuffle {
@@ -165,7 +176,8 @@ package struct PlaybackQueue: Equatable, Sendable {
     currentIndex = remapped(oldCurrentIndex)
     guard mode == .shuffle else { return destinationIndex }
 
-    var order = shuffleOrder
+    var order =
+      shuffleOrder
       .filter { $0 != sourceIndex }
       .map(remapped)
     guard let currentSlot = order.firstIndex(of: currentIndex) else {

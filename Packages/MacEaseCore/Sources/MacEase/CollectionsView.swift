@@ -1,28 +1,32 @@
+import AppKit
 import MacEaseAppCore
 import MacEaseSession
 import NeteaseKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// Collected albums, followed artists and the cloud drive.
 ///
-/// Each section loads and pages on an explicit action, and every button says
-/// how many requests it costs, matching the rest of the app.
 struct CollectionsView: View {
-  private enum Section: Hashable {
-    case albums
-    case artists
-    case cloud
-  }
+  typealias Section = CollectionsCoordinator.Section
 
   let session: LoginCoordinator
   let collections: CollectionsCoordinator
   let playback: PlaybackController
   let arbiter: OperationArbiter
   let artwork: ArtworkLoader
-  @State private var section: Section = .albums
+  let openAlbum: (Int64) -> Void
+  let openArtist: (Int64) -> Void
+  let downloads: DownloadCoordinator?
+  @Binding var section: Section
+  @State private var pendingCloudDeletion: CloudSong?
+  @State private var cloudDetailIsPresented = false
+  @State private var matchText = ""
 
-  private var requestInFlight: Bool { collections.isLoading || arbiter.isBusy }
-  private var loadDisabled: Bool { session.account == nil || requestInFlight }
+  private var requestInFlight: Bool { collections.isLoading || !arbiter.canBegin(effect: .write) }
+  private var loadDisabled: Bool {
+    !session.isOnline || collections.writingSection == section || collections.isLoading(section)
+  }
 
   var body: some View {
     VStack(spacing: 0) {
@@ -35,6 +39,14 @@ struct CollectionsView: View {
         .pickerStyle(.segmented)
         .fixedSize()
         Spacer()
+        if section == .cloud {
+          Button("Upload…", systemImage: "icloud.and.arrow.up") {
+            chooseCloudFile(importOnly: false)
+          }
+          .disabled(loadDisabled)
+          Button("Import Existing File…") { chooseCloudFile(importOnly: true) }
+            .disabled(loadDisabled)
+        }
         if section == .cloud, let capacity = collections.cloudCapacity {
           Text(
             ByteFormat.short(capacity.usedBytes) + " of "
@@ -43,7 +55,7 @@ struct CollectionsView: View {
           .font(.caption.monospacedDigit())
           .foregroundStyle(.secondary)
         }
-        Button("Load · 1 request", systemImage: "arrow.clockwise") {
+        Button("Load", systemImage: "arrow.clockwise") {
           load(reset: true)
         }
         .disabled(loadDisabled)
@@ -57,6 +69,14 @@ struct CollectionsView: View {
       Divider()
 
       HStack {
+        if let progress = collections.uploadProgress {
+          switch progress {
+          case .preparing: Text("Preparing file…")
+          case .transferring(let value): ProgressView(value: value).frame(width: 100)
+          case .publishing: Text("Publishing…")
+          }
+          Button("Cancel Upload") { collections.cancelCloudUpload() }
+        }
         if collections.isLoading {
           ProgressView().controlSize(.small)
         }
@@ -64,7 +84,7 @@ struct CollectionsView: View {
           .foregroundStyle(.secondary)
         Spacer()
         if hasMore {
-          Button("Load More · 1 request", systemImage: "plus") {
+          Button("Load More", systemImage: "plus") {
             load(reset: false)
           }
           .disabled(loadDisabled)
@@ -72,6 +92,82 @@ struct CollectionsView: View {
       }
       .padding(12)
     }
+    .task(id: "\(session.account?.userID ?? 0)-\(session.isOnline)-\(section)") {
+      if session.isOnline { collections.loadIfNeeded(section, session: session) }
+    }
+    .confirmationDialog(
+      "Delete this file from your cloud drive?",
+      isPresented: Binding(
+        get: { pendingCloudDeletion != nil }, set: { if !$0 { pendingCloudDeletion = nil } }
+      )
+    ) {
+      Button("Delete", role: .destructive) {
+        if let song = pendingCloudDeletion { collections.deleteCloudSong(song, session: session) }
+        pendingCloudDeletion = nil
+      }
+      Button("Cancel", role: .cancel) { pendingCloudDeletion = nil }
+    }
+    .sheet(isPresented: $cloudDetailIsPresented) { cloudDetails }
+    .onChange(of: collections.selectedCloudSong?.id) {
+      cloudDetailIsPresented = collections.selectedCloudSong != nil
+      matchText = collections.selectedCloudSong?.track.catalogSongID.map(String.init) ?? ""
+    }
+    .onChange(of: session.account?.userID) {
+      cloudDetailIsPresented = false
+      matchText = ""
+      pendingCloudDeletion = nil
+    }
+  }
+
+  @ViewBuilder private var cloudDetails: some View {
+    if let song = collections.selectedCloudSong {
+      Form {
+        Text(song.track.name).font(.headline)
+        LabeledContent("File", value: song.fileName)
+        LabeledContent("Size", value: ByteFormat.short(song.fileSize))
+        LabeledContent("Artist", value: song.track.artistDisplayName ?? "Unknown")
+        LabeledContent(
+          "Matched song", value: song.track.catalogSongID.map(String.init) ?? "Unmatched")
+        TextField("Match to a song link or ID", text: $matchText)
+        HStack {
+          Button("Update Match") {
+            if let id = matchingSongID {
+              collections.matchCloudSong(song, to: id, session: session)
+            }
+          }.disabled(loadDisabled || matchingSongID == nil)
+          Button("Remove Match") { collections.matchCloudSong(song, to: 0, session: session) }
+            .disabled(loadDisabled)
+          Button("Done") { cloudDetailIsPresented = false }
+        }
+        Text(collections.status).font(.caption).foregroundStyle(.secondary)
+      }
+      .padding().frame(width: 480)
+    }
+  }
+
+  private func chooseCloudFile(importOnly: Bool) {
+    let panel = NSOpenPanel()
+    panel.allowedContentTypes = [.audio]
+    panel.allowsMultipleSelection = false
+    panel.canChooseDirectories = false
+    panel.begin { response in
+      guard response == .OK, let url = panel.url else { return }
+      Task { @MainActor in
+        let access = url.startAccessingSecurityScopedResource()
+        defer { if access { url.stopAccessingSecurityScopedResource() } }
+        await collections.uploadCloudFile(at: url, importOnly: importOnly, session: session)
+      }
+    }
+  }
+
+  private var matchingSongID: Int64? {
+    let text = matchText.trimmingCharacters(in: .whitespacesAndNewlines)
+    if let id = Int64(text), id > 0 { return id }
+    if let url = URL(string: text), let link = NeteaseMusicLink(url: url), case .song(let id) = link
+    {
+      return id
+    }
+    return nil
   }
 
   private var hasMore: Bool {
@@ -97,7 +193,8 @@ struct CollectionsView: View {
         HStack(spacing: 8) {
           Artwork(url: album.artworkURL, size: 40, symbol: "opticaldisc", loader: artwork)
           VStack(alignment: .leading, spacing: 3) {
-            Text(album.name)
+            Button(album.name) { openAlbum(album.id) }
+              .buttonStyle(.plain)
             Text(
               (album.artistDisplayName.map { $0 + " · " } ?? "")
                 + "\(album.trackCount) tracks"
@@ -113,7 +210,7 @@ struct CollectionsView: View {
           }
           .buttonStyle(.borderless)
           .disabled(loadDisabled)
-          .help("Remove from your collected albums · 1 request")
+          .help("Remove from your collected albums")
           .accessibilityLabel("Remove \(album.name)")
         }
       }
@@ -127,7 +224,8 @@ struct CollectionsView: View {
             loader: artwork
           )
           VStack(alignment: .leading, spacing: 3) {
-            Text(artist.name)
+            Button(artist.name) { openArtist(artist.id) }
+              .buttonStyle(.plain)
             Text("\(artist.albumCount) albums · \(artist.songCount) songs")
               .font(.caption)
               .foregroundStyle(.secondary)
@@ -140,7 +238,7 @@ struct CollectionsView: View {
           }
           .buttonStyle(.borderless)
           .disabled(loadDisabled)
-          .help("Unfollow · 1 request")
+          .help("Unfollow")
           .accessibilityLabel("Unfollow \(artist.name)")
         }
       }
@@ -152,14 +250,21 @@ struct CollectionsView: View {
           Text(ByteFormat.short(song.fileSize))
             .font(.caption.monospacedDigit())
             .foregroundStyle(.tertiary)
+          Button("Details") {
+            if collections.selectedCloudSong?.id == song.id { cloudDetailIsPresented = true }
+            collections.openCloudSong(song, session: session)
+          }.disabled(loadDisabled)
+          DownloadTrackButton(
+            track: song.track, quality: playback.quality, downloads: downloads, session: session,
+            disabled: requestInFlight)
           Button {
-            collections.deleteCloudSong(song, session: session)
+            pendingCloudDeletion = song
           } label: {
             Image(systemName: "trash")
           }
           .buttonStyle(.borderless)
           .disabled(loadDisabled)
-          .help("Delete from the cloud drive · 1 request")
+          .help("Delete from the cloud drive")
           .accessibilityLabel("Delete \(song.track.name)")
           PlayTrackButton(
             track: song.track,

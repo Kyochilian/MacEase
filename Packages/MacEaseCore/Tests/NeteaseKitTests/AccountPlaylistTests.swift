@@ -15,7 +15,7 @@ private let accountCredential = testCredential(musicU: "music-u-test", csrf: "cs
     secretKey: "0123456789abcdef"
   )
 
-  #expect(request.url?.absoluteString == "https://music.163.com/weapi/w/nuser/account/get")
+  #expect(request.url?.absoluteString == "https://music.163.com/weapi/nuser/account/get")
   #expect(request.httpMethod == "POST")
   #expect(request.httpShouldHandleCookies == false)
   #expect(request.value(forHTTPHeaderField: "Referer") == "https://music.163.com/")
@@ -136,13 +136,12 @@ private let accountCredential = testCredential(musicU: "music-u-test", csrf: "cs
     headerFields: nil
   )!
   let page = try NeteaseSession.classifyUserPlaylists(
-    data: Data((
-      #"{"code":200,"more":true,"playlist":["#
+    data: Data(
+      (#"{"code":200,"more":true,"playlist":["#
         + #"{"id":1,"name":"Private","trackCount":12,"privacy":10,"creator":{"userId":987654321}},"#
         + #"{"id":2,"name":"Public","trackCount":4,"privacy":0,"creator":{"userId":987654321}},"#
         + #"{"id":3,"name":"Missing","trackCount":2,"creator":{"userId":987654321}},"#
-        + #"{"id":4,"name":"Unknown","trackCount":1,"privacy":7,"creator":{"userId":123}}]}"#
-      ).utf8),
+        + #"{"id":4,"name":"Unknown","trackCount":1,"privacy":7,"creator":{"userId":123}}]}"#).utf8),
     response: response,
     userID: 987_654_321
   )
@@ -155,28 +154,32 @@ private let accountCredential = testCredential(musicU: "music-u-test", csrf: "cs
         name: "Private",
         trackCount: 12,
         owned: true,
-        isPrivate: true
+        isPrivate: true,
+        specialType: nil
       ),
       UserPlaylist(
         id: 2,
         name: "Public",
         trackCount: 4,
         owned: true,
-        isPrivate: false
+        isPrivate: false,
+        specialType: nil
       ),
       UserPlaylist(
         id: 3,
         name: "Missing",
         trackCount: 2,
         owned: true,
-        isPrivate: nil
+        isPrivate: nil,
+        specialType: nil
       ),
       UserPlaylist(
         id: 4,
         name: "Unknown",
         trackCount: 1,
         owned: false,
-        isPrivate: nil
+        isPrivate: nil,
+        specialType: nil
       ),
     ]
   )
@@ -252,21 +255,18 @@ private let accountCredential = testCredential(musicU: "music-u-test", csrf: "cs
     headerFields: nil
   )!
   let detail = try NeteaseSession.classifyPlaylistDetail(
-    data: Data((
-      #"{"code":200,"playlist":{"id":24381616,"name":"Mix","trackIds":[{"id":3},{"id":1},{"id":2}],"tracks":[{"id":3}]}}"#
-      ).utf8),
+    data: Data(
+      (#"{"code":200,"playlist":{"id":24381616,"name":"Mix","trackIds":[{"id":3},{"id":1},{"id":2}],"tracks":[{"id":3,"name":"Third"}]}}"#)
+        .utf8),
     response: response,
     playlistID: 24_381_616
   )
 
-  #expect(
-    detail
-      == PlaylistDetail(
-        id: 24_381_616,
-        name: "Mix",
-        trackIDs: [3, 1, 2]
-      )
-  )
+  #expect(detail.id == 24_381_616)
+  #expect(detail.name == "Mix")
+  #expect(detail.trackIDs == [3, 1, 2])
+  #expect(detail.metadata?.trackCount == 3)
+  #expect(detail.metadata?.specialType == nil)
 }
 
 @Test func songDetailsRequestUsesOneExplicitBoundedBatch() throws {
@@ -333,13 +333,12 @@ private let accountCredential = testCredential(musicU: "music-u-test", csrf: "cs
     headerFields: nil
   )!
   let tracks = try NeteaseSession.classifySongDetails(
-    data: Data((
-      #"{"code":200,"songs":["#
+    data: Data(
+      (#"{"code":200,"songs":["#
         + #"{"id":1,"name":"First","ar":[]},"#
         + #"{"id":3,"name":"Third","dt":215000,"ar":[{"id":11,"name":"A"},{"id":12,"name":"B"}],"#
         + #""al":{"id":80,"name":"Album","picUrl":"https://p1.music.126.net/cover.jpg"}},"#
-        + #"{"id":99,"name":"Extra","ar":[]}]}"#
-      ).utf8),
+        + #"{"id":99,"name":"Extra","ar":[]}]}"#).utf8),
     response: response,
     songIDs: [3, 1, 3]
   )
@@ -371,19 +370,19 @@ private let accountCredential = testCredential(musicU: "music-u-test", csrf: "cs
     headerFields: nil
   )!
   let tracks = try NeteaseSession.classifySongDetails(
-    data: Data((
-      #"{"code":200,"songs":[{"id":1,"name":"First","#
+    data: Data(
+      (#"{"code":200,"songs":[{"id":1,"name":"First","#
         + #""ar":[{"name":"Nameless"},{"id":0,"name":"Zero"}],"#
-        + #""al":{"id":0,"name":"Single"}}]}"#
-      ).utf8),
+        + #""al":{"id":0,"name":"Single"}}]}"#).utf8),
     response: response,
     songIDs: [1]
   )
 
-  #expect(tracks[0].artists == [
-    ArtistRef(id: nil, name: "Nameless"),
-    ArtistRef(id: nil, name: "Zero"),
-  ])
+  #expect(
+    tracks[0].artists == [
+      ArtistRef(id: nil, name: "Nameless"),
+      ArtistRef(id: nil, name: "Zero"),
+    ])
   #expect(tracks[0].album == AlbumRef(id: nil, name: "Single", artworkURL: nil))
 }
 
@@ -398,12 +397,11 @@ private let accountCredential = testCredential(musicU: "music-u-test", csrf: "cs
     headerFields: nil
   )!
   let tracks = try NeteaseSession.classifySongDetails(
-    data: Data((
-      #"{"code":200,"songs":[{"id":1,"name":"First","ar":[],"#
+    data: Data(
+      (#"{"code":200,"songs":[{"id":1,"name":"First","ar":[],"#
         + #""al":{"id":5,"name":"A","picUrl":"https://evil.example.com/cover.jpg"}},"#
         + #"{"id":2,"name":"Second","ar":[],"#
-        + #""al":{"id":6,"name":"B","picUrl":"http://p2.music.126.net/cover.jpg"}}]}"#
-      ).utf8),
+        + #""al":{"id":6,"name":"B","picUrl":"http://p2.music.126.net/cover.jpg"}}]}"#).utf8),
     response: response,
     songIDs: [1, 2]
   )

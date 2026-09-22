@@ -92,12 +92,14 @@ extension NeteaseSession {
   /// it, and no image is fetched from anyone.
   package func beginQRLogin() async throws -> QRLoginSession {
     let timestamp = Date().timeIntervalSince1970
-    let request = try Self.qrKeyRequest(
-      osVersion: Self.osVersion,
-      buildVersion: String(Int(timestamp)),
-      requestID: Self.requestID(timestamp: timestamp)
-    )
-    let (data, response) = try await urlSession.data(for: request)
+    let (data, response) = try await send(credential: nil) { nmtid in
+      try Self.qrKeyRequest(
+        osVersion: Self.osVersion,
+        buildVersion: String(Int(timestamp)),
+        requestID: Self.requestID(timestamp: timestamp),
+        nmtid: nmtid
+      )
+    }
     let key = try Self.classifyQRKey(
       data: data,
       response: try Self.requireHTTPResponse(response)
@@ -114,13 +116,15 @@ extension NeteaseSession {
   /// when to stop; nothing here schedules itself.
   package func pollQRLogin(key: String) async throws -> QRLoginStatus {
     let timestamp = Date().timeIntervalSince1970
-    let request = try Self.qrCheckRequest(
-      key: key,
-      osVersion: Self.osVersion,
-      buildVersion: String(Int(timestamp)),
-      requestID: Self.requestID(timestamp: timestamp)
-    )
-    let (data, response) = try await urlSession.data(for: request)
+    let (data, response) = try await send(credential: nil) { nmtid in
+      try Self.qrCheckRequest(
+        key: key,
+        osVersion: Self.osVersion,
+        buildVersion: String(Int(timestamp)),
+        requestID: Self.requestID(timestamp: timestamp),
+        nmtid: nmtid
+      )
+    }
     return try Self.classifyQRPoll(
       data: data,
       response: try Self.requireHTTPResponse(response)
@@ -130,14 +134,16 @@ extension NeteaseSession {
   package static func qrKeyRequest(
     osVersion: String,
     buildVersion: String,
-    requestID: String
+    requestID: String,
+    nmtid: String? = nil
   ) throws -> URLRequest {
     try anonymousEAPIRequest(
       path: qrKeyEndpoint,
       body: #""type":3"#,
       osVersion: osVersion,
       buildVersion: buildVersion,
-      requestID: requestID
+      requestID: requestID,
+      nmtid: nmtid
     )
   }
 
@@ -145,7 +151,8 @@ extension NeteaseSession {
     key: String,
     osVersion: String,
     buildVersion: String,
-    requestID: String
+    requestID: String,
+    nmtid: String? = nil
   ) throws -> URLRequest {
     let encoded = String(decoding: try JSONEncoder().encode(key), as: UTF8.self)
     return try anonymousEAPIRequest(
@@ -153,7 +160,8 @@ extension NeteaseSession {
       body: #""key":\#(encoded),"type":3"#,
       osVersion: osVersion,
       buildVersion: buildVersion,
-      requestID: requestID
+      requestID: requestID,
+      nmtid: nmtid
     )
   }
 
@@ -206,8 +214,9 @@ extension NeteaseSession {
     phone: String,
     countryCode: String = "86"
   ) async throws {
-    let request = try Self.captchaRequest(phone: phone, countryCode: countryCode)
-    let (data, response) = try await urlSession.data(for: request)
+    let (data, response) = try await send(credential: nil) { nmtid in
+      try Self.captchaRequest(phone: phone, countryCode: countryCode)
+    }
     try Self.requireSuccess(
       data: data,
       response: try Self.requireHTTPResponse(response)
@@ -225,12 +234,13 @@ extension NeteaseSession {
     code: String,
     countryCode: String = "86"
   ) async throws -> NeteaseCredential {
-    let request = try Self.cellphoneLoginRequest(
-      phone: phone,
-      code: code,
-      countryCode: countryCode
-    )
-    let (data, response) = try await urlSession.data(for: request)
+    let (data, response) = try await send(credential: nil) { nmtid in
+      try Self.cellphoneLoginRequest(
+        phone: phone,
+        code: code,
+        countryCode: countryCode
+      )
+    }
     return try Self.classifyCellphoneLogin(
       data: data,
       response: try Self.requireHTTPResponse(response)
@@ -302,13 +312,15 @@ extension NeteaseSession {
   /// the server's acknowledgement rather than standing in for it.
   package func signOut(credential: NeteaseCredential) async throws {
     let timestamp = Date().timeIntervalSince1970
-    let request = try Self.logoutRequest(
-      credential: credential,
-      osVersion: Self.osVersion,
-      buildVersion: String(Int(timestamp)),
-      requestID: Self.requestID(timestamp: timestamp)
-    )
-    let (data, response) = try await urlSession.data(for: request)
+    let (data, response) = try await send(credential: credential) { nmtid in
+      try Self.logoutRequest(
+        credential: credential,
+        osVersion: Self.osVersion,
+        buildVersion: String(Int(timestamp)),
+        requestID: Self.requestID(timestamp: timestamp),
+        nmtid: nmtid
+      )
+    }
     try Self.requireSuccess(
       data: data,
       response: try Self.requireHTTPResponse(response)
@@ -325,13 +337,15 @@ extension NeteaseSession {
     credential: NeteaseCredential
   ) async throws -> NeteaseCredential {
     let timestamp = Date().timeIntervalSince1970
-    let request = try Self.refreshRequest(
-      credential: credential,
-      osVersion: Self.osVersion,
-      buildVersion: String(Int(timestamp)),
-      requestID: Self.requestID(timestamp: timestamp)
-    )
-    let (data, response) = try await urlSession.data(for: request)
+    let (data, response) = try await send(credential: credential) { nmtid in
+      try Self.refreshRequest(
+        credential: credential,
+        osVersion: Self.osVersion,
+        buildVersion: String(Int(timestamp)),
+        requestID: Self.requestID(timestamp: timestamp),
+        nmtid: nmtid
+      )
+    }
     let httpResponse = try Self.requireHTTPResponse(response)
     try Self.requireSuccess(data: data, response: httpResponse)
     guard let refreshed = Self.credential(fromSetCookie: httpResponse) else {
@@ -344,7 +358,8 @@ extension NeteaseSession {
     credential: NeteaseCredential,
     osVersion: String,
     buildVersion: String,
-    requestID: String
+    requestID: String,
+    nmtid: String? = nil
   ) throws -> URLRequest {
     try credentialledEAPIRequest(
       path: logoutEndpoint,
@@ -352,7 +367,8 @@ extension NeteaseSession {
       credential: credential,
       osVersion: osVersion,
       buildVersion: buildVersion,
-      requestID: requestID
+      requestID: requestID,
+      nmtid: nmtid
     )
   }
 
@@ -360,7 +376,8 @@ extension NeteaseSession {
     credential: NeteaseCredential,
     osVersion: String,
     buildVersion: String,
-    requestID: String
+    requestID: String,
+    nmtid: String? = nil
   ) throws -> URLRequest {
     try credentialledEAPIRequest(
       path: refreshEndpoint,
@@ -368,7 +385,8 @@ extension NeteaseSession {
       credential: credential,
       osVersion: osVersion,
       buildVersion: buildVersion,
-      requestID: requestID
+      requestID: requestID,
+      nmtid: nmtid
     )
   }
 
@@ -379,12 +397,13 @@ extension NeteaseSession {
     offset: Int = 0,
     credential: NeteaseCredential
   ) async throws -> CatalogPage<Album> {
-    let request = try Self.collectedAlbumsRequest(
-      limit: limit,
-      offset: offset,
-      credential: credential
-    )
-    let (data, response) = try await urlSession.data(for: request)
+    let (data, response) = try await send(credential: credential) { nmtid in
+      try Self.collectedAlbumsRequest(
+        limit: limit,
+        offset: offset,
+        credential: credential
+      )
+    }
     return try Self.classifyCollectedAlbums(
       data: data,
       response: try Self.requireHTTPResponse(response),
@@ -397,12 +416,13 @@ extension NeteaseSession {
     offset: Int = 0,
     credential: NeteaseCredential
   ) async throws -> CatalogPage<Artist> {
-    let request = try Self.followedArtistsRequest(
-      limit: limit,
-      offset: offset,
-      credential: credential
-    )
-    let (data, response) = try await urlSession.data(for: request)
+    let (data, response) = try await send(credential: credential) { nmtid in
+      try Self.followedArtistsRequest(
+        limit: limit,
+        offset: offset,
+        credential: credential
+      )
+    }
     return try Self.classifyFollowedArtists(
       data: data,
       response: try Self.requireHTTPResponse(response),
@@ -415,12 +435,13 @@ extension NeteaseSession {
     albumID: Int64,
     credential: NeteaseCredential
   ) async throws {
-    let request = try Self.albumSubscriptionRequest(
-      collected,
-      albumID: albumID,
-      credential: credential
-    )
-    let (data, response) = try await urlSession.data(for: request)
+    let (data, response) = try await send(credential: credential) { nmtid in
+      try Self.albumSubscriptionRequest(
+        collected,
+        albumID: albumID,
+        credential: credential
+      )
+    }
     try Self.requireSuccess(
       data: data,
       response: try Self.requireHTTPResponse(response)
@@ -432,12 +453,13 @@ extension NeteaseSession {
     artistID: Int64,
     credential: NeteaseCredential
   ) async throws {
-    let request = try Self.artistSubscriptionRequest(
-      followed,
-      artistID: artistID,
-      credential: credential
-    )
-    let (data, response) = try await urlSession.data(for: request)
+    let (data, response) = try await send(credential: credential) { nmtid in
+      try Self.artistSubscriptionRequest(
+        followed,
+        artistID: artistID,
+        credential: credential
+      )
+    }
     try Self.requireSuccess(
       data: data,
       response: try Self.requireHTTPResponse(response)
@@ -549,12 +571,13 @@ extension NeteaseSession {
     offset: Int = 0,
     credential: NeteaseCredential
   ) async throws -> CloudPage {
-    let request = try Self.cloudSongsRequest(
-      limit: limit,
-      offset: offset,
-      credential: credential
-    )
-    let (data, response) = try await urlSession.data(for: request)
+    let (data, response) = try await send(credential: credential) { nmtid in
+      try Self.cloudSongsRequest(
+        limit: limit,
+        offset: offset,
+        credential: credential
+      )
+    }
     return try Self.classifyCloudSongs(
       data: data,
       response: try Self.requireHTTPResponse(response),
@@ -566,8 +589,9 @@ extension NeteaseSession {
     songID: Int64,
     credential: NeteaseCredential
   ) async throws {
-    let request = try Self.cloudDeleteRequest(songID: songID, credential: credential)
-    let (data, response) = try await urlSession.data(for: request)
+    let (data, response) = try await send(credential: credential) { nmtid in
+      try Self.cloudDeleteRequest(songID: songID, credential: credential)
+    }
     try Self.requireSuccess(
       data: data,
       response: try Self.requireHTTPResponse(response)
@@ -611,23 +635,7 @@ extension NeteaseSession {
   ) throws -> CloudPage {
     try requireSuccess(data: data, response: response)
     let payload = try JSONDecoder().decode(CloudPayload.self, from: data)
-    let songs = payload.data.map { item in
-      CloudSong(
-        id: item.songId,
-        // The catalogue match is what plays; when there is none the upload's
-        // own tags are all that exist, so they stand in rather than leaving a
-        // nameless row.
-        track: item.simpleSong?.track
-          ?? Track(
-            id: item.songId,
-            name: item.songName ?? item.fileName ?? "Unknown",
-            artists: item.artist.map { [ArtistRef(id: nil, name: $0)] } ?? [],
-            album: item.album.map { AlbumRef(id: nil, name: $0, artworkURL: nil) }
-          ),
-        fileName: item.fileName ?? "",
-        fileSize: item.fileSize ?? 0
-      )
-    }
+    let songs = payload.data.map(\.song)
     return CloudPage(
       songs: songs,
       more: payload.hasMore ?? (songs.count >= limit),
@@ -655,14 +663,16 @@ extension NeteaseSession {
     credential: NeteaseCredential
   ) async throws {
     let timestamp = Date().timeIntervalSince1970
-    let request = try Self.publishPrivatePlaylistRequest(
-      playlistID: playlistID,
-      credential: credential,
-      osVersion: Self.osVersion,
-      buildVersion: String(Int(timestamp)),
-      requestID: Self.requestID(timestamp: timestamp)
-    )
-    let (data, response) = try await urlSession.data(for: request)
+    let (data, response) = try await send(credential: credential) { nmtid in
+      try Self.publishPrivatePlaylistRequest(
+        playlistID: playlistID,
+        credential: credential,
+        osVersion: Self.osVersion,
+        buildVersion: String(Int(timestamp)),
+        requestID: Self.requestID(timestamp: timestamp),
+        nmtid: nmtid
+      )
+    }
     try Self.requireSuccess(
       data: data,
       response: try Self.requireHTTPResponse(response)
@@ -674,7 +684,8 @@ extension NeteaseSession {
     credential: NeteaseCredential,
     osVersion: String,
     buildVersion: String,
-    requestID: String
+    requestID: String,
+    nmtid: String? = nil
   ) throws -> URLRequest {
     try credentialledEAPIRequest(
       path: playlistPrivacyEndpoint,
@@ -682,7 +693,8 @@ extension NeteaseSession {
       credential: credential,
       osVersion: osVersion,
       buildVersion: buildVersion,
-      requestID: requestID
+      requestID: requestID,
+      nmtid: nmtid
     )
   }
 
@@ -696,9 +708,10 @@ extension NeteaseSession {
     body: String,
     osVersion: String,
     buildVersion: String,
-    requestID: String
+    requestID: String,
+    nmtid: String? = nil
   ) throws -> URLRequest {
-    let fields: [(String, String)] = [
+    var fields: [(String, String)] = [
       ("osver", osVersion),
       ("os", "osx"),
       ("appver", "0.1"),
@@ -706,6 +719,7 @@ extension NeteaseSession {
       ("channel", "github"),
       ("requestId", requestID),
     ]
+    if let nmtid { fields.append(("NMTID", nmtid)) }
     return try eapiFormRequest(
       path: path,
       json: #"{\#(body),"e_r":false,"header":\#(try eapiHeaderJSON(fields))}"#,
@@ -713,19 +727,21 @@ extension NeteaseSession {
     )
   }
 
-  private static func credentialledEAPIRequest(
+  static func credentialledEAPIRequest(
     path: String,
     body: String?,
     credential: NeteaseCredential,
     osVersion: String,
     buildVersion: String,
-    requestID: String
+    requestID: String,
+    nmtid: String? = nil
   ) throws -> URLRequest {
     let fields = eapiHeaderFields(
       credential: credential,
       osVersion: osVersion,
       buildVersion: buildVersion,
-      requestID: requestID
+      requestID: requestID,
+      nmtid: nmtid
     )
     let header = try eapiHeaderJSON(fields)
     let prefix = body.map { $0 + "," } ?? ""
@@ -742,6 +758,11 @@ extension NeteaseSession {
     headerFields: [(String, String)],
     url explicitURL: URL? = nil
   ) throws -> URLRequest {
+    if let nmtid = headerFields.first(where: { $0.0 == "NMTID" })?.1 {
+      guard nmtid.count <= 512, NeteaseCookie.isValidValue(nmtid) else {
+        throw NeteaseTransportError.invalidURL
+      }
+    }
     guard let url = explicitURL ?? eapiURL(path) else {
       throw NeteaseTransportError.invalidURL
     }
@@ -756,8 +777,16 @@ extension NeteaseSession {
       forHTTPHeaderField: "Content-Type"
     )
     request.setValue("MacEasePhase0/0.1 (macOS 15)", forHTTPHeaderField: "User-Agent")
+    let cookieCharacters = CharacterSet(
+      charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.!~*'()")
     request.setValue(
-      headerFields.map { "\($0.0)=\($0.1)" }.joined(separator: "; "),
+      try headerFields.map { name, value in
+        guard let encoded = value.addingPercentEncoding(withAllowedCharacters: cookieCharacters)
+        else {
+          throw NeteaseTransportError.invalidURL
+        }
+        return "\(name)=\(encoded)"
+      }.joined(separator: "; "),
       forHTTPHeaderField: "Cookie"
     )
     return request
@@ -860,7 +889,7 @@ private struct ArtistSublistPayload: Decodable {
   let hasMore: Bool?
 }
 
-private struct CloudPayload: Decodable {
+struct CloudPayload: Decodable {
   let data: [Item]
   let hasMore: Bool?
   /// Reported as a decimal string on this endpoint and as a number on others.
@@ -875,12 +904,47 @@ private struct CloudPayload: Decodable {
     let artist: String?
     let album: String?
     let simpleSong: SongRowPayload?
+
+    enum CodingKeys: String, CodingKey {
+      case songId, fileName, fileSize, songName, artist, album, simpleSong
+    }
+    init(from decoder: any Decoder) throws {
+      let c = try decoder.container(keyedBy: CodingKeys.self)
+      songId = try c.decode(Int64.self, forKey: .songId)
+      guard songId > 0 else { throw NeteaseCatalogError.invalidResponse }
+      fileName = try c.decodeIfPresent(String.self, forKey: .fileName)
+      fileSize = try c.decodeIfPresent(Int64.self, forKey: .fileSize)
+      songName = try c.decodeIfPresent(String.self, forKey: .songName)
+      artist = try c.decodeIfPresent(String.self, forKey: .artist)
+      album = try c.decodeIfPresent(String.self, forKey: .album)
+      // Unmatched uploads may carry an empty catalogue object; the file's own metadata is authoritative.
+      simpleSong = try? c.decodeIfPresent(SongRowPayload.self, forKey: .simpleSong)
+    }
+
+    var song: CloudSong {
+      var track =
+        (simpleSong?.songType == 1 ? nil : simpleSong?.track)
+        ?? Track(
+          id: songId, name: songName ?? fileName ?? "Unknown",
+          artists: artist.map { [ArtistRef(id: nil, name: $0)] } ?? [],
+          album: album.map { AlbumRef(id: nil, name: $0, artworkURL: nil) },
+          durationMilliseconds: simpleSong?.durationMilliseconds
+        )
+      // `simpleSong` may itself be a t=2 cloud row; its s_id, not its id,
+      // names the public match. t=1 explicitly has no public counterpart.
+      let catalogID = track.catalogIdentity
+      track.catalogSongID = SongRowPayload.navigableID(
+        simpleSong?.songType == 0 || catalogID != songId ? catalogID : nil)
+      track.id = songId
+      track.cloudFileID = songId
+      return CloudSong(id: songId, track: track, fileName: fileName ?? "", fileSize: fileSize ?? 0)
+    }
   }
 }
 
 /// An integer NetEase writes either as a JSON number or as a decimal string.
 /// Anything else is not a size, and is read as absent rather than as zero.
-private struct LenientInt64: Decodable {
+struct LenientInt64: Decodable {
   let value: Int64?
 
   init(from decoder: any Decoder) throws {

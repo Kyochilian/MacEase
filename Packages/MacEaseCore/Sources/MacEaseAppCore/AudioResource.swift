@@ -17,6 +17,7 @@ package struct PlaybackResource: Equatable, Sendable {
   package let format: String?
   package let byteCount: Int64?
   package let expiresAt: Date?
+  package let representationID: String?
 
   package init(
     location: Location,
@@ -26,7 +27,8 @@ package struct PlaybackResource: Equatable, Sendable {
     actualQuality: String?,
     format: String?,
     byteCount: Int64?,
-    expiresAt: Date?
+    expiresAt: Date?,
+    representationID: String? = nil
   ) {
     self.location = location
     self.accountID = accountID
@@ -36,6 +38,7 @@ package struct PlaybackResource: Equatable, Sendable {
     self.format = format
     self.byteCount = byteCount
     self.expiresAt = expiresAt
+    self.representationID = representationID
   }
 
   package var remoteURL: URL? {
@@ -61,7 +64,8 @@ package struct PlaybackResource: Equatable, Sendable {
       requestedQuality: requestedQuality,
       actualQuality: actualQuality,
       format: format,
-      byteCount: byteCount
+      byteCount: byteCount,
+      representationID: representationID
     )
   }
 }
@@ -74,6 +78,7 @@ package struct AudioCacheKey: Hashable, Codable, Sendable {
   package let actualQuality: String?
   package let format: String
   package let byteCount: Int64
+  package let representationID: String?
 
   package init(
     accountID: Int64,
@@ -81,7 +86,8 @@ package struct AudioCacheKey: Hashable, Codable, Sendable {
     requestedQuality: PlaybackQuality,
     actualQuality: String?,
     format: String,
-    byteCount: Int64
+    byteCount: Int64,
+    representationID: String? = nil
   ) {
     self.accountID = accountID
     self.songID = songID
@@ -89,6 +95,7 @@ package struct AudioCacheKey: Hashable, Codable, Sendable {
     self.actualQuality = actualQuality
     self.format = format
     self.byteCount = byteCount
+    self.representationID = representationID
   }
 }
 

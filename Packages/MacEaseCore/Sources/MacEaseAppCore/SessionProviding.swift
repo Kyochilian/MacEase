@@ -23,8 +23,14 @@ package enum SessionDivergence: Equatable, Sendable {
 /// write session fields directly: divergence is reported through one call so
 /// the session owner stays the single place that commits a transition.
 @MainActor
-package protocol SessionProviding: AnyObject {
+package protocol SessionProviding: AnyObject, Sendable {
   var account: NeteaseAccount? { get }
+  var isOnline: Bool { get }
+
+  func matchesLocalSession(
+    _ credential: NeteaseCredential,
+    account: NeteaseAccount
+  ) -> Bool
 
   func matchesValidatedSession(
     _ credential: NeteaseCredential,
@@ -38,4 +44,15 @@ package protocol SessionProviding: AnyObject {
     message: String,
     readToken: OperationToken
   ) async -> SessionInvalidationResult
+}
+
+extension SessionProviding {
+  package var isOnline: Bool { true }
+
+  package func matchesLocalSession(
+    _ credential: NeteaseCredential,
+    account: NeteaseAccount
+  ) -> Bool {
+    matchesValidatedSession(credential, account: account)
+  }
 }

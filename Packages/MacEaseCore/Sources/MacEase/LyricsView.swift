@@ -57,21 +57,16 @@ struct LyricsView: View {
           description: Text("Enjoy the music.")
         )
       } else {
-        TimelineView(
-          .animation(
-            minimumInterval: 1.0 / 30.0,
-            paused: playback.phase != .playing || !settings.usesVerbatimLyrics
-              || document.lines.allSatisfy(\.words.isEmpty)
-          )
-        ) { _ in
-          scroller(document, at: playback.presentationPositionSeconds)
-        }
+        // Line selection follows observed ticks and the committed seek target.
+        // AVPlayer's read-through clock can still be at the old position while
+        // an asynchronous seek starts; it is only used for word animation.
+        scroller(document, at: playback.positionSeconds - lyrics.offsetSeconds)
       }
     case .loading:
       ProgressView()
         .controlSize(.small)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-    case .unavailable, .idle:
+    case .unavailable, .idle, .notSaved, .failed:
       Text(lyrics.status)
         .foregroundStyle(.secondary)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -103,6 +98,29 @@ struct LyricsView: View {
         }
       }
       Spacer()
+      Stepper(
+        "Offset \(lyrics.offsetSeconds, specifier: "%+.1f")s",
+        value: Binding(
+          get: { lyrics.offsetSeconds }, set: { lyrics.setOffset($0, session: session) }),
+        in: -30...30, step: 0.1
+      )
+      .fixedSize()
+      .help("Positive values show lyrics later")
+      Button("Reload", systemImage: "arrow.clockwise") {
+        lyrics.reload(track: playback.currentTrack, session: session)
+      }
+      .disabled(playback.currentTrack == nil || !session.isOnline)
+      Button("Save Lyrics") {
+        guard let track = playback.currentTrack else { return }
+        Task {
+          if let message = await lyrics.saveForOffline(track: track, session: session) {
+            lyrics.status = message
+          } else {
+            lyrics.status = "Lyrics saved for offline listening"
+          }
+        }
+      }
+      .disabled(playback.currentTrack == nil)
       Toggle("Translation", isOn: $settings.showsLyricTranslation)
         .toggleStyle(.switch)
         .controlSize(.small)
@@ -117,7 +135,7 @@ struct LyricsView: View {
       ScrollView {
         LazyVStack(alignment: .leading, spacing: 10) {
           ForEach(Array(document.lines.enumerated()), id: \.offset) { index, entry in
-            row(entry, isCurrent: index == current, at: position)
+            row(entry, isCurrent: index == current)
               .id(index)
           }
         }
@@ -125,7 +143,7 @@ struct LyricsView: View {
         .padding(.vertical, 20)
         .frame(maxWidth: .infinity, alignment: .leading)
       }
-      .onChange(of: current) {
+      .onChange(of: current, initial: true) {
         guard let current else { return }
         withAnimation(.easeInOut(duration: 0.25)) {
           proxy.scrollTo(current, anchor: .center)
@@ -136,8 +154,7 @@ struct LyricsView: View {
 
   @ViewBuilder private func row(
     _ entry: LyricLine,
-    isCurrent: Bool,
-    at position: Double
+    isCurrent: Bool
   ) -> some View {
     let text: String = entry.text.isEmpty ? " " : entry.text
     VStack(alignment: .leading, spacing: 3) {
@@ -147,8 +164,12 @@ struct LyricsView: View {
           .foregroundStyle(.secondary)
       }
       if isCurrent, settings.usesVerbatimLyrics, !entry.words.isEmpty {
-        verbatimText(entry, at: position)
-          .font(.title3.weight(.semibold))
+        TimelineView(
+          .animation(minimumInterval: 1.0 / 30.0, paused: playback.phase != .playing)
+        ) { _ in
+          verbatimText(entry, at: playback.presentationPositionSeconds - lyrics.offsetSeconds)
+            .font(.title3.weight(.semibold))
+        }
       } else {
         Text(text)
           .font(isCurrent ? .title3.weight(.semibold) : .body)
@@ -164,7 +185,7 @@ struct LyricsView: View {
     .onTapGesture {
       // Seeking is local and issues no request, so a tapped line is the
       // cheapest way to move within a track.
-      playback.seek(to: entry.timeSeconds)
+      playback.seek(to: max(0, entry.timeSeconds + lyrics.offsetSeconds))
     }
   }
 
@@ -174,13 +195,14 @@ struct LyricsView: View {
     let current = entry.wordIndex(at: seconds)
     return entry.words.enumerated().reduce(Text(verbatim: "")) { text, pair in
       let (index, word) = pair
-      let color: Color = if index == current {
-        .accentColor
-      } else if seconds >= word.endSeconds {
-        .primary
-      } else {
-        .secondary
-      }
+      let color: Color =
+        if index == current {
+          .accentColor
+        } else if seconds >= word.endSeconds {
+          .primary
+        } else {
+          .secondary
+        }
       return text + Text(verbatim: word.text).foregroundColor(color)
     }
   }

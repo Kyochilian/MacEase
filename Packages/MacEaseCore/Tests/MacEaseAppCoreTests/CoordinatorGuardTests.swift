@@ -127,7 +127,7 @@ private func makeLibrary(
   library.load(reset: true, session: session)
   await library.settleForTesting()
 
-  #expect(await transport.callCount() == 1)
+  #expect(await transport.callCount() == 2) // playlists and likes are independent; neither retries
   #expect(library.status == "Playlist could not reach NetEase (transport)")
   #expect(library.playlists.isEmpty)
 }
@@ -219,7 +219,7 @@ private func makeLibrary(
 
 // MARK: - Discovery
 
-@Test @MainActor func discoveryPrefetchRunsOnceAndStopsAtTheFirstError() async {
+@Test @MainActor func discoveryPrefetchRunsOnceAndKeepsIndependentSectionsAfterAnError() async {
   let credential = makeCredential()
   let transport = FakeTransport()
   let vault = FakeVault(stored: credential)
@@ -236,20 +236,16 @@ private func makeLibrary(
   discovery.prefetch(session: session)
   await discovery.settleForTesting()
 
-  #expect(await transport.recordedCalls() == [.dailyRecommendedSongs])
+  #expect(await transport.callCount() == 4)
 
   discovery.prefetch(session: session)
   await discovery.settleForTesting()
 
-  #expect(await transport.callCount() == 1)
+  #expect(await transport.callCount() == 4)
 }
 
-/// The prefetch budget is scoped to the app run, not to the identity. Signing
-/// in as someone else clears what the previous identity was allowed to see,
-/// but it does not buy another four implicit requests: the sections load on an
-/// explicit action from then on. Reported by the 2026-08-27 review, which
-/// found this test asserting the opposite.
-@Test @MainActor func discoveryResetDoesNotRestoreTheLaunchPrefetchBudget() async {
+/// A new account receives its own initial content.
+@Test @MainActor func discoveryResetLoadsTheNewAccountsHome() async {
   let credentialA = makeCredential()
   let credentialB = makeCredential("replacement")
   let transport = FakeTransport()
@@ -274,8 +270,8 @@ private func makeLibrary(
   discovery.prefetch(session: session)
   await discovery.settleForTesting()
 
-  // Still one request in total: the second prefetch sent nothing.
-  #expect(await transport.recordedCalls() == [.dailyRecommendedSongs])
+  // Both accounts load their independent homepage sections.
+  #expect(await transport.callCount() == 8)
   #expect(discovery.dailySongs.isEmpty)
 }
 
