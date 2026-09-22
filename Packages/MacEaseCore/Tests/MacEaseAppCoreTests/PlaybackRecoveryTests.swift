@@ -194,6 +194,45 @@ private struct PlaybackRig {
   #expect(arbiter.end(blocker, outcome: .applied) == .applied)
 }
 
+@Test @MainActor func nextWhileResolvingHandsTheSlotToTheReplacementUnderReadPressure()
+  async throws
+{
+  let arbiter = OperationArbiter(maximumConcurrentReads: 1)
+  let rig = PlaybackRig(arbiter: arbiter)
+  let gate = RequestGate()
+  await gate.close()
+  await rig.transport.setGate(gate, for: .resolveSongURL(101, .standard))
+  await rig.transport.setSongURL(.success(makeResolvedAsset(songID: 101)))
+  rig.playback.play(
+    tracks: makeTracks([101, 102]), startIndex: 0, context: .dailyRecommendations,
+    session: rig.session)
+  while await gate.arrivalCount() < 1 { await Task.yield() }
+  #expect(rig.playback.phase == .resolving)
+  // Two reads queue behind the ceiling that the resolve alone fills. Giving the
+  // slot back before claiming again would admit one of them and refuse Next.
+  let queued = (0..<2).map { index in
+    Task { await arbiter.beginWhenAvailable(name: "Discover \(index)", effect: .read) }
+  }
+  for _ in 0..<10 { await Task.yield() }
+
+  #expect(rig.playback.canPlayNext(session: rig.session))
+  #expect(rig.playback.playNext(session: rig.session))
+  #expect(rig.playback.phase == .resolving)
+  #expect(rig.playback.currentTrack?.id == 102)
+  #expect(rig.playback.playTask != nil)
+  #expect(arbiter.activeReadCount == 1)
+
+  await rig.transport.setSongURL(.success(makeResolvedAsset(songID: 102)))
+  await gate.open()
+  await rig.playback.settleForTesting()
+  #expect(rig.playback.phase == .playing)
+  #expect(rig.playback.currentTrack?.id == 102)
+  for task in queued {
+    if let token = await task.value { arbiter.end(token, outcome: .applied) }
+  }
+  #expect(arbiter.activeReadCount == 0)
+}
+
 // MARK: - Recoverable failures keep the entry point
 
 @Test @MainActor func aResolveThatFailedKeepsPlayAgain() async {

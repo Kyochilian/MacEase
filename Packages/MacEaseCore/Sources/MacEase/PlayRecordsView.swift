@@ -35,7 +35,7 @@ struct PlayRecordsView: View {
         }
         Spacer()
         Button("Refresh", systemImage: "arrow.clockwise") { reload() }
-          .disabled(!session.isOnline || discovery.isLoading || mode == .local)
+          .disabled(!session.isOnline || isReloading || mode == .local)
       }.padding(12)
       Divider()
       switch mode {
@@ -90,13 +90,21 @@ struct PlayRecordsView: View {
       }
       Divider()
       HStack {
-        if discovery.isLoading { ProgressView().controlSize(.small) }
+        if isReloading { ProgressView().controlSize(.small) }
         Text(discovery.historyDiagnostic ?? discovery.status).font(.caption).foregroundStyle(
           .secondary)
         Spacer()
       }.padding(12)
     }
     .task(id: "\(session.account?.userID ?? 0)-\(mode.rawValue)") { reload() }
+    .onChange(of: discovery.recordScope) {
+      if mode == .rankings { discovery.loadRecords(session: session) }
+    }
+  }
+
+  /// Discover sections may be loading at the same time; only this tab's reads count.
+  private var isReloading: Bool {
+    discovery.isLoading("Recent music") || discovery.isLoading("Listening rankings")
   }
 
   private var recentSongs: [Track] {
@@ -110,13 +118,11 @@ struct PlayRecordsView: View {
   }
   private func reload() {
     switch mode {
-    case .local: discovery.cancelLoading()
+    case .local: break
     case .songs: discovery.loadRecentMusic(kind: .songs, session: session)
     case .albums: discovery.loadRecentMusic(kind: .albums, session: session)
     case .playlists: discovery.loadRecentMusic(kind: .playlists, session: session)
-    case .rankings:
-      discovery.cancelLoading()
-      discovery.loadRecords(session: session)
+    case .rankings: discovery.loadRecords(session: session)
     }
   }
 }

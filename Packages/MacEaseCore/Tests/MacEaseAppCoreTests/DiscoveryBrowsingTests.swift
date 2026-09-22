@@ -386,3 +386,41 @@ private struct BrowseRig {
   await rig.settle()
   #expect(rig.discovery.categoryPlaylists.map(\.id) == [1, 2])
 }
+
+// MARK: - Listening rankings
+
+/// Changing the scope while the rankings are still loading supersedes that
+/// read; it is neither ignored nor allowed to cancel the unrelated Discover
+/// sections that may be loading at the same time.
+@Test @MainActor func aRankingsScopeChangeSupersedesOnlyItsOwnRead() async {
+  let rig = BrowseRig()
+  let rankings = RequestGate()
+  let daily = RequestGate()
+  await rankings.close()
+  await daily.close()
+  await rig.transport.setGate(rankings, for: .playRecords(.allTime))
+  await rig.transport.setGate(daily, for: .dailyRecommendedSongs)
+  await rig.transport.setRecords(
+    .success([PlayRecordEntry(track: makeTracks([7])[0], playCount: 3)]))
+  rig.discovery.loadDailySongs(session: rig.session)
+  rig.discovery.loadRecords(session: rig.session)
+  while await rankings.arrivalCount() < 1 { await Task.yield() }
+  while await daily.arrivalCount() < 1 { await Task.yield() }
+  #expect(rig.discovery.isLoading("Listening rankings"))
+  #expect(rig.discovery.isLoading("Daily songs"))
+
+  rig.discovery.recordScope = .lastWeek
+  rig.discovery.loadRecords(session: rig.session)
+  await rankings.open()
+  await daily.open()
+  await rig.settle()
+
+  #expect(rig.discovery.records.map(\.playCount) == [3])
+  #expect(
+    await rig.transport.recordedCalls().filter {
+      if case .playRecords = $0 { true } else { false }
+    } == [.playRecords(.allTime), .playRecords(.lastWeek)])
+  #expect(rig.discovery.sectionStatuses["Daily songs"] == "Loaded 0 daily recommended songs")
+  #expect(rig.discovery.sectionStatuses["Listening rankings"] == "Loaded 1 ranking entries")
+  #expect(rig.arbiter.activeReadCount == 0)
+}

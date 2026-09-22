@@ -780,9 +780,9 @@ package final class PlaybackController {
     ) == true {
       return true
     }
-    // Superseding this controller's own resolution releases one read slot
-    // synchronously before the replacement claims it.
-    if operationToken != nil { return arbiter.active == nil }
+    // Superseding this controller's own resolution transfers its read slot to
+    // the replacement, so the ceiling cannot refuse it.
+    if operationToken != nil { return true }
     return arbiter.canBegin(effect: .playbackResolution)
   }
 
@@ -1068,9 +1068,10 @@ package final class PlaybackController {
       return .local(local)
     }
 
-    // Superseding this controller's own unresolved read first gives back its
-    // slot. There is no suspension between release and the new claim, so this
-    // cannot turn `canStart()` into a false promise about the read ceiling.
+    // Superseding this controller's own unresolved read hands its slot straight
+    // to the replacement. Releasing it first would let a queued read take the
+    // slot synchronously, and the replacement would then be refused while the
+    // cancelled resolve left the phase stuck at `.resolving`.
     if let operationToken {
       // A feedback write may occupy the exclusive slot while this read is in
       // flight. Releasing our read first would cancel the only task that can
@@ -1083,6 +1084,10 @@ package final class PlaybackController {
       }
       playTask?.cancel()
       playTask = nil
+      if reservedResolution == nil, let transferred = arbiter.transferRead(operationToken) {
+        self.operationToken = nil
+        return .remote(transferred)
+      }
       releaseResolution(operationToken, outcome: .cancelled)
     }
     guard let operation = reservedResolution ?? claimResolution() else {

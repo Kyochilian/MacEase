@@ -315,6 +315,7 @@ package final class DiscoveryCoordinator: SessionGuardedCoordinator {
   }
 
   package func loadRecords(session: any SessionProviding) {
+    cancelLoad("Listening rankings")
     let scope = recordScope
     load(
       loadingStatus: "Loading listening rankings (1 request)",

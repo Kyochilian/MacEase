@@ -240,7 +240,16 @@ package final class DownloadCoordinator: SessionGuardedCoordinator {
       while self.batchID == id, self.accountID == accountID, !Task.isCancelled,
         !self.pendingDownloads.isEmpty
       {
+        // A deletion or damaged-file cleanup may have started between two
+        // jobs; `beginDownload` refuses silently while one runs, which would
+        // drop the job from both queues.
+        await self.maintenanceTask?.value
+        await self.loadTask?.value
+        guard self.batchID == id, self.accountID == accountID, !Task.isCancelled,
+          !self.pendingDownloads.isEmpty
+        else { return }
         var job = self.pendingDownloads.removeFirst()
+        self.lastFailure = nil
         self.beginDownload(track: job.track, quality: job.id.requestedQuality, session: session)
         await self.downloadTask?.value
         guard self.batchID == id, self.accountID == accountID, !Task.isCancelled else { return }
